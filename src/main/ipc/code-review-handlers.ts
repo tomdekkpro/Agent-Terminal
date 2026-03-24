@@ -11,7 +11,7 @@ import { agentRegistry } from './providers/agent-registry';
 
 const clickUpProvider = new ClickUpProvider();
 
-const GH_TIMEOUT = 30000;
+const GH_TIMEOUT = 120000;
 
 // ─── Scheduler state ──────────────────────────────────────────
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -63,85 +63,102 @@ function sendReviewEvent(getWindow: () => BrowserWindow | null, event: CodeRevie
   }
 }
 
-/** Extract PR number from any text */
-function extractPRNumberFromText(text: string): number | null {
-  // Match GitHub PR URL: github.com/owner/repo/pull/123
-  const urlMatch = text.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
-  if (urlMatch) return parseInt(urlMatch[1], 10);
-  // Match PR #123 or PR: #123 pattern
-  const hashMatch = text.match(/PR[:\s]*#(\d+)/i);
-  if (hashMatch) return parseInt(hashMatch[1], 10);
-  return null;
+type PRInfo = { prNumber: number; prUrl: string | null };
+
+/** Extract all PR numbers from any text */
+function extractAllPRsFromText(text: string): PRInfo[] {
+  const prs: PRInfo[] = [];
+  const seen = new Set<number>();
+
+  // Match GitHub PR URLs: github.com/owner/repo/pull/123
+  const urlRegex = /https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = urlRegex.exec(text)) !== null) {
+    const prNumber = parseInt(match[1], 10);
+    if (!seen.has(prNumber)) {
+      seen.add(prNumber);
+      prs.push({ prNumber, prUrl: match[0] });
+    }
+  }
+
+  // Match PR #123 or PR: #123 patterns (only if not already found via URL)
+  const hashRegex = /PR[:\s]*#(\d+)/gi;
+  while ((match = hashRegex.exec(text)) !== null) {
+    const prNumber = parseInt(match[1], 10);
+    if (!seen.has(prNumber)) {
+      seen.add(prNumber);
+      prs.push({ prNumber, prUrl: null });
+    }
+  }
+
+  return prs;
 }
 
-/** Extract PR URL from any text */
-function extractPRUrlFromText(text: string): string | null {
-  const match = text.match(/(https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+)/);
-  return match ? match[1] : null;
-}
-
-/** Extract PR info from task name + description */
-function extractPRFromTask(task: { description?: string; name?: string }): { prNumber: number | null; prUrl: string | null } {
+/** Extract all PRs from task name + description */
+function extractPRsFromTask(task: { description?: string; name?: string }): PRInfo[] {
   const text = `${task.name || ''} ${task.description || ''}`;
-  return {
-    prNumber: extractPRNumberFromText(text),
-    prUrl: extractPRUrlFromText(text),
-  };
+  return extractAllPRsFromText(text);
 }
 
-/** Search task comments for PR URLs (developers often post PR links in comments) */
-async function extractPRFromComments(taskId: string): Promise<{ prNumber: number | null; prUrl: string | null }> {
+/** Search task comments for all PR URLs */
+async function extractPRsFromComments(taskId: string): Promise<PRInfo[]> {
   try {
     const settings = getSettings();
     const result = await clickUpProvider.getComments(settings, taskId);
-    if (!result.success || !result.data) return { prNumber: null, prUrl: null };
+    if (!result.success || !result.data) return [];
 
-    // Search comments newest-first for a GitHub PR URL
-    const comments = result.data.reverse();
-    for (const comment of comments) {
-      const text = comment.comment_text || '';
-      const prUrl = extractPRUrlFromText(text);
-      const prNumber = extractPRNumberFromText(text);
-      if (prNumber) {
-        debugLog(`[CodeReview] Found PR #${prNumber} in comment for task ${taskId}`);
-        return { prNumber, prUrl };
-      }
+    const allText = result.data
+      .reverse()
+      .map((c: any) => c.comment_text || '')
+      .join('\n');
+    const prs = extractAllPRsFromText(allText);
+    if (prs.length > 0) {
+      debugLog(`[CodeReview] Found ${prs.length} PR(s) in comments for task ${taskId}: ${prs.map((p) => `#${p.prNumber}`).join(', ')}`);
     }
+    return prs;
   } catch (err) {
     debugError('[CodeReview] Failed to search comments for PR:', err);
   }
-  return { prNumber: null, prUrl: null };
+  return [];
 }
 
-/** Try all methods to find PR: task fields first, then comments, then branch matching */
-async function findPRForTask(task: { id: string; customId?: string; description?: string; name?: string }, projectPath?: string): Promise<{ prNumber: number | null; prUrl: string | null }> {
+/** Try all methods to find PRs: task fields first, then comments, then branch matching */
+async function findPRsForTask(task: { id: string; customId?: string; description?: string; name?: string }, projectPath?: string): Promise<PRInfo[]> {
+  const seen = new Set<number>();
+  const results: PRInfo[] = [];
+
+  function addPRs(prs: PRInfo[]) {
+    for (const pr of prs) {
+      if (!seen.has(pr.prNumber)) {
+        seen.add(pr.prNumber);
+        results.push(pr);
+      }
+    }
+  }
+
   // 1. Check task name + description
-  const fromTask = extractPRFromTask(task);
-  if (fromTask.prNumber) return fromTask;
+  addPRs(extractPRsFromTask(task));
 
   // 2. Check task comments
-  const fromComments = await extractPRFromComments(task.id);
-  if (fromComments.prNumber) return fromComments;
+  addPRs(await extractPRsFromComments(task.id));
 
   // 3. Try gh CLI search — match task custom ID in PR title or branch name
   if (projectPath && task.customId) {
     try {
-      // First: targeted search by custom ID in PR title (most reliable)
       try {
         const searchResult = await ghExec(
           `gh pr list --search "${task.customId}" --state open --json number,url,headRefName,title --limit 10`,
           projectPath,
         );
         const searchPrs = JSON.parse(searchResult);
-        if (searchPrs.length > 0) {
-          // Pick the first match that contains the task ID in title or branch
-          const taskIdLower = task.customId.toLowerCase();
-          const match = searchPrs.find((pr: any) =>
+        const taskIdLower = task.customId.toLowerCase();
+        for (const pr of searchPrs) {
+          if (
             (pr.title || '').toLowerCase().includes(taskIdLower) ||
-            (pr.headRefName || '').toLowerCase().includes(taskIdLower),
-          ) || searchPrs[0]; // fallback to first search result
-          debugLog(`[CodeReview] Found PR #${match.number} via gh search for task ${task.customId}`);
-          return { prNumber: match.number, prUrl: match.url };
+            (pr.headRefName || '').toLowerCase().includes(taskIdLower)
+          ) {
+            addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
+          }
         }
       } catch {
         // search flag might fail, fall through to full list scan
@@ -162,8 +179,7 @@ async function findPRForTask(task: { id: string; customId?: string; description?
           branch.includes(taskIdLower) || branch.includes(sanitizedId) ||
           title.includes(taskIdLower) || title.includes(sanitizedId)
         ) {
-          debugLog(`[CodeReview] Found PR #${pr.number} via branch/title match for task ${task.customId}`);
-          return { prNumber: pr.number, prUrl: pr.url };
+          addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
         }
       }
     } catch {
@@ -183,8 +199,7 @@ async function findPRForTask(task: { id: string; customId?: string; description?
       for (const pr of prs) {
         const branch = (pr.headRefName || '').toLowerCase();
         if (branch.includes(taskIdLower)) {
-          debugLog(`[CodeReview] Found PR #${pr.number} via internal ID match for task ${task.id}`);
-          return { prNumber: pr.number, prUrl: pr.url };
+          addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
         }
       }
     } catch {
@@ -192,7 +207,10 @@ async function findPRForTask(task: { id: string; customId?: string; description?
     }
   }
 
-  return { prNumber: null, prUrl: null };
+  if (results.length > 0) {
+    debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}: ${results.map((p) => `#${p.prNumber}`).join(', ')}`);
+  }
+  return results;
 }
 
 /** Fetch PR info using gh CLI */
@@ -461,8 +479,8 @@ If no issues found:
       if (settled) return;
       settled = true;
       child.kill('SIGTERM');
-      reject(new Error('Code review timed out after 5 minutes'));
-    }, 5 * 60_000);
+      reject(new Error('Code review timed out after 10 minutes'));
+    }, 10 * 60_000);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -596,12 +614,11 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
         continue;
       }
 
-      // Find PR for this task
-      const pr = await findPRForTask(task, projectPath);
-      const prNumber = pr.prNumber;
+      // Find all PRs for this task
+      const prs = await findPRsForTask(task, projectPath);
 
       // No PR found — ask for it via comment
-      if (!prNumber) {
+      if (prs.length === 0) {
         debugLog(`[CodeReview] Scheduler: task ${task.id} has no PR — posting comment`);
         await clickUpProvider.postComment(
           settings,
@@ -611,93 +628,106 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
         continue;
       }
 
-      try {
-        sendReviewEvent(getWindow, { type: 'progress', taskId: task.id, message: `Checking PR #${prNumber}...` });
+      // Review each PR for this task
+      let allPassed = true;
+      let anyFailed = false;
+      const allFindings: CodeReviewFinding[] = [];
 
-        // Fetch PR info — check if it's still open
-        const prInfo = await fetchPRInfo(projectPath, prNumber);
-        if (prInfo.state !== 'OPEN') {
-          debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — PR #${prNumber} is ${prInfo.state}`);
+      for (const pr of prs) {
+        if (stopAllRequested) break;
+        const prNumber = pr.prNumber;
+        const eventTaskId = prs.length > 1 ? `${task.id}__pr${prNumber}` : task.id;
+
+        try {
+          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Checking PR #${prNumber}...` });
+
+          // Fetch PR info — check if it's still open
+          const prInfo = await fetchPRInfo(projectPath, prNumber);
+          if (prInfo.state !== 'OPEN') {
+            debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — PR #${prNumber} is ${prInfo.state}`);
+            sendReviewEvent(getWindow, {
+              type: 'done',
+              taskId: eventTaskId,
+              status: 'skipped',
+              message: `PR #${prNumber} is ${prInfo.state.toLowerCase()}, skipped.`,
+            });
+            continue;
+          }
+
+          // Fail immediately if PR has merge conflicts
+          if (prInfo.mergeable === 'CONFLICTING') {
+            debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
+            const conflictFinding: CodeReviewFinding = {
+              severity: 'critical',
+              file: 'PR',
+              description: `PR #${prNumber}: This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.`,
+            };
+            allFindings.push(conflictFinding);
+            anyFailed = true;
+            allPassed = false;
+            await clickUpProvider.postComment(settings, task.id, `## ❌ Code Review Failed — Merge Conflict\n\n**PR:** #${prNumber} — ${prInfo.title}\n\n🔴 **Critical**: This PR has merge conflicts and cannot be merged. Please resolve the conflicts and request a new review.\n\n---\n_Automated review by Agent Terminal_`);
+            sendReviewEvent(getWindow, { type: 'done', taskId: eventTaskId, status: 'failed', findings: [conflictFinding] });
+            continue;
+          }
+
+          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber} (${prInfo.files.length} files, ${prInfo.additions}+ / ${prInfo.deletions}-)...` });
+
+          // Fetch task context for informed review
+          const taskCtx = await fetchTaskContext(task.id);
+
+          // Run AI review with task context
+          const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
+            taskName: task.name,
+            description: taskCtx.description,
+            comments: taskCtx.comments,
+          }, eventTaskId);
+          const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
+
+          if (result.passed) {
+            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+            debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} PASSED`);
+          } else {
+            allPassed = false;
+            anyFailed = true;
+            allFindings.push(...result.findings);
+            await clickUpProvider.postComment(settings, task.id, comment);
+            // Post comment on GitHub PR
+            try {
+              const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
+              await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
+            } catch {
+              // Non-critical
+            }
+            debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} FAILED with ${result.findings.length} findings`);
+          }
+
           sendReviewEvent(getWindow, {
             type: 'done',
-            taskId: task.id,
-            status: 'skipped',
-            message: `PR #${prNumber} is ${prInfo.state.toLowerCase()}, skipped.`,
+            taskId: eventTaskId,
+            status: result.passed ? 'passed' : 'failed',
+            findings: result.findings,
           });
-          continue;
+        } catch (err) {
+          allPassed = false;
+          debugError(`[CodeReview] Scheduler: error reviewing task ${task.id} PR #${prNumber}:`, err);
+          sendReviewEvent(getWindow, {
+            type: 'error',
+            taskId: eventTaskId,
+            message: err instanceof Error ? err.message : 'Auto-review failed',
+          });
         }
+      }
 
-        // Fail immediately if PR has merge conflicts
-        if (prInfo.mergeable === 'CONFLICTING') {
-          debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
-          const conflictFinding: CodeReviewFinding = {
-            severity: 'critical',
-            file: 'PR',
-            description: 'This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.',
-          };
-          // Post conflict comment on ClickUp
-          await clickUpProvider.postComment(settings, task.id, `## ❌ Code Review Failed — Merge Conflict\n\n**PR:** #${prNumber} — ${prInfo.title}\n\n🔴 **Critical**: This PR has merge conflicts and cannot be merged. Please resolve the conflicts and request a new review.\n\n---\n_Automated review by Agent Terminal_`);
-          // Change task status to "review failed"
-          try {
-            await clickUpProvider.updateStatus(settings, task.id, 'review failed');
-          } catch (statusErr) {
-            debugError('[CodeReview] Failed to update task status:', statusErr);
-          }
-          sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'failed', findings: [conflictFinding] });
-          continue;
+      // Update task status based on combined results of all PRs
+      if (allPassed && prs.length > 0) {
+        await clickUpProvider.addTag(settings, task.id, tagName);
+      } else if (anyFailed) {
+        try {
+          await clickUpProvider.updateStatus(settings, task.id, 'review failed');
+          debugLog(`[CodeReview] Scheduler: task ${task.id} status changed to "review failed"`);
+        } catch (statusErr) {
+          debugError('[CodeReview] Failed to update task status:', statusErr);
         }
-
-        sendReviewEvent(getWindow, { type: 'progress', taskId: task.id, message: `Reviewing PR #${prNumber} (${prInfo.files.length} files, ${prInfo.additions}+ / ${prInfo.deletions}-)...` });
-
-        // Fetch task context for informed review
-        const taskCtx = await fetchTaskContext(task.id);
-
-        // Run AI review with task context
-        const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
-          taskName: task.name,
-          description: taskCtx.description,
-          comments: taskCtx.comments,
-        }, task.id);
-        const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
-
-        if (result.passed) {
-          // Add tag + post pass comment
-          await clickUpProvider.addTag(settings, task.id, tagName);
-          await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
-          debugLog(`[CodeReview] Scheduler: task ${task.id} PASSED`);
-        } else {
-          // Post comment on ClickUp
-          await clickUpProvider.postComment(settings, task.id, comment);
-          // Change task status to "review failed"
-          try {
-            await clickUpProvider.updateStatus(settings, task.id, 'review failed');
-            debugLog(`[CodeReview] Scheduler: task ${task.id} status changed to "review failed"`);
-          } catch (statusErr) {
-            debugError('[CodeReview] Failed to update task status:', statusErr);
-          }
-          // Post comment on GitHub PR
-          try {
-            const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
-            await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
-          } catch {
-            // Non-critical
-          }
-          debugLog(`[CodeReview] Scheduler: task ${task.id} FAILED with ${result.findings.length} findings`);
-        }
-
-        sendReviewEvent(getWindow, {
-          type: 'done',
-          taskId: task.id,
-          status: result.passed ? 'passed' : 'failed',
-          findings: result.findings,
-        });
-      } catch (err) {
-        debugError(`[CodeReview] Scheduler: error reviewing task ${task.id}:`, err);
-        sendReviewEvent(getWindow, {
-          type: 'error',
-          taskId: task.id,
-          message: err instanceof Error ? err.message : 'Auto-review failed',
-        });
       }
     }
 
@@ -784,20 +814,35 @@ export function registerCodeReviewHandlers(
         });
 
         // Resolve PR info for each task (checks description, comments, and branch matching)
+        // Tasks with multiple PRs are expanded into separate items
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
         const items: CodeReviewItem[] = [];
         for (const task of filteredTasks) {
-          const pr = await findPRForTask(task, effectiveProjectPath);
-          items.push({
-            taskId: task.id,
-            taskName: task.name,
-            taskUrl: task.url,
-            customId: task.customId,
-            prNumber: pr.prNumber ?? undefined,
-            prUrl: pr.prUrl ?? undefined,
-            status: 'pending' as const,
-            findings: [],
-          });
+          const prs = await findPRsForTask(task, effectiveProjectPath);
+          if (prs.length === 0) {
+            // No PRs found — still show the task so user can see it needs a PR
+            items.push({
+              taskId: task.id,
+              taskName: task.name,
+              taskUrl: task.url,
+              customId: task.customId,
+              status: 'pending' as const,
+              findings: [],
+            });
+          } else {
+            for (const pr of prs) {
+              items.push({
+                taskId: prs.length > 1 ? `${task.id}__pr${pr.prNumber}` : task.id,
+                taskName: prs.length > 1 ? `${task.name} (PR #${pr.prNumber})` : task.name,
+                taskUrl: task.url,
+                customId: task.customId,
+                prNumber: pr.prNumber,
+                prUrl: pr.prUrl ?? undefined,
+                status: 'pending' as const,
+                findings: [],
+              });
+            }
+          }
         }
 
         return { success: true, data: items };
