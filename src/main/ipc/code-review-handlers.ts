@@ -12,6 +12,7 @@ import { agentRegistry } from './providers/agent-registry';
 const clickUpProvider = new ClickUpProvider();
 
 const GH_TIMEOUT = 120000;
+const MAX_DIFF = 50000; // cap diff size — we truncate to this anyway before sending to Claude
 
 // ─── Scheduler state ──────────────────────────────────────────
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -52,6 +53,58 @@ function ghExec(command: string, cwd: string): Promise<string> {
       } else {
         resolve(stdout.trim());
       }
+    });
+  });
+}
+
+/**
+ * Stream `gh pr diff` and stop reading after MAX_DIFF bytes.
+ * Avoids the maxBuffer exceeded error from exec() on large PRs.
+ */
+function streamGhDiff(prNumber: number, cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('gh', ['pr', 'diff', String(prNumber)], {
+      cwd,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let output = '';
+    let truncated = false;
+    let stderr = '';
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (truncated) return;
+      output += chunk.toString();
+      if (output.length >= MAX_DIFF) {
+        truncated = true;
+        output = output.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]';
+        child.kill('SIGTERM');
+      }
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`gh pr diff timed out after ${GH_TIMEOUT / 1000}s`));
+    }, GH_TIMEOUT);
+
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      // code may be non-zero when we killed it after truncation — that's fine
+      if (truncated || code === 0) {
+        resolve(output);
+      } else {
+        reject(new Error(`gh pr diff exited with code ${code}: ${stderr.trim()}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
     });
   });
 }
@@ -249,10 +302,10 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
   const state = (info.state || '').toUpperCase();
   const mergeable = (info.mergeable || '').toUpperCase();
 
-  // Only fetch diff for open PRs
+  // Only fetch diff for open PRs — stream and cap at MAX_DIFF to avoid maxBuffer blow-up
   let diff = '';
   if (state === 'OPEN') {
-    diff = await ghExec(`gh pr diff ${prNumber}`, projectPath);
+    diff = await streamGhDiff(prNumber, projectPath);
   }
 
   return {
@@ -360,9 +413,9 @@ async function runAIReview(
     throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
   }
 
-  const maxDiff = 50000;
-  const truncatedDiff = diff.length > maxDiff
-    ? diff.substring(0, maxDiff) + '\n\n[... diff truncated for review ...]'
+  // Diff is already capped by streamGhDiff, but guard in case called with raw diff
+  const truncatedDiff = diff.length > MAX_DIFF
+    ? diff.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]'
     : diff;
 
   // Build task context section
@@ -491,12 +544,20 @@ If no issues found:
     let stderr = '';
     let settled = false;
 
+    // Dynamic timeout: 3 min base + 1 min per 5KB of diff, capped at 20 min
+    const baseMs = 3 * 60_000;
+    const perChunkMs = 1 * 60_000;
+    const chunkSize = 5000;
+    const maxMs = 20 * 60_000;
+    const dynamicMs = Math.min(baseMs + Math.ceil(truncatedDiff.length / chunkSize) * perChunkMs, maxMs);
+    const timeoutMinutes = Math.round(dynamicMs / 60_000);
+
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill('SIGTERM');
-      reject(new Error('Code review timed out after 10 minutes'));
-    }, 10 * 60_000);
+      reject(new Error(`Code review timed out after ${timeoutMinutes} minutes`));
+    }, dynamicMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
