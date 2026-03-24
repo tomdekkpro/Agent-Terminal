@@ -779,7 +779,7 @@ function PreviewSplitLayout({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [splitPercent, setSplitPercent] = useState(50);
-  const isDraggingRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   // Track auto-reload trigger — increments when agent finishes
   const [reloadTrigger, setReloadTrigger] = useState(0);
@@ -795,10 +795,10 @@ function PreviewSplitLayout({
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    isDraggingRef.current = true;
+    setIsDragging(true);
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current || !containerRef.current) return;
+      if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const pct = Math.min(Math.max((x / rect.width) * 100, 20), 80);
@@ -806,21 +806,22 @@ function PreviewSplitLayout({
     };
 
     const onMouseUp = () => {
-      isDraggingRef.current = false;
+      setIsDragging(false);
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
     };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
   }, []);
 
   return (
-    <div ref={containerRef} className="flex h-full">
+    <div ref={containerRef} className="flex h-full relative">
+      {/* Drag overlay — covers everything so webview/xterm can't steal mouse events */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 cursor-col-resize" />
+      )}
+
       {/* Terminal side */}
       <div className="relative min-w-0 min-h-0" style={{ width: `${splitPercent}%` }}>
         {children}
@@ -828,10 +829,14 @@ function PreviewSplitLayout({
 
       {/* Resizable splitter */}
       <div
-        className="w-1 shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--accent)] transition-colors relative group"
+        className={cn(
+          'w-1.5 shrink-0 cursor-col-resize relative group transition-colors',
+          isDragging ? 'bg-[var(--accent)]' : 'bg-[var(--border)] hover:bg-[var(--accent)]',
+        )}
         onMouseDown={handleMouseDown}
       >
-        <div className="absolute inset-y-0 -left-1 -right-1" />
+        {/* Wider invisible hit area */}
+        <div className="absolute inset-y-0 -left-2 -right-2 z-10" />
       </div>
 
       {/* Preview side */}
