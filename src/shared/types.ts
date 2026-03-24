@@ -409,12 +409,8 @@ export interface CodeReviewFinding {
   suggestion?: string;
 }
 
-export interface CodeReviewItem {
-  taskId: string;
-  taskName: string;
-  taskUrl: string;
-  customId?: string;
-  prNumber?: number;
+export interface CodeReviewPR {
+  prNumber: number;
   prUrl?: string;
   prBranch?: string;
   prTitle?: string;
@@ -422,6 +418,24 @@ export interface CodeReviewItem {
   findings: CodeReviewFinding[];
   reviewedAt?: string;
   error?: string;
+}
+
+export interface CodeReviewItem {
+  taskId: string;
+  taskName: string;
+  taskUrl: string;
+  customId?: string;
+  /** @deprecated Use prs array instead */
+  prNumber?: number;
+  /** @deprecated Use prs array instead */
+  prUrl?: string;
+  prBranch?: string;
+  prTitle?: string;
+  status: CodeReviewStatus;
+  findings: CodeReviewFinding[];
+  reviewedAt?: string;
+  error?: string;
+  prs: CodeReviewPR[];
 }
 
 export interface CodeReviewEvent {

@@ -830,35 +830,27 @@ export function registerCodeReviewHandlers(
         });
 
         // Resolve PR info for each task (checks description, comments, and branch matching)
-        // Tasks with multiple PRs are expanded into separate items
+        // Each task contains a prs array with all its open PRs
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
         const items: CodeReviewItem[] = [];
         for (const task of filteredTasks) {
-          const prs = await findPRsForTask(task, effectiveProjectPath);
-          if (prs.length === 0) {
-            // No PRs found — still show the task so user can see it needs a PR
-            items.push({
-              taskId: task.id,
-              taskName: task.name,
-              taskUrl: task.url,
-              customId: task.customId,
+          const foundPRs = await findPRsForTask(task, effectiveProjectPath);
+          items.push({
+            taskId: task.id,
+            taskName: task.name,
+            taskUrl: task.url,
+            customId: task.customId,
+            prNumber: foundPRs.length === 1 ? foundPRs[0].prNumber : undefined,
+            prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
+            status: 'pending' as const,
+            findings: [],
+            prs: foundPRs.map((pr) => ({
+              prNumber: pr.prNumber,
+              prUrl: pr.prUrl ?? undefined,
               status: 'pending' as const,
               findings: [],
-            });
-          } else {
-            for (const pr of prs) {
-              items.push({
-                taskId: prs.length > 1 ? `${task.id}__pr${pr.prNumber}` : task.id,
-                taskName: prs.length > 1 ? `${task.name} (PR #${pr.prNumber})` : task.name,
-                taskUrl: task.url,
-                customId: task.customId,
-                prNumber: pr.prNumber,
-                prUrl: pr.prUrl ?? undefined,
-                status: 'pending' as const,
-                findings: [],
-              });
-            }
-          }
+            })),
+          });
         }
 
         return { success: true, data: items };

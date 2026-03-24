@@ -7,7 +7,7 @@ import {
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import type { CodeReviewItem, CodeReviewFinding, CodeReviewSeverity, TaskManagerList } from '../../../shared/types';
+import type { CodeReviewItem, CodeReviewPR, CodeReviewFinding, CodeReviewSeverity, TaskManagerList } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 
 const SEVERITY_CONFIG: Record<CodeReviewSeverity, { icon: typeof Bug; color: string; bg: string; label: string }> = {
@@ -96,6 +96,127 @@ function FindingCard({ finding }: { finding: CodeReviewFinding }) {
   );
 }
 
+function StatusBadge({ status }: { status: string }) {
+  const config = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
+  return (
+    <span className={cn(
+      'text-xs px-2 py-1 rounded-full font-medium',
+      status === 'passed' && 'bg-green-500/10 text-green-400',
+      status === 'failed' && 'bg-red-500/10 text-red-400',
+      status === 'reviewing' && 'bg-blue-500/10 text-blue-400',
+      status === 'error' && 'bg-orange-500/10 text-orange-400',
+      status === 'pending' && 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]',
+      status === 'skipped' && 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]',
+    )}>
+      {config.label}
+    </span>
+  );
+}
+
+function PRRow({
+  pr,
+  taskId,
+  onReview,
+  onStop,
+}: {
+  pr: CodeReviewPR;
+  taskId: string;
+  onReview: (taskId: string, prNumber: number) => void;
+  onStop: (taskId: string, prNumber: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(pr.status === 'failed');
+  const status = STATUS_CONFIG[pr.status] || STATUS_CONFIG.pending;
+  const StatusIcon = status.icon;
+  const isReviewing = pr.status === 'reviewing';
+
+  const criticals = pr.findings.filter((f) => f.severity === 'critical').length;
+  const majors = pr.findings.filter((f) => f.severity === 'major').length;
+  const minors = pr.findings.filter((f) => f.severity === 'minor').length;
+  const suggestions = pr.findings.filter((f) => f.severity === 'suggestion').length;
+
+  return (
+    <div className="border border-[var(--border)] rounded-lg bg-[var(--bg-primary)] overflow-hidden">
+      <div className="px-3 py-2.5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <StatusIcon className={cn('w-3.5 h-3.5 shrink-0', status.color, isReviewing && 'animate-spin')} />
+            <span className="text-xs font-medium text-[var(--text-primary)]">PR #{pr.prNumber}</span>
+            {pr.prTitle && <span className="text-xs text-[var(--text-muted)] truncate">{pr.prTitle}</span>}
+            {pr.prBranch && <code className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded">{pr.prBranch}</code>}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <StatusBadge status={pr.status} />
+
+            {pr.status === 'pending' && (
+              <button
+                onClick={() => onReview(taskId, pr.prNumber)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
+              >
+                <Play className="w-3 h-3" />
+                Review
+              </button>
+            )}
+
+            {pr.status === 'reviewing' && (
+              <button
+                onClick={() => onStop(taskId, pr.prNumber)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+              >
+                <Square className="w-3 h-3" />
+                Stop
+              </button>
+            )}
+
+            {pr.prUrl && (
+              <button
+                onClick={() => window.electronAPI.openExternal(pr.prUrl!)}
+                title="Open PR on GitHub"
+                className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+              >
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {pr.findings.length > 0 && (
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+              {pr.findings.length} issue{pr.findings.length !== 1 ? 's' : ''}
+            </button>
+            <div className="flex items-center gap-2 text-[11px]">
+              {criticals > 0 && <span className="text-red-400">{criticals} critical</span>}
+              {majors > 0 && <span className="text-orange-400">{majors} major</span>}
+              {minors > 0 && <span className="text-yellow-400">{minors} minor</span>}
+              {suggestions > 0 && <span className="text-blue-400">{suggestions} suggestion{suggestions !== 1 ? 's' : ''}</span>}
+            </div>
+          </div>
+        )}
+
+        {pr.error && (
+          <div className="mt-2 flex items-center gap-2 text-xs text-red-400 bg-red-500/10 rounded-md px-2.5 py-1.5">
+            <XCircle className="w-3 h-3 shrink-0" />
+            {pr.error}
+          </div>
+        )}
+      </div>
+
+      {expanded && pr.findings.length > 0 && (
+        <div className="border-t border-[var(--border)] p-3 space-y-2 bg-[var(--bg-secondary)]">
+          {pr.findings.map((finding, idx) => (
+            <FindingCard key={idx} finding={finding} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewItemCard({
   item,
   onReview,
@@ -104,21 +225,17 @@ function ReviewItemCard({
   item: CodeReviewItem;
   projectPath: string;
   onReview: (taskId: string, prNumber: number) => void;
-  onStop: (taskId: string) => void;
+  onStop: (taskId: string, prNumber: number) => void;
 }) {
-  const [expanded, setExpanded] = useState(item.status === 'failed');
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
   const isReviewing = item.status === 'reviewing';
-
-  const criticals = item.findings.filter((f) => f.severity === 'critical').length;
-  const majors = item.findings.filter((f) => f.severity === 'major').length;
-  const minors = item.findings.filter((f) => f.severity === 'minor').length;
-  const suggestions = item.findings.filter((f) => f.severity === 'suggestion').length;
+  const hasPRs = item.prs && item.prs.length > 0;
 
   return (
     <div className="border border-[var(--border)] rounded-xl bg-[var(--bg-secondary)] overflow-hidden">
       <div className="p-4">
+        {/* Task header */}
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
@@ -127,50 +244,17 @@ function ReviewItemCard({
             </div>
             <div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">
               {item.customId && <span className="font-mono">{item.customId}</span>}
-              {item.prNumber && (
+              {hasPRs && (
                 <span className="flex items-center gap-1">
                   <GitPullRequestDraft className="w-3 h-3" />
-                  PR #{item.prNumber}
+                  {item.prs.length} PR{item.prs.length !== 1 ? 's' : ''}
                 </span>
               )}
-              {item.prTitle && <span className="truncate">{item.prTitle}</span>}
             </div>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <span className={cn(
-              'text-xs px-2 py-1 rounded-full font-medium',
-              item.status === 'passed' && 'bg-green-500/10 text-green-400',
-              item.status === 'failed' && 'bg-red-500/10 text-red-400',
-              item.status === 'reviewing' && 'bg-blue-500/10 text-blue-400',
-              item.status === 'error' && 'bg-orange-500/10 text-orange-400',
-              item.status === 'pending' && 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]',
-              item.status === 'skipped' && 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]',
-            )}>
-              {status.label}
-            </span>
-
-            {item.status === 'pending' && item.prNumber && (
-              <button
-                onClick={() => onReview(item.taskId, item.prNumber!)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
-              >
-                <Play className="w-3.5 h-3.5" />
-                Review
-              </button>
-            )}
-
-            {item.status === 'reviewing' && (
-              <button
-                onClick={() => onStop(item.taskId)}
-                title="Stop review"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-              >
-                <Square className="w-3.5 h-3.5" />
-                Stop
-              </button>
-            )}
-
+            <StatusBadge status={item.status} />
             <button
               onClick={() => window.electronAPI.openExternal(item.taskUrl)}
               title="Open task in ClickUp"
@@ -181,46 +265,29 @@ function ReviewItemCard({
           </div>
         </div>
 
-        {item.findings.length > 0 && (
-          <div className="flex items-center gap-3 mt-3">
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-            >
-              {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-              {item.findings.length} issue{item.findings.length !== 1 ? 's' : ''}
-            </button>
-            <div className="flex items-center gap-2 text-xs">
-              {criticals > 0 && <span className="text-red-400">{criticals} critical</span>}
-              {majors > 0 && <span className="text-orange-400">{majors} major</span>}
-              {minors > 0 && <span className="text-yellow-400">{minors} minor</span>}
-              {suggestions > 0 && <span className="text-blue-400">{suggestions} suggestion{suggestions !== 1 ? 's' : ''}</span>}
-            </div>
-          </div>
-        )}
-
-        {!item.prNumber && item.status === 'pending' && (
+        {/* No PRs warning */}
+        {!hasPRs && item.status === 'pending' && (
           <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            No PR found. Add a GitHub PR URL to the task description.
+            No open PR found. Add a GitHub PR URL to the task description.
           </div>
         )}
 
-        {item.error && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">
-            <XCircle className="w-3.5 h-3.5 shrink-0" />
-            {item.error}
+        {/* PR list */}
+        {hasPRs && (
+          <div className="mt-3 space-y-2">
+            {item.prs.map((pr) => (
+              <PRRow
+                key={pr.prNumber}
+                pr={pr}
+                taskId={item.taskId}
+                onReview={onReview}
+                onStop={onStop}
+              />
+            ))}
           </div>
         )}
       </div>
-
-      {expanded && item.findings.length > 0 && (
-        <div className="border-t border-[var(--border)] p-4 space-y-2 bg-[var(--bg-primary)]">
-          {item.findings.map((finding, idx) => (
-            <FindingCard key={idx} finding={finding} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -528,8 +595,8 @@ export function CodeReviewView() {
     runAllReviews(selectedProjectPath);
   }, [selectedProjectPath, runAllReviews]);
 
-  const handleStop = useCallback((taskId: string) => {
-    stopReview(taskId);
+  const handleStop = useCallback((taskId: string, prNumber?: number) => {
+    stopReview(taskId, prNumber);
   }, [stopReview]);
 
   const handleStopAll = useCallback(() => {
@@ -537,10 +604,11 @@ export function CodeReviewView() {
   }, [stopAllReviews]);
 
   const projectPath = selectedProjectPath || '';
-  const reviewableCount = items.filter((i) => i.prNumber && i.status === 'pending').length;
-  const reviewingCount = items.filter((i) => i.status === 'reviewing').length;
-  const passedCount = items.filter((i) => i.status === 'passed').length;
-  const failedCount = items.filter((i) => i.status === 'failed').length;
+  const allPRs = items.flatMap((i) => i.prs || []);
+  const reviewableCount = allPRs.filter((p) => p.status === 'pending').length;
+  const reviewingCount = allPRs.filter((p) => p.status === 'reviewing').length;
+  const passedCount = allPRs.filter((p) => p.status === 'passed').length;
+  const failedCount = allPRs.filter((p) => p.status === 'failed').length;
 
   // Not configured
   if (taskManagerProvider === 'none') {
