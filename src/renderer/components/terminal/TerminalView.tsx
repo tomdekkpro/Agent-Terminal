@@ -10,6 +10,7 @@ import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
+import { PreviewPanel } from './PreviewPanel';
 import { UsageIndicator } from '../usage/UsageIndicator';
 import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
 import { cn } from '../../../shared/utils';
@@ -764,6 +765,88 @@ function CompleteTaskModal({
 }
 
 /** Grid column class based on terminal count */
+// ─── Preview Split Layout ───────────────────────────────────────
+
+function PreviewSplitLayout({
+  previewTerminal,
+  children,
+}: {
+  previewTerminal: import('../../stores/terminal-store').Terminal;
+  children: React.ReactNode;
+}) {
+  const togglePreview = useTerminalStore((s) => s.togglePreview);
+  const setPreviewUrl = useTerminalStore((s) => s.setPreviewUrl);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [splitPercent, setSplitPercent] = useState(50);
+  const isDraggingRef = useRef(false);
+
+  // Track auto-reload trigger — increments when agent finishes
+  const [reloadTrigger, setReloadTrigger] = useState(0);
+  const prevBusyRef = useRef(previewTerminal.isClaudeBusy);
+
+  useEffect(() => {
+    // When agent transitions from busy → not busy, trigger reload
+    if (prevBusyRef.current && !previewTerminal.isClaudeBusy) {
+      setReloadTrigger((n) => n + 1);
+    }
+    prevBusyRef.current = previewTerminal.isClaudeBusy;
+  }, [previewTerminal.isClaudeBusy]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const pct = Math.min(Math.max((x / rect.width) * 100, 20), 80);
+      setSplitPercent(pct);
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []);
+
+  return (
+    <div ref={containerRef} className="flex h-full">
+      {/* Terminal side */}
+      <div className="relative min-w-0 min-h-0" style={{ width: `${splitPercent}%` }}>
+        {children}
+      </div>
+
+      {/* Resizable splitter */}
+      <div
+        className="w-1 shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--accent)] transition-colors relative group"
+        onMouseDown={handleMouseDown}
+      >
+        <div className="absolute inset-y-0 -left-1 -right-1" />
+      </div>
+
+      {/* Preview side */}
+      <div className="min-w-0 min-h-0" style={{ width: `${100 - splitPercent}%` }}>
+        <PreviewPanel
+          url={previewTerminal.previewUrl || ''}
+          onUrlChange={(url) => setPreviewUrl(previewTerminal.id, url)}
+          onClose={() => togglePreview(previewTerminal.id)}
+          autoReloadTrigger={reloadTrigger}
+        />
+      </div>
+    </div>
+  );
+}
+
 function getGridClass(count: number): string {
   if (count <= 1) return 'grid-cols-1';
   if (count <= 4) return 'grid-cols-2';
@@ -1742,6 +1825,94 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             const isCurrentGroup = activeGroupId === groupId;
             const isGroupSplit = groupTerminals.length > 1;
 
+            // Find preview terminal — use active terminal if it has preview, otherwise first with preview
+            const activeTerminalObj = groupTerminals.find((t) => t.id === activeTerminalId);
+            const previewTerminal = activeTerminalObj?.previewOpen
+              ? activeTerminalObj
+              : groupTerminals.find((t) => t.previewOpen);
+            const hasPreview = !!previewTerminal;
+
+            const terminalContent = isGroupSplit ? (
+              /* Grid layout for split terminals */
+              <div className={cn('grid h-full gap-1 p-1', getGridClass(groupTerminals.length))}>
+                {groupTerminals.map((terminal) => (
+                  <div
+                    key={terminal.id}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dragTerminalId && dragTerminalId !== terminal.id) {
+                        setDragOverTerminalId(terminal.id);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverTerminalId === terminal.id) setDragOverTerminalId(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (dragTerminalId && dragTerminalId !== terminal.id) {
+                        reorderTerminalsInGroup(dragTerminalId, terminal.id);
+                      }
+                      setDragTerminalId(null);
+                      setDragOverTerminalId(null);
+                    }}
+                    className={cn(
+                      'rounded-lg overflow-hidden border min-h-0',
+                      activeTerminalId === terminal.id
+                        ? 'border-[var(--accent)]'
+                        : 'border-[var(--border)]',
+                      dragTerminalId === terminal.id && 'opacity-50',
+                    )}
+                  >
+                    <TerminalPanel
+                      terminal={terminal}
+                      isActive={activeTerminalId === terminal.id}
+                      isSplit={true}
+                      agentProviders={agentProviders}
+                      skills={projectSkills}
+                      onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                      onProviderChange={(p) => handleProviderChange(terminal.id, p)}
+                      onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
+                      onMergeComplete={() => handleMergeComplete(terminal)}
+                      onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
+                      onClose={() => handleCloseTerminal(terminal.id)}
+                      onFocus={() => setActiveTerminal(terminal.id)}
+                      isDraggedOver={dragOverTerminalId === terminal.id && dragTerminalId !== terminal.id}
+                      onDragHandleStart={(e) => {
+                        e.stopPropagation();
+                        setDragTerminalId(terminal.id);
+                        e.dataTransfer.effectAllowed = 'move';
+                        e.dataTransfer.setData('text/plain', terminal.id);
+                      }}
+                      onDragHandleEnd={() => {
+                        setDragTerminalId(null);
+                        setDragOverTerminalId(null);
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              /* Single terminal, full size */
+              groupTerminals.map((terminal) => (
+                <div key={terminal.id} className="absolute inset-0">
+                  <TerminalPanel
+                    terminal={terminal}
+                    isActive={isCurrentGroup}
+                    agentProviders={agentProviders}
+                    skills={projectSkills}
+                    onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                    onProviderChange={(p) => handleProviderChange(terminal.id, p)}
+                    onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
+                    onMergeComplete={() => handleMergeComplete(terminal)}
+                    onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
+                  />
+                </div>
+              ))
+            );
+
             return (
               <div
                 key={groupId}
@@ -1752,85 +1923,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                   !isCurrentGroup && 'invisible pointer-events-none'
                 )}
               >
-                {isGroupSplit ? (
-                  /* Grid layout for split terminals */
-                  <div className={cn('grid h-full gap-1 p-1', getGridClass(groupTerminals.length))}>
-                    {groupTerminals.map((terminal) => (
-                      <div
-                        key={terminal.id}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          e.dataTransfer.dropEffect = 'move';
-                          if (dragTerminalId && dragTerminalId !== terminal.id) {
-                            setDragOverTerminalId(terminal.id);
-                          }
-                        }}
-                        onDragLeave={() => {
-                          if (dragOverTerminalId === terminal.id) setDragOverTerminalId(null);
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (dragTerminalId && dragTerminalId !== terminal.id) {
-                            reorderTerminalsInGroup(dragTerminalId, terminal.id);
-                          }
-                          setDragTerminalId(null);
-                          setDragOverTerminalId(null);
-                        }}
-                        className={cn(
-                          'rounded-lg overflow-hidden border min-h-0',
-                          activeTerminalId === terminal.id
-                            ? 'border-[var(--accent)]'
-                            : 'border-[var(--border)]',
-                          dragTerminalId === terminal.id && 'opacity-50',
-                        )}
-                      >
-                        <TerminalPanel
-                          terminal={terminal}
-                          isActive={activeTerminalId === terminal.id}
-                          isSplit={true}
-                          agentProviders={agentProviders}
-                          skills={projectSkills}
-                          onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
-                          onProviderChange={(p) => handleProviderChange(terminal.id, p)}
-                          onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
-                          onMergeComplete={() => handleMergeComplete(terminal)}
-                          onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
-                          onClose={() => handleCloseTerminal(terminal.id)}
-                          onFocus={() => setActiveTerminal(terminal.id)}
-                          isDraggedOver={dragOverTerminalId === terminal.id && dragTerminalId !== terminal.id}
-                          onDragHandleStart={(e) => {
-                            e.stopPropagation();
-                            setDragTerminalId(terminal.id);
-                            e.dataTransfer.effectAllowed = 'move';
-                            e.dataTransfer.setData('text/plain', terminal.id);
-                          }}
-                          onDragHandleEnd={() => {
-                            setDragTerminalId(null);
-                            setDragOverTerminalId(null);
-                          }}
-                        />
-                      </div>
-                    ))}
-                  </div>
+                {hasPreview ? (
+                  <PreviewSplitLayout
+                    previewTerminal={previewTerminal!}
+                  >
+                    {terminalContent}
+                  </PreviewSplitLayout>
                 ) : (
-                  /* Single terminal, full size */
-                  groupTerminals.map((terminal) => (
-                    <div key={terminal.id} className="absolute inset-0">
-                      <TerminalPanel
-                        terminal={terminal}
-                        isActive={isCurrentGroup}
-                        agentProviders={agentProviders}
-                        skills={projectSkills}
-                        onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
-                        onProviderChange={(p) => handleProviderChange(terminal.id, p)}
-                        onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
-                        onMergeComplete={() => handleMergeComplete(terminal)}
-                        onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
-                      />
-                    </div>
-                  ))
+                  terminalContent
                 )}
               </div>
             );

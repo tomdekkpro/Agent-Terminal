@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem } from '../../shared/types';
+import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewPR, CodeReviewStatus } from '../../shared/types';
 
 interface CodeReviewState {
   items: CodeReviewItem[];
@@ -10,12 +10,24 @@ interface CodeReviewState {
   loadTasks: (statuses?: string[], projectPath?: string, listId?: string) => Promise<void>;
   runReview: (projectPath: string, taskId: string, prNumber: number) => Promise<void>;
   runAllReviews: (projectPath: string) => Promise<void>;
-  stopReview: (taskId: string) => Promise<void>;
+  stopReview: (taskId: string, prNumber?: number) => Promise<void>;
   stopAllReviews: () => Promise<void>;
   submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
+  updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
   clearItems: () => void;
+}
+
+/** Derive task-level status from its PRs */
+function deriveTaskStatus(prs: CodeReviewPR[]): CodeReviewStatus {
+  if (prs.length === 0) return 'pending';
+  if (prs.some((p) => p.status === 'reviewing')) return 'reviewing';
+  if (prs.some((p) => p.status === 'failed')) return 'failed';
+  if (prs.some((p) => p.status === 'error')) return 'error';
+  if (prs.every((p) => p.status === 'passed')) return 'passed';
+  if (prs.every((p) => p.status === 'skipped')) return 'skipped';
+  return 'pending';
 }
 
 export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
@@ -39,16 +51,16 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
   },
 
   runReview: async (projectPath, taskId, prNumber) => {
-    get().updateItem(taskId, { status: 'reviewing', findings: [], error: undefined });
+    get().updatePR(taskId, prNumber, { status: 'reviewing', findings: [], error: undefined });
     try {
       const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber);
       if (result.success) {
         const { passed, findings, prTitle, prUrl, prBranch, skipped } = result.data;
         if (skipped) {
-          get().updateItem(taskId, { status: 'skipped', prUrl, prBranch, prTitle });
+          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prTitle });
           return;
         }
-        get().updateItem(taskId, {
+        get().updatePR(taskId, prNumber, {
           status: passed ? 'passed' : 'failed',
           findings,
           prUrl,
@@ -59,38 +71,45 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
         // Auto-submit result
         await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle);
       } else {
-        get().updateItem(taskId, { status: 'error', error: result.error });
+        get().updatePR(taskId, prNumber, { status: 'error', error: result.error });
       }
     } catch (err) {
-      get().updateItem(taskId, { status: 'error', error: err instanceof Error ? err.message : 'Review failed' });
+      get().updatePR(taskId, prNumber, { status: 'error', error: err instanceof Error ? err.message : 'Review failed' });
     }
   },
 
   runAllReviews: async (projectPath) => {
     set({ reviewingAll: true });
-    const items = get().items.filter((i) => i.prNumber && i.status === 'pending');
+    const items = get().items;
     for (const item of items) {
-      if (!get().reviewingAll) break; // stop-all was requested
-      if (!item.prNumber) continue;
-      await get().runReview(projectPath, item.taskId, item.prNumber);
+      if (!get().reviewingAll) break;
+      const pendingPRs = item.prs.filter((pr) => pr.status === 'pending');
+      for (const pr of pendingPRs) {
+        if (!get().reviewingAll) break;
+        await get().runReview(projectPath, item.taskId, pr.prNumber);
+      }
     }
     set({ reviewingAll: false });
   },
 
-  stopReview: async (taskId) => {
+  stopReview: async (taskId, prNumber) => {
     await window.electronAPI.codeReviewStop?.(taskId);
-    get().updateItem(taskId, { status: 'pending', error: undefined });
+    if (prNumber) {
+      get().updatePR(taskId, prNumber, { status: 'pending', error: undefined });
+    } else {
+      get().updateItem(taskId, { status: 'pending', error: undefined });
+    }
   },
 
   stopAllReviews: async () => {
     set({ reviewingAll: false });
     await window.electronAPI.codeReviewStopAll?.();
-    // Reset all reviewing items back to pending
     const items = get().items;
     for (const item of items) {
-      if (item.status === 'reviewing') {
-        get().updateItem(item.taskId, { status: 'pending', error: undefined });
-      }
+      const updated = item.prs.map((pr) =>
+        pr.status === 'reviewing' ? { ...pr, status: 'pending' as const, error: undefined } : pr,
+      );
+      get().updateItem(item.taskId, { prs: updated, status: deriveTaskStatus(updated) });
     }
   },
 
@@ -110,7 +129,6 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
 
     switch (event.type) {
       case 'progress':
-        // Don't overwrite terminal statuses with 'reviewing'
         if (item && TERMINAL.includes(item.status)) break;
         set((state) => ({
           items: state.items.map((i) =>
@@ -151,6 +169,24 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       items: state.items.map((item) =>
         item.taskId === taskId ? { ...item, ...updates } : item,
       ),
+    }));
+  },
+
+  updatePR: (taskId, prNumber, updates) => {
+    set((state) => ({
+      items: state.items.map((item) => {
+        if (item.taskId !== taskId) return item;
+        const updatedPRs = item.prs.map((pr) =>
+          pr.prNumber === prNumber ? { ...pr, ...updates } : pr,
+        );
+        return {
+          ...item,
+          prs: updatedPRs,
+          status: deriveTaskStatus(updatedPRs),
+          // Aggregate findings from all PRs
+          findings: updatedPRs.flatMap((pr) => pr.findings),
+        };
+      }),
     }));
   },
 

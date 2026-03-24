@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -774,6 +774,24 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               </div>
             </>
           )}
+          {/* Preview toggle */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              const store = useTerminalStore.getState();
+              store.togglePreview(terminal.id);
+            }}
+            className={cn(
+              'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+              terminal.previewOpen
+                ? 'bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
+                : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80'
+            )}
+            title={terminal.previewOpen ? 'Close preview' : 'Open live preview'}
+          >
+            {terminal.previewOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            {!isSplit && (terminal.previewOpen ? 'Preview' : 'Preview')}
+          </button>
           {isSplit && onClose && (
             <button
               onClick={(e) => { e.stopPropagation(); onClose(); }}
