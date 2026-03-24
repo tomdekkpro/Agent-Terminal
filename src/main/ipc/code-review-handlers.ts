@@ -207,6 +207,22 @@ async function findPRsForTask(task: { id: string; customId?: string; description
     }
   }
 
+  // Filter to only open PRs by checking against gh pr list
+  if (results.length > 0 && projectPath) {
+    try {
+      const openPrList = await ghExec(
+        `gh pr list --state open --json number --limit 200`,
+        projectPath,
+      );
+      const openNumbers = new Set<number>(JSON.parse(openPrList).map((p: any) => p.number));
+      const filtered = results.filter((pr) => openNumbers.has(pr.prNumber));
+      debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}, ${filtered.length} open: ${filtered.map((p) => `#${p.prNumber}`).join(', ')}`);
+      return filtered;
+    } catch {
+      // gh CLI not available — return all and let the review handler skip closed ones
+    }
+  }
+
   if (results.length > 0) {
     debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}: ${results.map((p) => `#${p.prNumber}`).join(', ')}`);
   }
