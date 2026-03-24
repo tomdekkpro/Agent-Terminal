@@ -36,6 +36,10 @@ export interface Terminal {
   needsRestore?: boolean;
   /** True when terminal is restored but agent session not yet resumed */
   needsResume?: boolean;
+  /** URL for live preview panel (e.g. http://localhost:3000) */
+  previewUrl?: string;
+  /** Whether the preview panel is currently open */
+  previewOpen?: boolean;
 }
 
 // Output callback registry
@@ -78,6 +82,7 @@ function buildSaveableState(state: TerminalState) {
       worktreePath: t.worktreePath,
       worktreeBranch: t.worktreeBranch,
       timeTracking: t.timeTracking,
+      previewUrl: t.previewUrl,
     }));
 
   return {
@@ -122,6 +127,7 @@ export function flushTerminalStateSync(): void {
       worktreePath: t.worktreePath,
       worktreeBranch: t.worktreeBranch,
       timeTracking: t.timeTracking,
+      previewUrl: t.previewUrl,
     }));
   if (saveable.length === 0) return; // nothing to save — don't overwrite good state
   window.electronAPI?.saveTerminalStateSync?.({
@@ -167,6 +173,10 @@ interface TerminalState {
   resumeTerminalAgent: (id: string) => Promise<void>;
   /** Discard a restored terminal without creating PTY */
   discardTerminal: (id: string) => void;
+  /** Toggle the preview panel open/closed for a terminal */
+  togglePreview: (id: string) => void;
+  /** Set the preview URL for a terminal */
+  setPreviewUrl: (id: string, url: string) => void;
 }
 
 
@@ -526,6 +536,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             worktreePath: t.worktreePath,
             worktreeBranch: t.worktreeBranch,
             timeTracking: t.timeTracking,
+            previewUrl: t.previewUrl,
             needsRestore: isAgent,
           };
         });
@@ -662,6 +673,22 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       return { terminals: newTerminals, activeTerminalId: newActiveId, activeGroupId: newActiveGroupId };
     });
   },
+
+  togglePreview: (id: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, previewOpen: !t.previewOpen } : t
+      ),
+    }));
+  },
+
+  setPreviewUrl: (id: string, url: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, previewUrl: url } : t
+      ),
+    }));
+  },
 }));
 
 // Auto-save on state changes (skip transient fields like isClaudeBusy)
@@ -681,6 +708,7 @@ useTerminalStore.subscribe((state) => {
     worktrees: state.terminals.map((t) => t.worktreeBranch || '').join(','),
     tasks: state.terminals.map((t) => t.task?.id || '').join(','),
     timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}`).join(','),
+    previews: state.terminals.map((t) => t.previewUrl || '').join(','),
   });
   if (snap !== prevSnapshot) {
     prevSnapshot = snap;
