@@ -6,7 +6,7 @@ import {
   ArrowLeft, FolderGit2, Folder, Upload, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus,
 } from 'lucide-react';
-import { useTerminalStore } from '../../stores/terminal-store';
+import { useTerminalStore, addOutputTap, removeOutputTap } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
@@ -563,6 +563,8 @@ function CompleteTaskModal({
   taskBranch,
   taskName,
   task,
+  terminalId,
+  isAgentRunning,
   projectPath,
   isWorktree,
   hasTaskManager,
@@ -576,6 +578,8 @@ function CompleteTaskModal({
   taskBranch: string;
   taskName?: string;
   task?: TerminalTask;
+  terminalId: string;
+  isAgentRunning: boolean;
   projectPath: string;
   isWorktree: boolean;
   hasTaskManager: boolean;
@@ -609,7 +613,7 @@ function CompleteTaskModal({
       .listBranches(projectPath)
       .then((result: any) => {
         if (result.success && result.branches) {
-          const others = (result.branches as string[]).filter((b) => b !== taskBranch);
+          const others = result.branches as string[];
           others.sort((a, b) => {
             const ai = PRIORITY_BRANCHES.indexOf(a);
             const bi = PRIORITY_BRANCHES.indexOf(b);
@@ -620,7 +624,10 @@ function CompleteTaskModal({
           });
           setBranches(others);
           // Use default base branch if set, otherwise auto-select first priority branch
-          if (!defaultBaseBranch || !others.includes(defaultBaseBranch)) {
+          const trimmedDefault = defaultBaseBranch?.trim();
+          if (trimmedDefault && others.includes(trimmedDefault)) {
+            setSelectedBranch(trimmedDefault);
+          } else {
             const auto = others.find((b) => PRIORITY_BRANCHES.includes(b));
             setSelectedBranch(auto || others[0] || '');
           }
@@ -641,29 +648,88 @@ function CompleteTaskModal({
     return () => document.removeEventListener('mousedown', handler);
   }, [showBranchDropdown]);
 
-  // Fetch git summary to pre-fill the comment when checkbox is enabled
+  // Ask the agent for root cause & solution when checkbox is enabled
   useEffect(() => {
-    if (!postComment || commentText || !selectedBranch || !taskBranch) return;
+    if (!postComment || commentText || !terminalId) return;
+
+    if (!isAgentRunning) {
+      // No agent running — fall back to git summary
+      if (!selectedBranch || !taskBranch) return;
+      setCommentLoading(true);
+      window.electronAPI.getTaskSummary(projectPath, taskBranch, selectedBranch)
+        .then((r: any) => {
+          if (r.success) {
+            const commits = (r.commits || '').trim();
+            const diffStat = (r.diffStat || '').trim();
+            const lines: string[] = ['Root cause:\n\n'];
+            lines.push('Solution:');
+            if (commits) {
+              lines.push('\n' + commits.split('\n').map((c: string) => `- ${c}`).join('\n'));
+            }
+            if (diffStat) {
+              lines.push('\nFiles changed:\n' + diffStat);
+            }
+            setCommentText(lines.join('\n'));
+          }
+        })
+        .catch(() => {})
+        .finally(() => setCommentLoading(false));
+      return;
+    }
+
+    // Agent is running — send a prompt and capture response
     setCommentLoading(true);
-    window.electronAPI.getTaskSummary(projectPath, taskBranch, selectedBranch)
-      .then((r: any) => {
-        if (r.success) {
-          const commits = (r.commits || '').trim();
-          const diffStat = (r.diffStat || '').trim();
-          const lines: string[] = ['Root cause:\n\n'];
-          lines.push('Solution:');
-          if (commits) {
-            lines.push('\n' + commits.split('\n').map((c: string) => `- ${c}`).join('\n'));
-          }
-          if (diffStat) {
-            lines.push('\nFiles changed:\n' + diffStat);
-          }
-          setCommentText(lines.join('\n'));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setCommentLoading(false));
-  }, [postComment, selectedBranch]);
+    let output = '';
+    let silenceTimer: ReturnType<typeof setTimeout>;
+    let safetyTimer: ReturnType<typeof setTimeout>;
+    let resolved = false;
+
+    const stripAnsi = (text: string) =>
+      text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\x1b[()][0-9A-B]/g, '')
+        .replace(/\r/g, '');
+
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(silenceTimer);
+      clearTimeout(safetyTimer);
+      removeOutputTap(terminalId);
+
+      const clean = stripAnsi(output).trim();
+      // Extract the summary part — look for Root cause / Solution markers
+      const rcIdx = clean.indexOf('Root cause:');
+      if (rcIdx !== -1) {
+        setCommentText(clean.slice(rcIdx));
+      } else {
+        setCommentText(clean || 'Root cause:\n\n\nSolution:\n');
+      }
+      setCommentLoading(false);
+    };
+
+    addOutputTap(terminalId, (data) => {
+      output += data;
+      clearTimeout(silenceTimer);
+      // 3 seconds of silence means the agent is done
+      silenceTimer = setTimeout(finish, 3000);
+    });
+
+    // Safety timeout — don't wait forever
+    safetyTimer = setTimeout(finish, 30000);
+
+    const prompt = 'Please provide a brief summary of the root cause and solution for this task. Use this exact format:\n\nRoot cause:\n[what caused the issue in 1-2 sentences]\n\nSolution:\n[what was done to fix it in 1-2 sentences]\n\nOnly output the summary, nothing else.\n';
+    window.electronAPI.sendTerminalInput(terminalId, prompt + '\n');
+
+    return () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(silenceTimer);
+        clearTimeout(safetyTimer);
+        removeOutputTap(terminalId);
+      }
+    };
+  }, [postComment]);
 
   const filteredBranches = branches.filter((b) => {
     if (!branchSearch) return true;
@@ -826,7 +892,7 @@ function CompleteTaskModal({
                       commentLoading ? (
                         <div className="flex items-center gap-2 mt-2 text-xs text-[var(--text-muted)]">
                           <Loader2 className="w-3 h-3 animate-spin" />
-                          Loading commit summary...
+                          {isAgentRunning ? 'Asking agent for summary...' : 'Loading commit summary...'}
                         </div>
                       ) : (
                         <textarea
@@ -1742,6 +1808,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           taskBranch={mergeTarget.worktreeBranch || mergeTarget.currentBranch || ''}
           taskName={mergeTarget.task?.name}
           task={mergeTarget.task}
+          terminalId={mergeTarget.id}
+          isAgentRunning={!!useTerminalStore.getState().terminals.find(t => t.id === mergeTarget.id)?.isClaudeMode}
           projectPath={mergeTarget.cwd || activeProject.path}
           isWorktree={mergeTarget.isWorktree}
           defaultBaseBranch={mergeTarget.baseBranch}

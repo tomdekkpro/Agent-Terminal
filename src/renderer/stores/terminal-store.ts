@@ -47,6 +47,19 @@ export interface Terminal {
 // Output callback registry
 const xtermCallbacks = new Map<string, (data: string) => void>();
 
+// Secondary output taps — capture output without replacing xterm callback
+const outputTaps = new Map<string, (data: string) => void>();
+
+/** Register a secondary listener that receives terminal output alongside xterm */
+export function addOutputTap(terminalId: string, callback: (data: string) => void): void {
+  outputTaps.set(terminalId, callback);
+}
+
+/** Remove a secondary output listener */
+export function removeOutputTap(terminalId: string): void {
+  outputTaps.delete(terminalId);
+}
+
 // Saved output buffers from previous session (consumed once on terminal mount)
 const savedOutputBuffers = new Map<string, string>();
 
@@ -488,6 +501,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     const callback = xtermCallbacks.get(terminalId);
     if (callback) {
       try { callback(data); } catch { }
+    }
+    const tap = outputTaps.get(terminalId);
+    if (tap) {
+      try { tap(data); } catch { }
     }
   },
 
