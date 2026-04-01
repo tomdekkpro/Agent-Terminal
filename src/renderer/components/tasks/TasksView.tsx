@@ -1,15 +1,18 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Search, Terminal, Bot, Trash2, Clock, Play,
-  LayoutList, FolderOpen, Plus, Filter,
+  LayoutList, FolderOpen, Plus, Filter, History,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { PastSessionsList } from './PastSessionsList';
 import { cn } from '../../../shared/utils';
 import type { TerminalStatus } from '../../stores/terminal-store';
 import type { AgentProviderMeta, AgentProviderId } from '../../../shared/types';
+
+type SessionTab = 'active' | 'past';
 
 type StatusFilter = 'all' | TerminalStatus;
 
@@ -60,6 +63,7 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
   });
   const settings = useSettingsStore((s) => s.settings);
 
+  const [sessionTab, setSessionTab] = useState<SessionTab>('active');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [showFilters, setShowFilters] = useState(false);
@@ -191,6 +195,38 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
           </button>
         </div>
 
+        {/* Tab toggle */}
+        <div className="flex border-b border-[var(--border)]">
+          <button
+            onClick={() => setSessionTab('active')}
+            className={cn(
+              'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2',
+              sessionTab === 'active'
+                ? 'border-[var(--accent)] text-[var(--accent)]'
+                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            )}
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            Active
+          </button>
+          <button
+            onClick={() => setSessionTab('past')}
+            className={cn(
+              'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2',
+              sessionTab === 'past'
+                ? 'border-[var(--accent)] text-[var(--accent)]'
+                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+            )}
+          >
+            <History className="w-3.5 h-3.5" />
+            Past
+          </button>
+        </div>
+
+        {sessionTab === 'past' ? (
+          <PastSessionsList onNavigateToTerminal={onNavigateToTerminal} />
+        ) : (
+          <>
         {/* Search */}
         <div className="px-3 py-2 space-y-2 border-b border-[var(--border)]">
           <div className="flex items-center gap-1.5">
@@ -345,6 +381,8 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
 
       {/* Right side — terminal panel */}

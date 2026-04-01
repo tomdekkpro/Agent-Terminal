@@ -358,6 +358,21 @@ export interface InsightsSessionMeta {
   updatedAt: string;
 }
 
+// ─── Claude CLI Sessions Browser ─────────────────────────────────
+export interface ClaudeSessionEntry {
+  sessionId: string;
+  fullPath: string;
+  fileMtime: number;
+  firstPrompt: string;
+  summary: string;
+  messageCount: number;
+  created: string;
+  modified: string;
+  gitBranch: string;
+  projectPath: string;
+  isSidechain: boolean;
+}
+
 export interface InsightsStreamEvent {
   type: 'text' | 'done' | 'error';
   sessionId: string;
