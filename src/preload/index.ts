@@ -231,6 +231,9 @@ const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.CODE_REVIEW_EVENT, handler);
   },
 
+  // Claude Sessions Browser
+  claudeSessionsList: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSIONS_LIST, cwd),
+
   // File utilities
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
 

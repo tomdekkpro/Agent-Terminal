@@ -13,6 +13,7 @@ import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handle
 import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
+import { registerClaudeSessionsHandlers } from './ipc/claude-sessions-handlers';
 import { cleanupAllQC } from './qc/qc-executor';
 import { initAutoUpdater } from './updater';
 import { IPC_CHANNELS } from '../shared/constants';
@@ -115,6 +116,7 @@ app.whenReady().then(() => {
   registerTeamHandlers(ipcMain, getWindow);
   registerQCHandlers(ipcMain, getWindow);
   registerCodeReviewHandlers(ipcMain, getWindow);
+  registerClaudeSessionsHandlers(ipcMain);
   registerServiceStatusHandlers(ipcMain, getWindow);
   initAutoUpdater(getWindow);
 
