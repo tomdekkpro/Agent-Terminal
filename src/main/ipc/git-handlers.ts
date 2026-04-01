@@ -397,4 +397,149 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
       }
     }
   );
+
+  // ─── Create Branch & PR (branch from HEAD, push, create PR, switch back) ──
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_CREATE_BRANCH_PR,
+    async (
+      _event,
+      cwd: string,
+      newBranch: string,
+      targetBranch: string,
+      title: string,
+      body: string,
+    ) => {
+      try {
+        if (!isGitRepo(cwd)) {
+          return { success: false, error: 'Not a git repository' };
+        }
+
+        // 1. Create and switch to new branch
+        try {
+          await gitExec(`git checkout -b "${newBranch}"`, cwd);
+          debugLog('[Git] Created branch:', newBranch);
+        } catch (err: any) {
+          const msg = err.stderr?.toString() || err.message || '';
+          // Branch may already exist — try switching to it and resetting
+          if (msg.includes('already exists')) {
+            return { success: false, error: `Branch "${newBranch}" already exists` };
+          }
+          return { success: false, error: `Failed to create branch: ${msg}` };
+        }
+
+        // 2. Push new branch to remote
+        try {
+          await gitExec(`git push -u origin "${newBranch}"`, cwd, NETWORK_TIMEOUT);
+          debugLog('[Git] Pushed branch:', newBranch);
+        } catch (pushErr: any) {
+          const msg = pushErr.stderr?.toString() || pushErr.message || '';
+          if (!msg.includes('up-to-date') && !msg.includes('up to date')) {
+            // Switch back before returning error
+            try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
+            return { success: false, error: `Failed to push branch: ${msg}` };
+          }
+        }
+
+        // 3. Create PR via gh CLI
+        try {
+          await gitExec('gh --version', cwd, 10000);
+        } catch {
+          // Switch back even without PR
+          try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
+          return { success: false, error: 'GitHub CLI (gh) is not installed. Branch was pushed but PR could not be created.' };
+        }
+
+        let prUrl = '';
+        let existing = false;
+        const escapedTitle = title.replace(/"/g, '\\"');
+        const escapedBody = body.replace(/"/g, '\\"');
+        try {
+          prUrl = await gitExec(
+            `gh pr create --base "${targetBranch}" --head "${newBranch}" --title "${escapedTitle}" --body "${escapedBody}"`,
+            cwd,
+            NETWORK_TIMEOUT,
+          );
+          debugLog('[Git] Created PR:', prUrl);
+        } catch (prErr: any) {
+          const stderr = prErr.stderr?.toString() || prErr.message || '';
+          if (stderr.includes('already exists')) {
+            try {
+              prUrl = await gitExec(`gh pr view "${newBranch}" --json url --jq .url`, cwd, NETWORK_TIMEOUT);
+              existing = true;
+            } catch {
+              // Switch back
+              try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
+              return { success: false, error: 'A PR already exists for this branch' };
+            }
+          } else {
+            try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
+            return { success: false, error: stderr || 'Failed to create PR' };
+          }
+        }
+
+        // 4. Switch back to target branch
+        try {
+          await gitExec(`git checkout "${targetBranch}"`, cwd);
+          debugLog('[Git] Switched back to:', targetBranch);
+        } catch { /* non-critical */ }
+
+        return { success: true, prUrl, branch: newBranch, existing };
+      } catch (error: any) {
+        debugError('[Git] createBranchPR error:', error);
+        return { success: false, error: error.message || 'Failed to create branch & PR' };
+      }
+    }
+  );
+
+  // ─── Task Summary (commits + diff stats between branches) ────
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_TASK_SUMMARY,
+    async (_event, cwd: string, taskBranch: string, baseBranch: string) => {
+      try {
+        if (!isGitRepo(cwd)) {
+          return { success: false, error: 'Not a git repository' };
+        }
+
+        let commits = '';
+        try {
+          commits = await gitExec(
+            `git log --pretty=format:"%s" ${baseBranch}..${taskBranch}`,
+            cwd,
+          );
+        } catch { /* branch may not exist on remote */ }
+
+        let diffStat = '';
+        try {
+          diffStat = await gitExec(
+            `git diff --stat ${baseBranch}..${taskBranch}`,
+            cwd,
+          );
+        } catch { /* ignore */ }
+
+        return { success: true, commits, diffStat };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to get task summary' };
+      }
+    }
+  );
+
+  // ─── Enable Auto-Merge on PR ─────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_ENABLE_PR_AUTO_MERGE,
+    async (_event, projectPath: string, branch: string) => {
+      try {
+        await gitExec(
+          `gh pr merge "${branch}" --auto --squash`,
+          projectPath,
+          NETWORK_TIMEOUT,
+        );
+        debugLog('[Git] Auto-merge enabled for:', branch);
+        return { success: true };
+      } catch (error: any) {
+        const msg = error.stderr?.toString() || error.message || '';
+        debugError('[Git] enableAutoMerge error:', msg);
+        return { success: false, error: msg || 'Failed to enable auto-merge' };
+      }
+    }
+  );
 }

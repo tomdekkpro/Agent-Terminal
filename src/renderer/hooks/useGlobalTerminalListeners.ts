@@ -39,10 +39,14 @@ export function useGlobalTerminalListeners() {
       })
     );
 
-    // Listen for title changes
+    // Listen for title changes (e.g. agent invocation sends provider name)
     cleanups.push(
       window.electronAPI.onTerminalTitleChange((id, title) => {
-        updateTerminal(id, { title });
+        const terminal = useTerminalStore.getState().terminals.find(t => t.id === id);
+        // Skip if terminal has a linked task — task title takes priority, agent shown via icon
+        if (!terminal?.task) {
+          updateTerminal(id, { title });
+        }
       })
     );
 

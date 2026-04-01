@@ -109,6 +109,12 @@ const electronAPI = {
   listBranches: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_LIST_BRANCHES, projectPath),
   createPR: (projectPath: string, worktreePath: string, taskBranch: string, targetBranch: string, title: string, body: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_PR, projectPath, worktreePath, taskBranch, targetBranch, title, body),
+  createBranchPR: (cwd: string, newBranch: string, targetBranch: string, title: string, body: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_BRANCH_PR, cwd, newBranch, targetBranch, title, body),
+  getTaskSummary: (cwd: string, taskBranch: string, baseBranch: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_TASK_SUMMARY, cwd, taskBranch, baseBranch),
+  enablePRAutoMerge: (projectPath: string, branch: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_ENABLE_PR_AUTO_MERGE, projectPath, branch),
   pushBranch: (cwd: string, branch?: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_PUSH_BRANCH, cwd, branch),
   gitFetch: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_FETCH, cwd),
   gitPull: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_PULL, cwd),

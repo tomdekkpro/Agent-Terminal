@@ -4,7 +4,7 @@ import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, GitBranch, GitMerge, GitPullRequest,
   ArrowLeft, FolderGit2, Folder, Upload, Download, RefreshCw, List,
-  Filter, Loader2, GripVertical,
+  Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
@@ -558,32 +558,51 @@ export function TaskPickerModal({
   );
 }
 
-/** Complete Task Modal - pick branch then choose Merge or Create PR */
+/** Complete Task Modal - single-step dialog with auto-selected base branch */
 function CompleteTaskModal({
   taskBranch,
   taskName,
+  task,
   projectPath,
   isWorktree,
+  hasTaskManager,
+  defaultBaseBranch,
   onMerge: onMergeAction,
   onCreatePR,
+  onCreateBranchPR,
   onPush,
   onCancel,
 }: {
   taskBranch: string;
   taskName?: string;
+  task?: TerminalTask;
   projectPath: string;
   isWorktree: boolean;
+  hasTaskManager: boolean;
+  defaultBaseBranch?: string;
   onMerge: (targetBranch: string) => void;
-  onCreatePR: (targetBranch: string, title: string, body: string) => void;
+  onCreatePR: (targetBranch: string, title: string, body: string, autoMerge: boolean) => void;
+  onCreateBranchPR: (newBranch: string, targetBranch: string, title: string, body: string) => void;
   onPush: () => void;
   onCancel: () => void;
 }) {
   const [branches, setBranches] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
+  const [selectedBranch, setSelectedBranch] = useState(defaultBaseBranch || '');
+  const [showBranchDropdown, setShowBranchDropdown] = useState(false);
+  const [branchSearch, setBranchSearch] = useState('');
   const [prTitle, setPrTitle] = useState(taskName ? `[${taskBranch}] ${taskName}` : taskBranch);
   const [prBody, setPrBody] = useState('');
+  // ClickUp options
+  const [postComment, setPostComment] = useState(false);
+  const [commentText, setCommentText] = useState('');
+  const [commentLoading, setCommentLoading] = useState(false);
+  const [setReadyForReview, setSetReadyForReview] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const PRIORITY_BRANCHES = ['main', 'master', 'develop', 'dev'];
 
   useEffect(() => {
     window.electronAPI
@@ -591,173 +610,312 @@ function CompleteTaskModal({
       .then((result: any) => {
         if (result.success && result.branches) {
           const others = (result.branches as string[]).filter((b) => b !== taskBranch);
-          const priority = ['main', 'master', 'develop', 'dev'];
           others.sort((a, b) => {
-            const ai = priority.indexOf(a);
-            const bi = priority.indexOf(b);
+            const ai = PRIORITY_BRANCHES.indexOf(a);
+            const bi = PRIORITY_BRANCHES.indexOf(b);
             if (ai !== -1 && bi !== -1) return ai - bi;
             if (ai !== -1) return -1;
             if (bi !== -1) return 1;
             return a.localeCompare(b);
           });
           setBranches(others);
+          // Use default base branch if set, otherwise auto-select first priority branch
+          if (!defaultBaseBranch || !others.includes(defaultBaseBranch)) {
+            const auto = others.find((b) => PRIORITY_BRANCHES.includes(b));
+            setSelectedBranch(auto || others[0] || '');
+          }
         }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [projectPath, taskBranch]);
 
-  const filtered = branches.filter((b) => {
-    if (!search) return true;
-    return b.toLowerCase().includes(search.toLowerCase());
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowBranchDropdown(false);
+      }
+    };
+    if (showBranchDropdown) document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showBranchDropdown]);
+
+  // Fetch git summary to pre-fill the comment when checkbox is enabled
+  useEffect(() => {
+    if (!postComment || commentText || !selectedBranch || !taskBranch) return;
+    setCommentLoading(true);
+    window.electronAPI.getTaskSummary(projectPath, taskBranch, selectedBranch)
+      .then((r: any) => {
+        if (r.success) {
+          const commits = (r.commits || '').trim();
+          const diffStat = (r.diffStat || '').trim();
+          const lines: string[] = ['Root cause:\n\n'];
+          lines.push('Solution:');
+          if (commits) {
+            lines.push('\n' + commits.split('\n').map((c: string) => `- ${c}`).join('\n'));
+          }
+          if (diffStat) {
+            lines.push('\nFiles changed:\n' + diffStat);
+          }
+          setCommentText(lines.join('\n'));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setCommentLoading(false));
+  }, [postComment, selectedBranch]);
+
+  const filteredBranches = branches.filter((b) => {
+    if (!branchSearch) return true;
+    return b.toLowerCase().includes(branchSearch.toLowerCase());
   });
 
-  // Step 2: branch selected — show action choices
-  if (selectedBranch) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="w-[480px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-[var(--border)]">
-            <div className="flex items-center gap-2 mb-2">
+  // Branch name for "New Branch & PR" option
+  const taskSlug = task?.customId || task?.id || '';
+  const defaultNewBranch = taskSlug ? `task/${taskSlug}` : '';
+
+  const handleAction = async (action: 'merge' | 'pr' | 'pr-auto' | 'push' | 'branch-pr') => {
+    if (!selectedBranch && action !== 'push') return;
+    setSubmitting(true);
+
+    try {
+      // Post comment to task manager if enabled
+      if (postComment && task && commentText.trim()) {
+        try {
+          await window.electronAPI.postTaskComment(task.id, commentText.trim());
+        } catch { /* non-critical */ }
+      }
+
+      // Update task status to ready for review
+      if (setReadyForReview && task) {
+        try {
+          await window.electronAPI.updateTaskStatus(task.id, 'ready for review');
+        } catch { /* non-critical */ }
+      }
+
+      // Execute the git action
+      if (action === 'merge') {
+        onMergeAction(selectedBranch);
+      } else if (action === 'pr' || action === 'pr-auto') {
+        onCreatePR(selectedBranch, prTitle, prBody, action === 'pr-auto');
+      } else if (action === 'branch-pr') {
+        onCreateBranchPR(defaultNewBranch, selectedBranch, prTitle, prBody);
+      } else {
+        onPush();
+      }
+    } catch {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="w-[520px] max-h-[85vh] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="p-4 border-b border-[var(--border)]">
+          <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Complete Task</h2>
+          <p className="text-[11px] text-[var(--text-muted)]">
+            <span className="font-mono text-[var(--accent)]">{taskBranch}</span>
+            {selectedBranch && (
+              <>
+                {' → '}
+                <span className="font-mono text-emerald-400">{selectedBranch}</span>
+              </>
+            )}
+          </p>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Base branch selector */}
+          <div>
+            <label className="text-[11px] text-[var(--text-muted)] mb-1.5 block">Base Branch</label>
+            <div className="relative" ref={dropdownRef}>
               <button
-                onClick={() => setSelectedBranch(null)}
-                className="w-6 h-6 rounded flex items-center justify-center hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+                onClick={() => setShowBranchDropdown(!showBranchDropdown)}
+                disabled={loading}
+                className="w-full flex items-center gap-2 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
+                <GitBranch className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                <span className="font-mono flex-1 text-left truncate">
+                  {loading ? 'Loading...' : selectedBranch || 'Select branch'}
+                </span>
+                <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] transition-transform', showBranchDropdown && 'rotate-180')} />
               </button>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                Complete Task
-              </h2>
+              {showBranchDropdown && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-10 max-h-[200px] flex flex-col overflow-hidden">
+                  <div className="p-2 border-b border-[var(--border)]">
+                    <input
+                      autoFocus
+                      type="text"
+                      value={branchSearch}
+                      onChange={(e) => setBranchSearch(e.target.value)}
+                      placeholder="Search branches..."
+                      className="w-full px-2 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
+                  <div className="overflow-y-auto p-1">
+                    {filteredBranches.map((branch) => (
+                      <button
+                        key={branch}
+                        onClick={() => { setSelectedBranch(branch); setShowBranchDropdown(false); setBranchSearch(''); }}
+                        className={cn(
+                          'w-full text-left px-3 py-2 rounded-md text-xs font-mono transition-colors flex items-center gap-2',
+                          branch === selectedBranch
+                            ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                            : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                        )}
+                      >
+                        <GitBranch className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
+                        <span className="truncate flex-1">{branch}</span>
+                        {PRIORITY_BRANCHES.slice(0, 2).includes(branch) && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">default</span>
+                        )}
+                      </button>
+                    ))}
+                    {filteredBranches.length === 0 && (
+                      <div className="text-xs text-[var(--text-muted)] text-center py-3">No branches found</div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
-            <p className="text-[11px] text-[var(--text-muted)]">
-              <span className="font-mono text-[var(--accent)]">{taskBranch}</span>
-              {' → '}
-              <span className="font-mono text-emerald-400">{selectedBranch}</span>
-            </p>
           </div>
 
-          <div className="p-4 space-y-3">
-            {/* PR title & body */}
-            <div>
-              <label className="text-[11px] text-[var(--text-muted)] mb-1 block">Title</label>
-              <input
-                type="text"
-                value={prTitle}
-                onChange={(e) => setPrTitle(e.target.value)}
-                className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
-              />
-            </div>
-            <div>
-              <label className="text-[11px] text-[var(--text-muted)] mb-1 block">Description (optional)</label>
-              <textarea
-                value={prBody}
-                onChange={(e) => setPrBody(e.target.value)}
-                rows={3}
-                placeholder="PR description..."
-                className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none"
-              />
-            </div>
+          {/* PR Title & Description */}
+          <div>
+            <label className="text-[11px] text-[var(--text-muted)] mb-1.5 block">PR Title</label>
+            <input
+              type="text"
+              value={prTitle}
+              onChange={(e) => setPrTitle(e.target.value)}
+              className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] text-[var(--text-muted)] mb-1.5 block">Description <span className="opacity-50">(optional)</span></label>
+            <textarea
+              value={prBody}
+              onChange={(e) => setPrBody(e.target.value)}
+              rows={3}
+              placeholder="PR description..."
+              className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none"
+            />
           </div>
 
-          <div className="p-4 border-t border-[var(--border)] flex items-center gap-2 justify-end">
+          {/* Task manager options (ClickUp / etc.) */}
+          {hasTaskManager && task && (
+            <div className="border border-[var(--border)] rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-[var(--bg-secondary)] border-b border-[var(--border)]">
+                <span className="text-[11px] font-medium text-[var(--text-secondary)]">Task Options</span>
+              </div>
+              <div className="p-3 space-y-3">
+                {/* Post comment */}
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={postComment}
+                    onChange={(e) => setPostComment(e.target.checked)}
+                    className="mt-0.5 accent-[var(--accent)]"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 text-xs text-[var(--text-primary)]">
+                      <MessageSquare className="w-3 h-3 text-[var(--text-muted)]" />
+                      Post root cause & solution as comment
+                    </div>
+                    {postComment && (
+                      commentLoading ? (
+                        <div className="flex items-center gap-2 mt-2 text-xs text-[var(--text-muted)]">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading commit summary...
+                        </div>
+                      ) : (
+                        <textarea
+                          value={commentText}
+                          onChange={(e) => setCommentText(e.target.value)}
+                          rows={8}
+                          placeholder="Describe what caused the issue and how it was fixed..."
+                          className="w-full mt-2 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-y font-mono leading-relaxed"
+                        />
+                      )
+                    )}
+                  </div>
+                </label>
+                {/* Set status to ready for review */}
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={setReadyForReview}
+                    onChange={(e) => setSetReadyForReview(e.target.checked)}
+                    className="accent-[var(--accent)]"
+                  />
+                  <div className="flex items-center gap-1.5 text-xs text-[var(--text-primary)]">
+                    <CheckCircle2 className="w-3 h-3 text-[var(--text-muted)]" />
+                    Change status to <span className="font-medium text-amber-400">Ready for Review</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="p-4 border-t border-[var(--border)] flex items-center gap-2 justify-between">
+          <button
+            onClick={() => handleAction('push')}
+            disabled={submitting}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors"
+            title="Push current branch to remote without creating a PR"
+          >
+            <Upload className="w-3 h-3" />
+            Push Only
+          </button>
+          <div className="flex items-center gap-2">
             <button
               onClick={onCancel}
+              disabled={submitting}
               className="px-3 py-2 rounded-lg text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
             >
               Cancel
             </button>
             {isWorktree && (
               <button
-                onClick={() => onMergeAction(selectedBranch)}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+                onClick={() => handleAction('merge')}
+                disabled={!selectedBranch || submitting}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors disabled:opacity-40"
               >
                 <GitMerge className="w-3.5 h-3.5" />
                 Merge Locally
               </button>
             )}
+            {!isWorktree && defaultNewBranch && (
+              <button
+                onClick={() => handleAction('branch-pr')}
+                disabled={!selectedBranch || submitting}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-sky-500/20 text-sky-400 hover:bg-sky-500/30 transition-colors disabled:opacity-40"
+                title={`Create branch "${defaultNewBranch}" from current commits and PR to ${selectedBranch}`}
+              >
+                <GitBranchPlus className="w-3.5 h-3.5" />
+                Branch & PR
+              </button>
+            )}
             <button
-              onClick={() => onCreatePR(selectedBranch, prTitle, prBody)}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors"
+              onClick={() => handleAction('pr')}
+              disabled={!selectedBranch || submitting}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-40"
             >
               <GitPullRequest className="w-3.5 h-3.5" />
               Create PR
             </button>
+            <button
+              onClick={() => handleAction('pr-auto')}
+              disabled={!selectedBranch || submitting}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 transition-colors disabled:opacity-40"
+              title="Create PR and enable auto-merge when checks pass"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              PR + Auto Merge
+            </button>
           </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Step 1: pick target branch
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-[420px] max-h-[60vh] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-        <div className="p-4 border-b border-[var(--border)]">
-          <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">
-            Complete Task
-          </h2>
-          <p className="text-[11px] text-[var(--text-muted)] mb-3">
-            Select target branch for <span className="font-mono text-[var(--accent)]">{taskBranch}</span>
-          </p>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
-            <input
-              type="text"
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search branches..."
-              className="w-full pl-9 pr-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
-            />
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {loading ? (
-            <div className="flex items-center justify-center h-20 text-[var(--text-muted)]">
-              <span className="text-sm">Loading branches...</span>
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="flex items-center justify-center h-20 text-[var(--text-muted)]">
-              <span className="text-sm">No branches found</span>
-            </div>
-          ) : (
-            filtered.map((branch) => {
-              const isMain = branch === 'main' || branch === 'master';
-              return (
-                <button
-                  key={branch}
-                  onClick={() => setSelectedBranch(branch)}
-                  className="w-full text-left p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors flex items-center gap-3"
-                >
-                  <GitBranch className="w-3.5 h-3.5 shrink-0 text-[var(--text-muted)]" />
-                  <span className="text-sm font-mono text-[var(--text-primary)] truncate flex-1">
-                    {branch}
-                  </span>
-                  {isMain && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-                      default
-                    </span>
-                  )}
-                </button>
-              );
-            })
-          )}
-        </div>
-        <div className="p-3 border-t border-[var(--border)] flex items-center justify-between">
-          <button
-            onClick={onPush}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors"
-            title="Push current branch to remote without creating a PR"
-          >
-            <Upload className="w-3 h-3" />
-            Push to Remote
-          </button>
-          <button
-            onClick={onCancel}
-            className="px-3 py-1.5 rounded-md text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
-          >
-            Cancel
-          </button>
         </div>
       </div>
     </div>
@@ -1063,7 +1221,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       let cwd = activeProject?.path || '';
 
       if (task) {
-        const title = `${task.customId || task.id} - ${task.name}`.slice(0, 40);
+        const taskLabel = task.customId || task.id;
+        const title = task.name.length > 30
+          ? `${taskLabel} · ${task.name.slice(0, 30)}...`
+          : `${taskLabel} · ${task.name}`;
         const terminalTask: TerminalTask = {
           id: task.id,
           customId: task.customId,
@@ -1105,6 +1266,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             });
           }
         } catch { /* non-critical */ }
+
+        // Auto-detect base branch — use current branch as default
+        try {
+          const brResult = await window.electronAPI.listBranches(activeProject?.path || cwd);
+          if (brResult.success) {
+            const base = brResult.current || undefined;
+            if (base) {
+              useTerminalStore.getState().updateTerminal(terminal.id, { baseBranch: base });
+            }
+          }
+        } catch { /* non-critical */ }
       }
 
       await window.electronAPI.createTerminal({
@@ -1122,7 +1294,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   /** Link an existing terminal to a task (no PTY creation, no worktree) */
   const linkTaskToTerminal = useCallback(
     async (terminalId: string, task: TaskManagerTask) => {
-      const title = `${task.customId || task.id} - ${task.name}`.slice(0, 40);
+      const taskLabel = task.customId || task.id;
+      const title = task.name.length > 30
+        ? `${taskLabel} · ${task.name.slice(0, 30)}...`
+        : `${taskLabel} · ${task.name}`;
       const terminalTask: TerminalTask = {
         id: task.id,
         customId: task.customId,
@@ -1145,9 +1320,19 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         }
       } catch { /* non-critical */ }
 
-      // Task context is available but not auto-sent — user inputs manually
+      // Auto-detect base branch — use current branch as default
+      try {
+        const t = useTerminalStore.getState().terminals.find((x) => x.id === terminalId);
+        const cwd = t?.cwd || activeProject?.path || '';
+        if (cwd) {
+          const brResult = await window.electronAPI.listBranches(cwd);
+          if (brResult.success && brResult.current) {
+            useTerminalStore.getState().updateTerminal(terminalId, { baseBranch: brResult.current });
+          }
+        }
+      } catch { /* non-critical */ }
     },
-    []
+    [activeProject]
   );
 
   /** Create a terminal in a new tab, optionally with a task */
@@ -1278,6 +1463,32 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     useTerminalStore.getState().setAgentProvider(id, provider);
   }, []);
 
+  // Cached branch list for base branch picker
+  const [projectBranches, setProjectBranches] = useState<string[]>([]);
+  useEffect(() => {
+    if (!activeProject?.path) { setProjectBranches([]); return; }
+    window.electronAPI.listBranches(activeProject.path)
+      .then((r: any) => {
+        if (r.success && r.branches) {
+          const priority = ['main', 'master', 'develop', 'dev'];
+          const sorted = [...r.branches].sort((a: string, b: string) => {
+            const ai = priority.indexOf(a);
+            const bi = priority.indexOf(b);
+            if (ai !== -1 && bi !== -1) return ai - bi;
+            if (ai !== -1) return -1;
+            if (bi !== -1) return 1;
+            return a.localeCompare(b);
+          });
+          setProjectBranches(sorted);
+        }
+      })
+      .catch(() => {});
+  }, [activeProject?.path]);
+
+  const handleBaseBranchChange = useCallback((terminalId: string, branch: string) => {
+    useTerminalStore.getState().updateTerminal(terminalId, { baseBranch: branch });
+  }, []);
+
   const projectSkills = activeProject?.skills || [];
 
   const handleInvokeSkill = useCallback(async (terminalId: string, skill: import('../../../shared/types').ProjectSkill) => {
@@ -1310,9 +1521,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     cwd?: string;
     isWorktree: boolean;
     task?: TerminalTask;
+    baseBranch?: string;
   } | null>(null);
 
-  const handleMergeComplete = useCallback(async (terminal: { id: string; cwd?: string; worktreePath?: string; worktreeBranch?: string; task?: TerminalTask }) => {
+  const handleMergeComplete = useCallback(async (terminal: { id: string; cwd?: string; worktreePath?: string; worktreeBranch?: string; task?: TerminalTask; baseBranch?: string }) => {
     if (!activeProject?.path) return;
 
     if (terminal.worktreePath && terminal.worktreeBranch) {
@@ -1323,6 +1535,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         worktreeBranch: terminal.worktreeBranch,
         isWorktree: true,
         task: terminal.task,
+        baseBranch: terminal.baseBranch,
       });
     } else if (terminal.task) {
       // Current-branch mode — detect current branch
@@ -1336,6 +1549,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             cwd,
             isWorktree: false,
             task: terminal.task,
+            baseBranch: terminal.baseBranch,
           });
         }
       } catch { /* ignore */ }
@@ -1373,12 +1587,6 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Stop timer and sync tracked time
       await stopAndSyncTimer(mergeTarget.id, mergeTarget.task?.id);
 
-      if (mergeTarget.task) {
-        try {
-          await window.electronAPI.updateTaskStatus(mergeTarget.task.id, 'complete');
-        } catch { /* non-critical */ }
-      }
-
       setMergeStatus({ message: `Merged into ${result.targetBranch} successfully`, type: 'success' });
     } else {
       setMergeStatus({ message: result.error || 'Merge failed', type: 'error' });
@@ -1402,7 +1610,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     });
   }, [activeProject]);
 
-  const executeCreatePR = useCallback(async (targetBranch: string, title: string, body: string) => {
+  const executeCreatePR = useCallback(async (targetBranch: string, title: string, body: string, autoMerge = false) => {
     if (!mergeTarget || !activeProject?.path) return;
     const saved = mergeTarget;
     setMergeTarget(null);
@@ -1420,9 +1628,18 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     );
 
     if (result.success) {
+      // Enable auto-merge if requested
+      if (autoMerge && result.prUrl && !result.existing) {
+        try {
+          await window.electronAPI.enablePRAutoMerge(activeProject.path, taskBranch);
+        } catch { /* non-critical — repo may not have auto-merge enabled */ }
+      }
+
       const msg = result.existing
         ? `PR already exists: ${result.prUrl}`
-        : `PR created: ${result.prUrl}`;
+        : autoMerge
+          ? `PR created with auto-merge: ${result.prUrl}`
+          : `PR created: ${result.prUrl}`;
       setMergeStatus({ message: msg, type: 'success' });
 
       if (result.prUrl) {
@@ -1460,18 +1677,40 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       await stopAndSyncTimer(saved.id, saved.task?.id);
       // Clean up worktree — code is on remote now
       await cleanupWorktree(saved);
-
-      if (saved.task) {
-        try {
-          await window.electronAPI.updateTaskStatus(saved.task.id, 'complete');
-        } catch { /* non-critical */ }
-      }
     } else {
       setMergeStatus({ message: result.error || 'Failed to push', type: 'error' });
     }
 
     setTimeout(() => setMergeStatus(null), 5000);
   }, [mergeTarget, activeProject, cleanupWorktree, stopAndSyncTimer]);
+
+  const executeCreateBranchPR = useCallback(async (newBranch: string, targetBranch: string, title: string, body: string) => {
+    if (!mergeTarget || !activeProject?.path) return;
+    const saved = mergeTarget;
+    setMergeTarget(null);
+
+    const cwd = saved.cwd || saved.worktreePath || activeProject.path;
+
+    const result = await window.electronAPI.createBranchPR(cwd, newBranch, targetBranch, title, body);
+
+    if (result.success) {
+      const msg = result.existing
+        ? `PR already exists: ${result.prUrl}`
+        : `Branch "${result.branch}" created, PR: ${result.prUrl}`;
+      setMergeStatus({ message: msg, type: 'success' });
+
+      if (result.prUrl) {
+        window.electronAPI?.openExternal?.(result.prUrl);
+      }
+
+      // Stop timer and sync tracked time
+      await stopAndSyncTimer(saved.id, saved.task?.id);
+    } else {
+      setMergeStatus({ message: result.error || 'Failed to create branch & PR', type: 'error' });
+    }
+
+    setTimeout(() => setMergeStatus(null), 8000);
+  }, [mergeTarget, activeProject, stopAndSyncTimer]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
@@ -1502,10 +1741,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         <CompleteTaskModal
           taskBranch={mergeTarget.worktreeBranch || mergeTarget.currentBranch || ''}
           taskName={mergeTarget.task?.name}
+          task={mergeTarget.task}
           projectPath={mergeTarget.cwd || activeProject.path}
           isWorktree={mergeTarget.isWorktree}
+          defaultBaseBranch={mergeTarget.baseBranch}
+          hasTaskManager={settings.taskManagerProvider !== 'none'}
           onMerge={executeMerge}
           onCreatePR={executeCreatePR}
+          onCreateBranchPR={executeCreateBranchPR}
           onPush={executePush}
           onCancel={() => setMergeTarget(null)}
         />
@@ -1651,6 +1894,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               ) : (
                 <TerminalIcon className="w-3.5 h-3.5 shrink-0" />
               )}
+              {/* Task status dot */}
+              {firstTerminal.task && (
+                <div
+                  className="w-2 h-2 rounded-full shrink-0 -mr-1"
+                  style={{ backgroundColor: firstTerminal.task.statusColor }}
+                  title={`${firstTerminal.task.status}`}
+                />
+              )}
               {editingGroupId === groupId ? (
                 <input
                   className="bg-transparent text-xs text-[var(--text-primary)] outline-none border-b border-[var(--accent)] w-[120px] py-0"
@@ -1675,7 +1926,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                 />
               ) : (
                 <span
-                  className="truncate max-w-[120px]"
+                  className="truncate max-w-[160px]"
+                  title={firstTerminal.task ? `${firstTerminal.task.customId ? firstTerminal.task.customId + ' — ' : ''}${firstTerminal.task.name} [${firstTerminal.task.status}]` : firstTerminal.title}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     setEditingGroupId(groupId);
@@ -1882,6 +2134,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                       onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                       onMergeComplete={() => handleMergeComplete(terminal)}
                       onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
+                      onBaseBranchChange={(b) => handleBaseBranchChange(terminal.id, b)}
+                      availableBranches={projectBranches}
                       onClose={() => handleCloseTerminal(terminal.id)}
                       onFocus={() => setActiveTerminal(terminal.id)}
                       isDraggedOver={dragOverTerminalId === terminal.id && dragTerminalId !== terminal.id}
@@ -1913,6 +2167,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                     onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                     onMergeComplete={() => handleMergeComplete(terminal)}
                     onLinkTask={settings.taskManagerProvider !== 'none' ? () => handleLinkTask(terminal.id) : undefined}
+                    onBaseBranchChange={(b) => handleBaseBranchChange(terminal.id, b)}
+                    availableBranches={projectBranches}
                   />
                 </div>
               ))
