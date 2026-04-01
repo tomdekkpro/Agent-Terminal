@@ -158,7 +158,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         // Detect current branch
         let current = '';
         try {
-          current = await gitExec('git rev-parse --abbrev-ref HEAD', projectPath, 5000);
+          current = (await gitExec('git rev-parse --abbrev-ref HEAD', projectPath, 5000)).trim();
         } catch { /* ignore */ }
 
         return { success: true, branches, current };
