@@ -683,10 +683,11 @@ function CompleteTaskModal({
     let silenceTimer: ReturnType<typeof setTimeout>;
     let safetyTimer: ReturnType<typeof setTimeout>;
     let resolved = false;
+    const MARKER = '===TASK_SUMMARY_START===';
 
     const stripAnsi = (text: string) =>
       text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\x1b\]\d*;[^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
         .replace(/\x1b[()][0-9A-B]/g, '')
         .replace(/\r/g, '');
 
@@ -698,12 +699,18 @@ function CompleteTaskModal({
       removeOutputTap(terminalId);
 
       const clean = stripAnsi(output).trim();
-      // Extract the summary part — look for Root cause / Solution markers
-      const rcIdx = clean.indexOf('Root cause:');
+      // Extract only the agent's response after our marker
+      const markerIdx = clean.lastIndexOf(MARKER);
+      const response = markerIdx !== -1 ? clean.slice(markerIdx + MARKER.length).trim() : clean;
+      // Find the actual root cause/solution content (use lastIndexOf to skip any echoed prompt)
+      const rcIdx = response.lastIndexOf('Root cause:');
       if (rcIdx !== -1) {
-        setCommentText(clean.slice(rcIdx));
+        setCommentText(response.slice(rcIdx).trim());
+      } else if (response) {
+        // Agent responded but without exact format — use as-is
+        setCommentText(`Root cause:\n${response}`);
       } else {
-        setCommentText(clean || 'Root cause:\n\n\nSolution:\n');
+        setCommentText('Root cause:\n\n\nSolution:\n');
       }
       setCommentLoading(false);
     };
@@ -718,7 +725,7 @@ function CompleteTaskModal({
     // Safety timeout — don't wait forever
     safetyTimer = setTimeout(finish, 30000);
 
-    const prompt = 'Please provide a brief summary of the root cause and solution for this task. Use this exact format:\n\nRoot cause:\n[what caused the issue in 1-2 sentences]\n\nSolution:\n[what was done to fix it in 1-2 sentences]\n\nOnly output the summary, nothing else.\n';
+    const prompt = `Summarize what you did for this task. Start your response with the exact line: ${MARKER}\nThen use this format:\n\nRoot cause:\n(1-2 sentences)\n\nSolution:\n(1-2 sentences)\n\nOnly output the marker line and summary, nothing else.`;
     window.electronAPI.sendTerminalInput(terminalId, prompt + '\n');
 
     return () => {

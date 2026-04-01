@@ -398,7 +398,10 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
     }
   );
 
-  // ─── Create Branch & PR (branch from HEAD, push, create PR, switch back) ──
+  // ─── Create Branch & PR ────────────────────────────────────────
+  // Creates a new branch from the current branch, commits all changes
+  // (staged + unstaged), pushes, creates a PR, then switches back to the
+  // target branch and resets it to its remote state.
   ipcMain.handle(
     IPC_CHANNELS.GIT_CREATE_BRANCH_PR,
     async (
@@ -414,37 +417,48 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           return { success: false, error: 'Not a git repository' };
         }
 
-        // 1. Create and switch to new branch
+        // 1. Create and switch to new branch (uncommitted changes carry over)
         try {
           await gitExec(`git checkout -b "${newBranch}"`, cwd);
           debugLog('[Git] Created branch:', newBranch);
         } catch (err: any) {
           const msg = err.stderr?.toString() || err.message || '';
-          // Branch may already exist — try switching to it and resetting
           if (msg.includes('already exists')) {
             return { success: false, error: `Branch "${newBranch}" already exists` };
           }
           return { success: false, error: `Failed to create branch: ${msg}` };
         }
 
-        // 2. Push new branch to remote
+        // 2. Stage and commit all file changes on the new branch
+        try {
+          await gitExec('git add -A', cwd);
+          const escapedCommitMsg = title.replace(/"/g, '\\"');
+          await gitExec(`git commit -m "${escapedCommitMsg}"`, cwd);
+          debugLog('[Git] Committed changes on:', newBranch);
+        } catch (commitErr: any) {
+          const msg = commitErr.stderr?.toString() || commitErr.message || '';
+          // "nothing to commit" is fine — changes may already be committed
+          if (!msg.includes('nothing to commit') && !msg.includes('no changes added')) {
+            debugLog('[Git] Commit note:', msg);
+          }
+        }
+
+        // 3. Push new branch to remote
         try {
           await gitExec(`git push -u origin "${newBranch}"`, cwd, NETWORK_TIMEOUT);
           debugLog('[Git] Pushed branch:', newBranch);
         } catch (pushErr: any) {
           const msg = pushErr.stderr?.toString() || pushErr.message || '';
           if (!msg.includes('up-to-date') && !msg.includes('up to date')) {
-            // Switch back before returning error
             try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
             return { success: false, error: `Failed to push branch: ${msg}` };
           }
         }
 
-        // 3. Create PR via gh CLI
+        // 4. Create PR via gh CLI
         try {
           await gitExec('gh --version', cwd, 10000);
         } catch {
-          // Switch back even without PR
           try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
           return { success: false, error: 'GitHub CLI (gh) is not installed. Branch was pushed but PR could not be created.' };
         }
@@ -467,7 +481,6 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
               prUrl = await gitExec(`gh pr view "${newBranch}" --json url --jq .url`, cwd, NETWORK_TIMEOUT);
               existing = true;
             } catch {
-              // Switch back
               try { await gitExec(`git checkout "${targetBranch}"`, cwd); } catch { /* best effort */ }
               return { success: false, error: 'A PR already exists for this branch' };
             }
@@ -477,10 +490,20 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        // 4. Switch back to target branch
+        // 5. Switch back to target branch and reset to remote state
+        //    so local target branch is clean (changes only exist on task branch)
         try {
           await gitExec(`git checkout "${targetBranch}"`, cwd);
           debugLog('[Git] Switched back to:', targetBranch);
+          try {
+            await gitExec(`git reset --hard origin/${targetBranch}`, cwd);
+            debugLog('[Git] Reset', targetBranch, 'to origin');
+          } catch {
+            try {
+              await gitExec('git fetch origin', cwd, NETWORK_TIMEOUT);
+              await gitExec(`git reset --hard origin/${targetBranch}`, cwd);
+            } catch { /* best effort — PR is already created */ }
+          }
         } catch { /* non-critical */ }
 
         return { success: true, prUrl, branch: newBranch, existing };
