@@ -30,6 +30,8 @@ export interface Terminal {
   skipPermissions?: boolean;
   worktreePath?: string;
   worktreeBranch?: string;
+  /** Target branch for merging/PR when completing task */
+  baseBranch?: string;
   timeTracking?: TimeTracking;
   pendingTaskPrompt?: string;
   /** True when restored from saved state but PTY not yet created */
@@ -81,6 +83,7 @@ function buildSaveableState(state: TerminalState) {
       task: t.task,
       worktreePath: t.worktreePath,
       worktreeBranch: t.worktreeBranch,
+      baseBranch: t.baseBranch,
       timeTracking: t.timeTracking,
       previewUrl: t.previewUrl,
     }));
@@ -126,6 +129,7 @@ export function flushTerminalStateSync(): void {
       task: t.task,
       worktreePath: t.worktreePath,
       worktreeBranch: t.worktreeBranch,
+      baseBranch: t.baseBranch,
       timeTracking: t.timeTracking,
       previewUrl: t.previewUrl,
     }));
@@ -535,6 +539,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             task: t.task || (t.clickUpTask ? { ...t.clickUpTask, provider: 'clickup' as const } : undefined),
             worktreePath: t.worktreePath,
             worktreeBranch: t.worktreeBranch,
+            baseBranch: t.baseBranch,
             timeTracking: t.timeTracking,
             previewUrl: t.previewUrl,
             needsRestore: isAgent,

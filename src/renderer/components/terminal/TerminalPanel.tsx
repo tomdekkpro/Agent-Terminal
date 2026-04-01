@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -32,6 +32,8 @@ interface TerminalPanelProps {
   onInvokeSkill?: (skill: import('../../../shared/types').ProjectSkill) => void;
   onMergeComplete?: () => void;
   onLinkTask?: () => void;
+  onBaseBranchChange?: (branch: string) => void;
+  availableBranches?: string[];
   onClose?: () => void;
   onFocus?: () => void;
   onDragHandleStart?: (e: React.DragEvent) => void;
@@ -66,7 +68,7 @@ const TERMINAL_THEME = {
   brightWhite: '#f8fafc',
 };
 
-export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver }: TerminalPanelProps) {
+export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onBaseBranchChange, availableBranches, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver }: TerminalPanelProps) {
   const currentProvider = agentProviders.find((p) => p.id === terminal.agentProvider) || agentProviders[0];
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -145,6 +147,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const [editTitle, setEditTitle] = useState('');
   const updateTerminal = useTerminalStore((s) => s.updateTerminal);
 
+  // Base branch picker state
+  const [showBaseBranchMenu, setShowBaseBranchMenu] = useState(false);
+  const baseBranchMenuRef = useRef<HTMLDivElement>(null);
+
   // Close provider dropdown on outside click
   useEffect(() => {
     if (!showProviderMenu) return;
@@ -156,6 +162,18 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showProviderMenu]);
+
+  // Close base branch dropdown on outside click
+  useEffect(() => {
+    if (!showBaseBranchMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (baseBranchMenuRef.current && !baseBranchMenuRef.current.contains(e.target as Node)) {
+        setShowBaseBranchMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showBaseBranchMenu]);
 
   /** Safe fit — xterm can throw if renderer isn't fully ready */
   const safeFit = () => {
@@ -559,7 +577,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               autoFocus
               onClick={(e) => e.stopPropagation()}
             />
-          ) : (
+          ) : !terminal.task ? (
             <span
               className="text-xs text-[var(--text-secondary)] truncate shrink-0"
               onDoubleClick={(e) => {
@@ -570,7 +588,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             >
               {terminal.title}
             </span>
-          )}
+          ) : null}
           {terminal.task && (
             <button
               onClick={(e) => {
@@ -600,6 +618,43 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <GitBranch className="w-2.5 h-2.5" />
               <span className="font-mono">{terminal.worktreeBranch}</span>
             </span>
+          )}
+          {/* Base branch indicator */}
+          {terminal.task && terminal.baseBranch && (
+            <div className="relative shrink-0" ref={baseBranchMenuRef}>
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowBaseBranchMenu(!showBaseBranchMenu); }}
+                className="flex items-center gap-1 text-[10px] text-emerald-400/70 hover:text-emerald-400 transition-colors"
+                title="Base branch — click to change"
+              >
+                <ArrowRight className="w-2.5 h-2.5" />
+                <span className="font-mono">{terminal.baseBranch}</span>
+                <ChevronDown className="w-2.5 h-2.5 opacity-50" />
+              </button>
+              {showBaseBranchMenu && availableBranches && (
+                <div className="absolute top-full left-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-20 max-h-[200px] overflow-y-auto min-w-[140px]">
+                  {availableBranches.map((branch) => (
+                    <button
+                      key={branch}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onBaseBranchChange?.(branch);
+                        setShowBaseBranchMenu(false);
+                      }}
+                      className={cn(
+                        'w-full text-left px-3 py-1.5 text-xs font-mono transition-colors flex items-center gap-1.5',
+                        branch === terminal.baseBranch
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                      )}
+                    >
+                      <GitBranch className="w-2.5 h-2.5 shrink-0 text-[var(--text-muted)]" />
+                      {branch}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
           {!terminal.task && !terminal.worktreeBranch && isSplit && (
             <span className="text-[10px] text-[var(--text-muted)] truncate">{terminal.cwd || '~'}</span>
