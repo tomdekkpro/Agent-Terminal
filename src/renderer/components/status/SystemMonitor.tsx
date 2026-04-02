@@ -234,25 +234,6 @@ export function SystemMonitor() {
                 />
               </div>
 
-              {/* Per-core mini bars */}
-              <div className="grid grid-cols-4 gap-x-2 gap-y-1 pt-1">
-                {data.cpu.cores.map((core, i) => (
-                  <div key={i} className="space-y-0.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[9px] text-[var(--text-muted)]">C{i}</span>
-                      <span className={cn('text-[9px] font-mono tabular-nums', getColorClass(core.percent))}>
-                        {core.percent}%
-                      </span>
-                    </div>
-                    <div className="h-1 bg-[var(--bg-secondary)] rounded-full overflow-hidden">
-                      <div
-                        className={cn('h-full rounded-full transition-all duration-500', getBarGradient(core.percent))}
-                        style={{ width: `${Math.min(core.percent, 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
 
             {/* Memory Section */}
