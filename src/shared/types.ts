@@ -195,6 +195,47 @@ export interface CopilotUsageData {
   linesRemoved?: number;
 }
 
+// Dev Server
+export type DevServerType = 'frontend' | 'backend';
+
+export interface DevServerConfig {
+  frontendCmd: string;
+  frontendCwd: string;  // relative to project path
+  backendCmd: string;
+  backendCwd: string;   // relative to project path
+}
+
+export type DevServerStatus = 'stopped' | 'starting' | 'running' | 'error';
+
+export interface DevServerState {
+  projectId: string;
+  type: DevServerType;
+  status: DevServerStatus;
+  pid?: number;
+  error?: string;
+}
+
+export interface DevServerEvent {
+  projectId: string;
+  type: DevServerType;
+  status: DevServerStatus;
+  pid?: number;
+  error?: string;
+  output?: string;
+}
+
+export interface DetectedServer {
+  cmd: string;
+  cwd: string;
+  label: string;
+  confidence: number;
+}
+
+export interface DetectResult {
+  frontend: DetectedServer[];
+  backend: DetectedServer[];
+}
+
 // Project Management
 export interface ProjectSkill {
   id: string;
@@ -216,6 +257,7 @@ export interface Project {
   agentModel?: string;
   agentConfig?: Record<string, string>;
   skills?: ProjectSkill[];
+  devServer?: DevServerConfig;
 }
 
 export interface ProjectTabState {

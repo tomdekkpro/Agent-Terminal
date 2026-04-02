@@ -153,6 +153,17 @@ const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.INSIGHTS_STREAM_EVENT, handler);
   },
 
+  // Dev Server
+  startDevServer: (projectId: string, type: string) => ipcRenderer.invoke(IPC_CHANNELS.DEV_SERVER_START, projectId, type),
+  stopDevServer: (projectId: string, type: string) => ipcRenderer.invoke(IPC_CHANNELS.DEV_SERVER_STOP, projectId, type),
+  getDevServerStatus: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.DEV_SERVER_STATUS, projectId),
+  detectDevServers: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.DEV_SERVER_DETECT, projectPath),
+  onDevServerEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.DEV_SERVER_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.DEV_SERVER_EVENT, handler);
+  },
+
   // Service Status
   requestServiceStatus: () => ipcRenderer.invoke(IPC_CHANNELS.SERVICE_STATUS_REQUEST),
   onServiceStatusUpdated: (callback: (summary: any) => void) => {
