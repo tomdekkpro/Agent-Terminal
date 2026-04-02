@@ -137,6 +137,9 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
+  // System Monitor
+  SYSTEM_MONITOR_REQUEST: 'system-monitor:request',
+  SYSTEM_MONITOR_UPDATED: 'system-monitor:updated',
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',

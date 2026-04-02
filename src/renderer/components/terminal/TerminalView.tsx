@@ -13,6 +13,7 @@ import { TerminalPanel } from './TerminalPanel';
 import { PreviewPanel } from './PreviewPanel';
 import { UsageIndicator } from '../usage/UsageIndicator';
 import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
+import { SystemMonitor } from '../status/SystemMonitor';
 import { cn } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
 
@@ -1889,6 +1890,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               </button>
             </div>
           )}
+          <SystemMonitor />
           <ServiceStatusIndicator />
           <UsageIndicator />
           <span className="text-xs text-[var(--text-muted)]">
