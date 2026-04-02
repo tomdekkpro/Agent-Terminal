@@ -1,9 +1,10 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
-import { FolderOpen, Plus, X, ChevronDown, GripVertical, Settings, Play, Square } from 'lucide-react';
+import { FolderOpen, Plus, X, ChevronDown, GripVertical, Settings, Play, Square, ScrollText } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store';
 import { useTerminalStore } from '../../stores/terminal-store';
+import { useDevServerStore } from '../../stores/dev-server-store';
 import { cn } from '../../../shared/utils';
-import type { AgentProviderMeta, DevServerStatus, DevServerEvent } from '../../../shared/types';
+import type { AgentProviderMeta, DevServerEvent } from '../../../shared/types';
 import { ProjectSettingsModal } from '../project/ProjectSettingsModal';
 
 export function ProjectTabBar() {
@@ -23,8 +24,11 @@ export function ProjectTabBar() {
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Dev server status tracking
-  const [serverStatus, setServerStatus] = useState<Record<string, { frontend: DevServerStatus; backend: DevServerStatus }>>({});
+  // Dev server status tracking (from store)
+  const serverStatus = useDevServerStore((s) => s.status);
+  const handleDevServerEvent = useDevServerStore((s) => s.handleEvent);
+  const toggleLog = useDevServerStore((s) => s.toggleLog);
+  const activeLog = useDevServerStore((s) => s.activeLog);
 
   // Load agent providers when settings modal opens
   useEffect(() => {
@@ -43,25 +47,21 @@ export function ProjectTabBar() {
     window.electronAPI.getDevServerStatus?.(activeProjectId)
       .then((result: any) => {
         if (result?.success && result.data) {
-          setServerStatus((prev) => ({ ...prev, [activeProjectId]: result.data }));
+          // Seed the store with initial status
+          handleDevServerEvent({ projectId: activeProjectId, type: 'frontend', status: result.data.frontend });
+          handleDevServerEvent({ projectId: activeProjectId, type: 'backend', status: result.data.backend });
         }
       })
       .catch(() => {});
-  }, [activeProjectId]);
+  }, [activeProjectId, handleDevServerEvent]);
 
-  // Listen for dev server events
+  // Listen for dev server events — pipe into store
   useEffect(() => {
     const unsub = window.electronAPI.onDevServerEvent?.((event: DevServerEvent) => {
-      setServerStatus((prev) => {
-        const current = prev[event.projectId] || { frontend: 'stopped', backend: 'stopped' };
-        return {
-          ...prev,
-          [event.projectId]: { ...current, [event.type]: event.status },
-        };
-      });
+      handleDevServerEvent(event);
     });
     return () => { unsub?.(); };
-  }, []);
+  }, [handleDevServerEvent]);
 
   const handleToggleServer = useCallback(async (projectId: string, type: 'frontend' | 'backend') => {
     const current = serverStatus[projectId]?.[type] || 'stopped';
@@ -70,21 +70,14 @@ export function ProjectTabBar() {
     } else {
       const result = await window.electronAPI.startDevServer?.(projectId, type);
       if (result && !result.success) {
-        // Brief flash of error — update status
-        setServerStatus((prev) => ({
-          ...prev,
-          [projectId]: { ...(prev[projectId] || { frontend: 'stopped', backend: 'stopped' }), [type]: 'error' },
-        }));
-        // Reset after 2s
+        // Brief flash of error via store
+        handleDevServerEvent({ projectId, type, status: 'error', error: result.error });
         setTimeout(() => {
-          setServerStatus((prev) => ({
-            ...prev,
-            [projectId]: { ...(prev[projectId] || { frontend: 'stopped', backend: 'stopped' }), [type]: 'stopped' },
-          }));
+          handleDevServerEvent({ projectId, type, status: 'stopped' });
         }, 2000);
       }
     }
-  }, [serverStatus]);
+  }, [serverStatus, handleDevServerEvent]);
 
   // Drag state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -254,50 +247,90 @@ export function ProjectTabBar() {
         return (
           <div className="flex items-center gap-1 shrink-0 border-l border-[var(--border)] pl-2 ml-1">
             {hasFe && (
-              <button
-                onClick={() => handleToggleServer(activeProject.id, 'frontend')}
-                title={`Frontend: ${status.frontend}${status.frontend === 'stopped' ? ' — Click to start' : ' — Click to stop'}`}
-                className={cn(
-                  'flex items-center gap-1 h-6 px-2 rounded text-[10px] font-medium transition-all',
-                  status.frontend === 'running'
-                    ? 'bg-[#22c55e]/15 text-[#22c55e] hover:bg-[#ef4444]/15 hover:text-[#ef4444]'
-                    : status.frontend === 'starting'
-                    ? 'bg-[#f59e0b]/15 text-[#f59e0b] animate-pulse'
-                    : status.frontend === 'error'
-                    ? 'bg-[#ef4444]/15 text-[#ef4444]'
-                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[#22c55e] hover:bg-[#22c55e]/10',
-                )}
-              >
-                {status.frontend === 'running' || status.frontend === 'starting' ? (
-                  <Square className="w-2.5 h-2.5" />
-                ) : (
-                  <Play className="w-2.5 h-2.5" />
-                )}
-                <span>FE</span>
-              </button>
+              <div className="flex items-center gap-0">
+                <button
+                  onClick={() => handleToggleServer(activeProject.id, 'frontend')}
+                  title={`Frontend: ${status.frontend}${status.frontend === 'stopped' ? ' — Click to start' : ' — Click to stop'}`}
+                  className={cn(
+                    'flex items-center gap-1 h-6 px-2 rounded-l text-[10px] font-medium transition-all',
+                    status.frontend === 'running'
+                      ? 'bg-[#22c55e]/15 text-[#22c55e] hover:bg-[#ef4444]/15 hover:text-[#ef4444]'
+                      : status.frontend === 'starting'
+                      ? 'bg-[#f59e0b]/15 text-[#f59e0b] animate-pulse'
+                      : status.frontend === 'error'
+                      ? 'bg-[#ef4444]/15 text-[#ef4444]'
+                      : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[#22c55e] hover:bg-[#22c55e]/10',
+                  )}
+                >
+                  {status.frontend === 'running' || status.frontend === 'starting' ? (
+                    <Square className="w-2.5 h-2.5" />
+                  ) : (
+                    <Play className="w-2.5 h-2.5" />
+                  )}
+                  <span>FE</span>
+                </button>
+                <button
+                  onClick={() => toggleLog(activeProject.id, 'frontend')}
+                  title="Toggle frontend logs"
+                  className={cn(
+                    'flex items-center h-6 px-1 rounded-r text-[10px] transition-all border-l border-black/10',
+                    activeLog?.projectId === activeProject.id && activeLog?.type === 'frontend'
+                      ? 'bg-[#22c55e]/25 text-[#22c55e]'
+                      : status.frontend === 'running'
+                      ? 'bg-[#22c55e]/15 text-[#22c55e]/60 hover:text-[#22c55e]'
+                      : status.frontend === 'starting'
+                      ? 'bg-[#f59e0b]/15 text-[#f59e0b]/60'
+                      : status.frontend === 'error'
+                      ? 'bg-[#ef4444]/15 text-[#ef4444]/60'
+                      : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)]',
+                  )}
+                >
+                  <ScrollText className="w-2.5 h-2.5" />
+                </button>
+              </div>
             )}
             {hasBe && (
-              <button
-                onClick={() => handleToggleServer(activeProject.id, 'backend')}
-                title={`Backend: ${status.backend}${status.backend === 'stopped' ? ' — Click to start' : ' — Click to stop'}`}
-                className={cn(
-                  'flex items-center gap-1 h-6 px-2 rounded text-[10px] font-medium transition-all',
-                  status.backend === 'running'
-                    ? 'bg-[#6366f1]/15 text-[#6366f1] hover:bg-[#ef4444]/15 hover:text-[#ef4444]'
-                    : status.backend === 'starting'
-                    ? 'bg-[#f59e0b]/15 text-[#f59e0b] animate-pulse'
-                    : status.backend === 'error'
-                    ? 'bg-[#ef4444]/15 text-[#ef4444]'
-                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[#6366f1] hover:bg-[#6366f1]/10',
-                )}
-              >
-                {status.backend === 'running' || status.backend === 'starting' ? (
-                  <Square className="w-2.5 h-2.5" />
-                ) : (
-                  <Play className="w-2.5 h-2.5" />
-                )}
-                <span>BE</span>
-              </button>
+              <div className="flex items-center gap-0">
+                <button
+                  onClick={() => handleToggleServer(activeProject.id, 'backend')}
+                  title={`Backend: ${status.backend}${status.backend === 'stopped' ? ' — Click to start' : ' — Click to stop'}`}
+                  className={cn(
+                    'flex items-center gap-1 h-6 px-2 rounded-l text-[10px] font-medium transition-all',
+                    status.backend === 'running'
+                      ? 'bg-[#6366f1]/15 text-[#6366f1] hover:bg-[#ef4444]/15 hover:text-[#ef4444]'
+                      : status.backend === 'starting'
+                      ? 'bg-[#f59e0b]/15 text-[#f59e0b] animate-pulse'
+                      : status.backend === 'error'
+                      ? 'bg-[#ef4444]/15 text-[#ef4444]'
+                      : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[#6366f1] hover:bg-[#6366f1]/10',
+                  )}
+                >
+                  {status.backend === 'running' || status.backend === 'starting' ? (
+                    <Square className="w-2.5 h-2.5" />
+                  ) : (
+                    <Play className="w-2.5 h-2.5" />
+                  )}
+                  <span>BE</span>
+                </button>
+                <button
+                  onClick={() => toggleLog(activeProject.id, 'backend')}
+                  title="Toggle backend logs"
+                  className={cn(
+                    'flex items-center h-6 px-1 rounded-r text-[10px] transition-all border-l border-black/10',
+                    activeLog?.projectId === activeProject.id && activeLog?.type === 'backend'
+                      ? 'bg-[#6366f1]/25 text-[#6366f1]'
+                      : status.backend === 'running'
+                      ? 'bg-[#6366f1]/15 text-[#6366f1]/60 hover:text-[#6366f1]'
+                      : status.backend === 'starting'
+                      ? 'bg-[#f59e0b]/15 text-[#f59e0b]/60'
+                      : status.backend === 'error'
+                      ? 'bg-[#ef4444]/15 text-[#ef4444]/60'
+                      : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)]',
+                  )}
+                >
+                  <ScrollText className="w-2.5 h-2.5" />
+                </button>
+              </div>
             )}
           </div>
         );
