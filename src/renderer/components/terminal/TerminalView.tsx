@@ -3,10 +3,10 @@ import { createPortal } from 'react-dom';
 import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, GitBranch, GitMerge, GitPullRequest,
-  ArrowLeft, FolderGit2, Folder, Upload, Download, RefreshCw, List,
+  ArrowLeft, FolderGit2, Folder, GitCommitVertical, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus,
 } from 'lucide-react';
-import { useTerminalStore, addOutputTap, removeOutputTap } from '../../stores/terminal-store';
+import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
@@ -573,7 +573,7 @@ function CompleteTaskModal({
   onMerge: onMergeAction,
   onCreatePR,
   onCreateBranchPR,
-  onPush,
+  onCommit,
   onCancel,
 }: {
   taskBranch: string;
@@ -588,7 +588,7 @@ function CompleteTaskModal({
   onMerge: (targetBranch: string) => void;
   onCreatePR: (targetBranch: string, title: string, body: string, autoMerge: boolean) => void;
   onCreateBranchPR: (newBranch: string, targetBranch: string, title: string, body: string) => void;
-  onPush: () => void;
+  onCommit: (message: string) => void;
   onCancel: () => void;
 }) {
   const [branches, setBranches] = useState<string[]>([]);
@@ -650,94 +650,44 @@ function CompleteTaskModal({
     return () => document.removeEventListener('mousedown', handler);
   }, [showBranchDropdown]);
 
-  // Ask the agent for root cause & solution when checkbox is enabled
+  // Fetch root cause summary when checkbox is enabled
   useEffect(() => {
     if (!postComment || commentText || !terminalId) return;
 
-    if (!isAgentRunning) {
-      // No agent running — fall back to git summary
-      if (!selectedBranch || !taskBranch) return;
-      setCommentLoading(true);
-      window.electronAPI.getTaskSummary(projectPath, taskBranch, selectedBranch)
-        .then((r: any) => {
-          if (r.success) {
-            const commits = (r.commits || '').trim();
-            const diffStat = (r.diffStat || '').trim();
-            const lines: string[] = ['Root cause:\n\n'];
-            lines.push('Solution:');
-            if (commits) {
-              lines.push('\n' + commits.split('\n').map((c: string) => `- ${c}`).join('\n'));
-            }
-            if (diffStat) {
-              lines.push('\nFiles changed:\n' + diffStat);
-            }
-            setCommentText(lines.join('\n'));
-          }
-        })
-        .catch(() => {})
-        .finally(() => setCommentLoading(false));
-      return;
-    }
-
-    // Agent is running — send a prompt and capture response
+    // Use git summary — works whether branches differ or not
     setCommentLoading(true);
-    let output = '';
-    let silenceTimer: ReturnType<typeof setTimeout>;
-    let safetyTimer: ReturnType<typeof setTimeout>;
-    let resolved = false;
-    const MARKER = '===TASK_SUMMARY_START===';
 
-    const stripAnsi = (text: string) =>
-      text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-        .replace(/\x1b\]\d*;[^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-        .replace(/\x1b[()][0-9A-B]/g, '')
-        .replace(/\r/g, '');
+    const baseBranch = selectedBranch && selectedBranch !== taskBranch ? selectedBranch : '';
 
-    const finish = () => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(silenceTimer);
-      clearTimeout(safetyTimer);
-      removeOutputTap(terminalId);
+    window.electronAPI.getTaskSummary(projectPath, taskBranch, baseBranch)
+      .then((r: any) => {
+        if (r.success) {
+          const commits = (r.commits || '').trim();
+          const diffStat = (r.diffStat || '').trim();
 
-      const clean = stripAnsi(output).trim();
-      // Extract only the agent's response after our marker
-      const markerIdx = clean.lastIndexOf(MARKER);
-      const response = markerIdx !== -1 ? clean.slice(markerIdx + MARKER.length).trim() : clean;
-      // Find the actual root cause/solution content (use lastIndexOf to skip any echoed prompt)
-      const rcIdx = response.lastIndexOf('Root cause:');
-      if (rcIdx !== -1) {
-        setCommentText(response.slice(rcIdx).trim());
-      } else if (response) {
-        // Agent responded but without exact format — use as-is
-        setCommentText(`Root cause:\n${response}`);
-      } else {
+          if (!commits && !diffStat) {
+            setCommentText('Root cause:\n\n\nSolution:\n');
+            return;
+          }
+
+          const lines: string[] = ['Root cause:\n'];
+          lines.push('\nSolution:');
+          if (diffStat) {
+            lines.push('\n\nFiles changed:\n' + diffStat);
+          }
+          if (commits) {
+            lines.push('\n\nRecent commits:');
+            lines.push(commits.split('\n').map((c: string) => `- ${c}`).join('\n'));
+          }
+          setCommentText(lines.join('\n'));
+        } else {
+          setCommentText('Root cause:\n\n\nSolution:\n');
+        }
+      })
+      .catch(() => {
         setCommentText('Root cause:\n\n\nSolution:\n');
-      }
-      setCommentLoading(false);
-    };
-
-    addOutputTap(terminalId, (data) => {
-      output += data;
-      clearTimeout(silenceTimer);
-      // 3 seconds of silence means the agent is done
-      silenceTimer = setTimeout(finish, 3000);
-    });
-
-    // Safety timeout — don't wait forever
-    safetyTimer = setTimeout(finish, 30000);
-
-    const prompt = `Summarize what you did for this task. Start your response with the exact line: ${MARKER}\nThen use this format:\n\nRoot cause:\n(1-2 sentences)\n\nSolution:\n(1-2 sentences)\n\nOnly output the marker line and summary, nothing else.`;
-    window.electronAPI.sendTerminalInput(terminalId, prompt + '\n');
-
-    return () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(silenceTimer);
-        clearTimeout(safetyTimer);
-        removeOutputTap(terminalId);
-      }
-    };
+      })
+      .finally(() => setCommentLoading(false));
   }, [postComment]);
 
   const filteredBranches = branches.filter((b) => {
@@ -749,8 +699,8 @@ function CompleteTaskModal({
   const taskSlug = task?.customId || task?.id || '';
   const defaultNewBranch = taskSlug ? `task/${taskSlug}` : '';
 
-  const handleAction = async (action: 'merge' | 'pr' | 'pr-auto' | 'push' | 'branch-pr') => {
-    if (!selectedBranch && action !== 'push') return;
+  const handleAction = async (action: 'merge' | 'pr' | 'pr-auto' | 'commit' | 'branch-pr') => {
+    if (!selectedBranch && action !== 'commit') return;
     setSubmitting(true);
 
     try {
@@ -776,7 +726,7 @@ function CompleteTaskModal({
       } else if (action === 'branch-pr') {
         onCreateBranchPR(defaultNewBranch, selectedBranch, prTitle, prBody);
       } else {
-        onPush();
+        onCommit(prTitle);
       }
     } catch {
       setSubmitting(false);
@@ -936,19 +886,19 @@ function CompleteTaskModal({
         {/* Actions */}
         <div className="p-4 border-t border-[var(--border)] flex items-center gap-2 justify-between">
           <button
-            onClick={() => handleAction('push')}
+            onClick={() => handleAction('commit')}
             disabled={submitting}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors"
-            title="Push current branch to remote without creating a PR"
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors"
+            title="Stage all changes and commit with the PR title as message"
           >
-            <Upload className="w-3 h-3" />
-            Push Only
+            <GitCommitVertical className="w-3.5 h-3.5" />
+            Commit
           </button>
           <div className="flex items-center gap-2">
             <button
               onClick={onCancel}
               disabled={submitting}
-              className="px-3 py-2 rounded-lg text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
             >
               Cancel
             </button>
@@ -973,23 +923,27 @@ function CompleteTaskModal({
                 Branch & PR
               </button>
             )}
-            <button
-              onClick={() => handleAction('pr')}
-              disabled={!selectedBranch || submitting}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-40"
-            >
-              <GitPullRequest className="w-3.5 h-3.5" />
-              Create PR
-            </button>
-            <button
-              onClick={() => handleAction('pr-auto')}
-              disabled={!selectedBranch || submitting}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 transition-colors disabled:opacity-40"
-              title="Create PR and enable auto-merge when checks pass"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              PR + Auto Merge
-            </button>
+            {selectedBranch !== taskBranch && (
+              <button
+                onClick={() => handleAction('pr')}
+                disabled={!selectedBranch || submitting}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-40"
+              >
+                <GitPullRequest className="w-3.5 h-3.5" />
+                Create PR
+              </button>
+            )}
+            {selectedBranch !== taskBranch && (
+              <button
+                onClick={() => handleAction('pr-auto')}
+                disabled={!selectedBranch || submitting}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 transition-colors disabled:opacity-40"
+                title="Create PR and enable auto-merge when checks pass"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                PR + Auto Merge
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1732,32 +1686,26 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     setTimeout(() => setMergeStatus(null), 8000);
   }, [mergeTarget, activeProject, cleanupWorktree, stopAndSyncTimer]);
 
-  const executePush = useCallback(async () => {
+  const executeCommit = useCallback(async (message: string) => {
     if (!mergeTarget) return;
     const saved = mergeTarget;
     setMergeTarget(null);
 
     const cwd = saved.cwd || saved.worktreePath || activeProject?.path || '';
-    const branch = saved.currentBranch || saved.worktreeBranch;
 
-    const result = await window.electronAPI.pushBranch(cwd, branch);
+    const result = await window.electronAPI.gitCommit(cwd, message);
 
     if (result.success) {
-      const msg = result.alreadyUpToDate
-        ? `Branch ${result.branch} is already up to date`
-        : `Pushed ${result.branch} to remote`;
-      setMergeStatus({ message: msg, type: 'success' });
+      setMergeStatus({ message: `Committed: ${message}`, type: 'success' });
 
       // Stop timer and sync tracked time
       await stopAndSyncTimer(saved.id, saved.task?.id);
-      // Clean up worktree — code is on remote now
-      await cleanupWorktree(saved);
     } else {
-      setMergeStatus({ message: result.error || 'Failed to push', type: 'error' });
+      setMergeStatus({ message: result.error || 'Failed to commit', type: 'error' });
     }
 
     setTimeout(() => setMergeStatus(null), 5000);
-  }, [mergeTarget, activeProject, cleanupWorktree, stopAndSyncTimer]);
+  }, [mergeTarget, activeProject, stopAndSyncTimer]);
 
   const executeCreateBranchPR = useCallback(async (newBranch: string, targetBranch: string, title: string, body: string) => {
     if (!mergeTarget || !activeProject?.path) return;
@@ -1826,7 +1774,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           onMerge={executeMerge}
           onCreatePR={executeCreatePR}
           onCreateBranchPR={executeCreateBranchPR}
-          onPush={executePush}
+          onCommit={executeCommit}
           onCancel={() => setMergeTarget(null)}
         />
       )}

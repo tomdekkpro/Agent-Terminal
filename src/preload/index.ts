@@ -118,6 +118,7 @@ const electronAPI = {
   pushBranch: (cwd: string, branch?: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_PUSH_BRANCH, cwd, branch),
   gitFetch: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_FETCH, cwd),
   gitPull: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_PULL, cwd),
+  gitCommit: (cwd: string, message: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_COMMIT, cwd, message),
 
   // Insights
   insightsListSessions: () => ipcRenderer.invoke(IPC_CHANNELS.INSIGHTS_LIST_SESSIONS),
