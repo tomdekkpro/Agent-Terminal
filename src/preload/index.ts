@@ -160,6 +160,14 @@ const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.SERVICE_STATUS_UPDATED, handler);
   },
 
+  // System Monitor
+  requestSystemMonitor: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_MONITOR_REQUEST),
+  onSystemMonitorUpdated: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.SYSTEM_MONITOR_UPDATED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.SYSTEM_MONITOR_UPDATED, handler);
+  },
+
   // Settings
   getSettings: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_ALL),
   getSetting: (key: string) => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET, key),

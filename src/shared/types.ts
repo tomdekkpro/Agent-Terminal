@@ -544,6 +544,33 @@ export interface ServiceStatusSummary {
   worstLevel: ServiceStatusLevel;
 }
 
+// System Monitor
+export interface GpuInfo {
+  name: string;
+  utilization: number;   // percent
+  memoryUsed: number;    // MB
+  memoryTotal: number;   // MB
+  memoryPercent: number;
+  temperature: number;   // celsius
+}
+
+export interface SystemMonitorData {
+  cpu: {
+    percent: number;
+    cores: { model: string; speed: number; percent: number }[];
+    count: number;
+  };
+  memory: {
+    total: number;       // bytes
+    used: number;        // bytes
+    free: number;        // bytes
+    percent: number;
+  };
+  gpu: GpuInfo[] | null; // null if no GPU detected
+  uptime: number;        // seconds
+  timestamp: number;
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   terminalFontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
   terminalFontSize: 14,

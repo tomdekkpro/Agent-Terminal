@@ -7,6 +7,7 @@ import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
 import { registerServiceStatusHandlers, stopServiceStatusPolling } from './ipc/service-status-handlers';
+import { registerSystemMonitorHandlers, stopSystemMonitorPolling } from './ipc/system-monitor-handlers';
 import { registerProjectHandlers } from './ipc/project-handlers';
 import { registerGitHandlers } from './ipc/git-handlers';
 import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handlers';
@@ -118,6 +119,7 @@ app.whenReady().then(() => {
   registerCodeReviewHandlers(ipcMain, getWindow);
   registerClaudeSessionsHandlers(ipcMain);
   registerServiceStatusHandlers(ipcMain, getWindow);
+  registerSystemMonitorHandlers(ipcMain, getWindow);
   initAutoUpdater(getWindow);
 
   // Open external links
@@ -146,6 +148,7 @@ app.on('before-quit', () => {
   cleanupAllQC();
   stopUsagePolling();
   stopServiceStatusPolling();
+  stopSystemMonitorPolling();
   if (terminalManager) {
     // Save output buffers while terminals are still alive
     // (terminals are killed later in will-quit, after renderer has saved state)
