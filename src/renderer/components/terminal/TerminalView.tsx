@@ -596,7 +596,8 @@ function CompleteTaskModal({
   const [selectedBranch, setSelectedBranch] = useState(defaultBaseBranch || '');
   const [showBranchDropdown, setShowBranchDropdown] = useState(false);
   const [branchSearch, setBranchSearch] = useState('');
-  const [prTitle, setPrTitle] = useState(taskName ? `[${taskBranch}] ${taskName}` : taskBranch);
+  const taskIdPrefix = task?.customId ? `${task.customId} ` : task?.id ? `CU-${task.id} ` : '';
+  const [prTitle, setPrTitle] = useState(taskName ? `${taskIdPrefix}[${taskBranch}] ${taskName}` : taskBranch);
   const [prBody, setPrBody] = useState('');
   // ClickUp options
   const [postComment, setPostComment] = useState(false);
