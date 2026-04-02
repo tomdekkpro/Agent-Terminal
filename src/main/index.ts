@@ -15,6 +15,8 @@ import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
 import { registerClaudeSessionsHandlers } from './ipc/claude-sessions-handlers';
+import { registerDevServerHandlers } from './ipc/dev-server-handlers';
+import { stopAllDevServers } from './dev-server/dev-server-manager';
 import { cleanupAllQC } from './qc/qc-executor';
 import { initAutoUpdater } from './updater';
 import { IPC_CHANNELS } from '../shared/constants';
@@ -118,6 +120,7 @@ app.whenReady().then(() => {
   registerQCHandlers(ipcMain, getWindow);
   registerCodeReviewHandlers(ipcMain, getWindow);
   registerClaudeSessionsHandlers(ipcMain);
+  registerDevServerHandlers(ipcMain, getWindow);
   registerServiceStatusHandlers(ipcMain, getWindow);
   registerSystemMonitorHandlers(ipcMain, getWindow);
   initAutoUpdater(getWindow);
@@ -146,6 +149,7 @@ app.on('before-quit', () => {
   cleanupInsights();
   cleanupTeam();
   cleanupAllQC();
+  stopAllDevServers();
   stopUsagePolling();
   stopServiceStatusPolling();
   stopSystemMonitorPolling();

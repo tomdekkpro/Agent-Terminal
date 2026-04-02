@@ -138,6 +138,12 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
+  // Dev Server
+  DEV_SERVER_START: 'dev-server:start',
+  DEV_SERVER_STOP: 'dev-server:stop',
+  DEV_SERVER_STATUS: 'dev-server:status',
+  DEV_SERVER_EVENT: 'dev-server:event',
+  DEV_SERVER_DETECT: 'dev-server:detect',
   // System Monitor
   SYSTEM_MONITOR_REQUEST: 'system-monitor:request',
   SYSTEM_MONITOR_UPDATED: 'system-monitor:updated',

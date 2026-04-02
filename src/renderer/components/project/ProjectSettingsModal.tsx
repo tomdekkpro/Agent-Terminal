@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Save, FolderOpen, Bot, Zap, Plus, Trash2, ChevronDown } from 'lucide-react';
-import type { Project, ProjectSkill, AgentProviderMeta, AgentProviderId } from '../../../shared/types';
+import { X, Save, FolderOpen, Bot, Zap, Plus, Trash2, ChevronDown, Server, Search } from 'lucide-react';
+import type { Project, ProjectSkill, AgentProviderMeta, AgentProviderId, DevServerConfig, DetectedServer, DetectResult } from '../../../shared/types';
 import { useProjectStore } from '../../stores/project-store';
 import { cn } from '../../../shared/utils';
 import { v4 as uuid } from 'uuid';
@@ -18,7 +18,7 @@ interface ProjectSettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = 'general' | 'agent' | 'skills';
+type Tab = 'general' | 'agent' | 'skills' | 'devserver';
 
 export function ProjectSettingsModal({ project, agentProviders, onClose }: ProjectSettingsModalProps) {
   const updateProject = useProjectStore((s) => s.updateProject);
@@ -32,7 +32,51 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [skills, setSkills] = useState<ProjectSkill[]>(project.skills || []);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [skillDraft, setSkillDraft] = useState<Partial<ProjectSkill>>({});
+  const [devServer, setDevServer] = useState<DevServerConfig>(project.devServer || {
+    frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '',
+  });
   const [hasChanges, setHasChanges] = useState(false);
+  const [detected, setDetected] = useState<DetectResult | null>(null);
+  const [detecting, setDetecting] = useState(false);
+
+  // Auto-detect dev servers when tab opens and fields are empty
+  useEffect(() => {
+    if (activeTab !== 'devserver') return;
+    if (devServer.frontendCmd || devServer.backendCmd) return; // already configured
+    if (detected || detecting) return;
+    setDetecting(true);
+    window.electronAPI.detectDevServers?.(project.path)
+      .then((result: any) => {
+        if (result?.success && result.data) {
+          const d: DetectResult = result.data;
+          setDetected(d);
+          // Auto-fill with best candidates
+          const bestFe = d.frontend[0];
+          const bestBe = d.backend[0];
+          if (bestFe || bestBe) {
+            setDevServer((prev) => ({
+              frontendCmd: bestFe?.cmd || prev.frontendCmd,
+              frontendCwd: bestFe?.cwd || prev.frontendCwd,
+              backendCmd: bestBe?.cmd || prev.backendCmd,
+              backendCwd: bestBe?.cwd || prev.backendCwd,
+            }));
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => setDetecting(false));
+  }, [activeTab]);
+
+  const handleDetect = useCallback(async () => {
+    setDetecting(true);
+    try {
+      const result = await window.electronAPI.detectDevServers?.(project.path);
+      if (result?.success && result.data) {
+        setDetected(result.data);
+      }
+    } catch { /* ignore */ }
+    setDetecting(false);
+  }, [project.path]);
 
   // Track changes
   useEffect(() => {
@@ -41,20 +85,24 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
       (agentProvider || undefined) !== (project.agentProvider || undefined) ||
       (agentModel || undefined) !== (project.agentModel || undefined) ||
       JSON.stringify(agentConfig) !== JSON.stringify(project.agentConfig || {}) ||
-      JSON.stringify(skills) !== JSON.stringify(project.skills || []);
+      JSON.stringify(skills) !== JSON.stringify(project.skills || []) ||
+      JSON.stringify(devServer) !== JSON.stringify(project.devServer || { frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '' });
     setHasChanges(changed);
-  }, [name, agentProvider, agentModel, agentConfig, skills, project]);
+  }, [name, agentProvider, agentModel, agentConfig, skills, devServer, project]);
 
   const handleSave = useCallback(async () => {
+    // Only persist devServer if at least one command is set
+    const hasDevServer = devServer.frontendCmd || devServer.backendCmd;
     await updateProject(project.id, {
       name: name || project.name,
       agentProvider: agentProvider || undefined,
       agentModel: agentModel || undefined,
       agentConfig: Object.keys(agentConfig).length > 0 ? agentConfig : undefined,
       skills: skills.length > 0 ? skills : undefined,
+      devServer: hasDevServer ? devServer : undefined,
     });
     onClose();
-  }, [updateProject, project.id, name, agentProvider, agentModel, agentConfig, skills, onClose]);
+  }, [updateProject, project.id, name, agentProvider, agentModel, agentConfig, skills, devServer, onClose]);
 
   // Get models for selected provider
   const selectedProvider = agentProviders.find((p) => p.id === agentProvider);
@@ -110,10 +158,11 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
     { id: 'general', label: 'General', icon: <FolderOpen className="w-3.5 h-3.5" /> },
     { id: 'agent', label: 'Agent', icon: <Bot className="w-3.5 h-3.5" /> },
     { id: 'skills', label: 'Skills', icon: <Zap className="w-3.5 h-3.5" /> },
+    { id: 'devserver', label: 'Dev Servers', icon: <Server className="w-3.5 h-3.5" /> },
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div
         className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl w-[640px] max-h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
@@ -443,6 +492,122 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+
+          {activeTab === 'devserver' && (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-[var(--text-muted)]">
+                  Configure commands to start your frontend and backend dev servers.
+                </p>
+                <button
+                  onClick={handleDetect}
+                  disabled={detecting}
+                  className="flex items-center gap-1 text-xs text-[var(--accent)] hover:text-[var(--accent-hover)] px-2 py-1 rounded hover:bg-[var(--accent)]/10 disabled:opacity-50"
+                >
+                  <Search className={cn('w-3 h-3', detecting && 'animate-spin')} />
+                  {detecting ? 'Scanning...' : 'Auto Detect'}
+                </button>
+              </div>
+
+              {/* Frontend */}
+              <div className="space-y-3 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-[#22c55e]" />
+                  <span className="text-xs font-medium text-[var(--text-primary)]">Frontend</span>
+                  {detected && detected.frontend.length > 0 && (
+                    <span className="text-[10px] text-[var(--text-muted)]">({detected.frontend.length} detected)</span>
+                  )}
+                </div>
+                {detected && detected.frontend.length > 1 && (
+                  <div>
+                    <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Detected Projects</label>
+                    <div className="relative mt-1">
+                      <select
+                        value={devServer.frontendCwd}
+                        onChange={(e) => {
+                          const sel = detected.frontend.find((f) => f.cwd === e.target.value);
+                          if (sel) setDevServer({ ...devServer, frontendCmd: sel.cmd, frontendCwd: sel.cwd });
+                        }}
+                        className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
+                      >
+                        {detected.frontend.map((f) => (
+                          <option key={f.cwd} value={f.cwd}>{f.label} — {f.cmd}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Command</label>
+                  <input
+                    value={devServer.frontendCmd}
+                    onChange={(e) => setDevServer({ ...devServer, frontendCmd: e.target.value })}
+                    placeholder="e.g. ng serve, npm start, npm run dev"
+                    className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Working Directory</label>
+                  <input
+                    value={devServer.frontendCwd}
+                    onChange={(e) => setDevServer({ ...devServer, frontendCwd: e.target.value })}
+                    placeholder="Relative path (leave empty for project root)"
+                    className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Backend */}
+              <div className="space-y-3 p-4 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-[#6366f1]" />
+                  <span className="text-xs font-medium text-[var(--text-primary)]">Backend</span>
+                  {detected && detected.backend.length > 0 && (
+                    <span className="text-[10px] text-[var(--text-muted)]">({detected.backend.length} detected)</span>
+                  )}
+                </div>
+                {detected && detected.backend.length > 1 && (
+                  <div>
+                    <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Detected Projects</label>
+                    <div className="relative mt-1">
+                      <select
+                        value={devServer.backendCwd}
+                        onChange={(e) => {
+                          const sel = detected.backend.find((b) => b.cwd === e.target.value);
+                          if (sel) setDevServer({ ...devServer, backendCmd: sel.cmd, backendCwd: sel.cwd });
+                        }}
+                        className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
+                      >
+                        {detected.backend.map((b) => (
+                          <option key={b.cwd} value={b.cwd}>{b.label} — {b.cwd}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Command</label>
+                  <input
+                    value={devServer.backendCmd}
+                    onChange={(e) => setDevServer({ ...devServer, backendCmd: e.target.value })}
+                    placeholder="e.g. dotnet run, dotnet watch run"
+                    className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Working Directory</label>
+                  <input
+                    value={devServer.backendCwd}
+                    onChange={(e) => setDevServer({ ...devServer, backendCwd: e.target.value })}
+                    placeholder="Relative path (leave empty for project root)"
+                    className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono"
+                  />
+                </div>
+              </div>
             </div>
           )}
         </div>
