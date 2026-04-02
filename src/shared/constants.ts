@@ -68,6 +68,7 @@ export const IPC_CHANNELS = {
   GIT_PUSH_BRANCH: 'git:push-branch',
   GIT_FETCH: 'git:fetch',
   GIT_PULL: 'git:pull',
+  GIT_COMMIT: 'git:commit',
   // Insights
   INSIGHTS_LIST_SESSIONS: 'insights:list-sessions',
   INSIGHTS_GET_SESSION: 'insights:get-session',

@@ -264,6 +264,34 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.GIT_COMMIT,
+    async (_event, cwd: string, message: string) => {
+      try {
+        if (!isGitRepo(cwd)) {
+          return { success: false, error: 'Not a git repository' };
+        }
+
+        // Check if there are changes to commit
+        const status = await gitExec('git status --porcelain', cwd, 5000);
+        if (!status.trim()) {
+          return { success: false, error: 'Nothing to commit — working tree clean' };
+        }
+
+        // Stage all changes and commit
+        await gitExec('git add -A', cwd);
+        await gitExec(`git commit -m "${message.replace(/"/g, '\\"')}"`, cwd);
+
+        debugLog('[Git] Committed:', message);
+        return { success: true, message };
+      } catch (error: any) {
+        const msg = error.stderr?.toString() || error.message || '';
+        debugError('[Git] commit error:', msg);
+        return { success: false, error: msg || 'Failed to commit' };
+      }
+    }
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.GIT_FETCH,
     async (_event, cwd: string) => {
       try {
@@ -524,20 +552,56 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         }
 
         let commits = '';
-        try {
-          commits = await gitExec(
-            `git log --pretty=format:"%s" ${baseBranch}..${taskBranch}`,
-            cwd,
-          );
-        } catch { /* branch may not exist on remote */ }
-
         let diffStat = '';
+        let uncommittedDiff = '';
+
+        // 1. Always check for uncommitted changes first (staged + unstaged)
         try {
-          diffStat = await gitExec(
-            `git diff --stat ${baseBranch}..${taskBranch}`,
-            cwd,
-          );
+          const staged = await gitExec('git diff --stat --cached', cwd);
+          const unstaged = await gitExec('git diff --stat', cwd);
+          // Also include untracked files
+          const untracked = await gitExec('git ls-files --others --exclude-standard', cwd);
+          const parts: string[] = [];
+          if (staged) parts.push(staged);
+          if (unstaged) parts.push(unstaged);
+          if (untracked) {
+            const untrackedLines = untracked.split('\n').filter(Boolean).map((f) => ` ${f} (new file)`);
+            if (untrackedLines.length > 0) parts.push(untrackedLines.join('\n'));
+          }
+          uncommittedDiff = parts.join('\n');
         } catch { /* ignore */ }
+
+        // 2. Branch diff if different branches
+        if (baseBranch && baseBranch !== taskBranch) {
+          try {
+            commits = await gitExec(
+              `git log --pretty=format:"%s" ${baseBranch}..${taskBranch}`,
+              cwd,
+            );
+          } catch { /* branch may not exist on remote */ }
+
+          try {
+            diffStat = await gitExec(
+              `git diff --stat ${baseBranch}..${taskBranch}`,
+              cwd,
+            );
+          } catch { /* ignore */ }
+        }
+
+        // 3. Fallback to recent commits if no branch diff
+        if (!commits) {
+          try {
+            commits = await gitExec(
+              `git log --pretty=format:"%s" -10 HEAD`,
+              cwd,
+            );
+          } catch { /* ignore */ }
+        }
+
+        // Prefer uncommitted changes over branch diff for diffStat
+        if (uncommittedDiff) {
+          diffStat = uncommittedDiff;
+        }
 
         return { success: true, commits, diffStat };
       } catch (error: any) {
