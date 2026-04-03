@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { X, Save, FolderOpen, Bot, Zap, Plus, Trash2, ChevronDown, Server, Search } from 'lucide-react';
-import type { Project, ProjectSkill, AgentProviderMeta, AgentProviderId, DevServerConfig, DetectedServer, DetectResult } from '../../../shared/types';
+import type { Project, ProjectSkill, AgentProviderMeta, AgentProviderId, DevServerConfig, DetectResult } from '../../../shared/types';
 import { useProjectStore } from '../../stores/project-store';
 import { cn } from '../../../shared/utils';
 import { v4 as uuid } from 'uuid';
@@ -33,7 +33,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [skillDraft, setSkillDraft] = useState<Partial<ProjectSkill>>({});
   const [devServer, setDevServer] = useState<DevServerConfig>(project.devServer || {
-    frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '',
+    frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '', backendProfile: undefined,
   });
   const [hasChanges, setHasChanges] = useState(false);
   const [detected, setDetected] = useState<DetectResult | null>(null);
@@ -59,6 +59,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
               frontendCwd: bestFe?.cwd || prev.frontendCwd,
               backendCmd: bestBe?.cmd || prev.backendCmd,
               backendCwd: bestBe?.cwd || prev.backendCwd,
+              backendProfile: bestBe?.profiles?.[0]?.name || prev.backendProfile,
             }));
           }
         }
@@ -577,7 +578,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                         value={devServer.backendCwd}
                         onChange={(e) => {
                           const sel = detected.backend.find((b) => b.cwd === e.target.value);
-                          if (sel) setDevServer({ ...devServer, backendCmd: sel.cmd, backendCwd: sel.cwd });
+                          if (sel) setDevServer({ ...devServer, backendCmd: sel.cmd, backendCwd: sel.cwd, backendProfile: sel.profiles?.[0]?.name });
                         }}
                         className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
                       >
@@ -589,6 +590,32 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                     </div>
                   </div>
                 )}
+                {/* Launch Profile — show when detected project has profiles */}
+                {(() => {
+                  const selectedBackend = detected?.backend.find((b) => b.cwd === devServer.backendCwd);
+                  const profiles = selectedBackend?.profiles;
+                  if (!profiles || profiles.length === 0) return null;
+                  return (
+                    <div>
+                      <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Launch Profile</label>
+                      <div className="relative mt-1">
+                        <select
+                          value={devServer.backendProfile || ''}
+                          onChange={(e) => setDevServer({ ...devServer, backendProfile: e.target.value || undefined })}
+                          className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
+                        >
+                          <option value="">Default (no profile)</option>
+                          {profiles.map((p) => (
+                            <option key={p.name} value={p.name}>
+                              {p.name}{p.environment !== 'Development' ? ` — ${p.environment}` : ''}{p.applicationUrl ? ` (${p.applicationUrl.split(';')[0]})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div>
                   <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Command</label>
                   <input

@@ -203,6 +203,7 @@ export interface DevServerConfig {
   frontendCwd: string;  // relative to project path
   backendCmd: string;
   backendCwd: string;   // relative to project path
+  backendProfile?: string; // dotnet launch profile name
 }
 
 export type DevServerStatus = 'stopped' | 'starting' | 'running' | 'error';
@@ -224,11 +225,18 @@ export interface DevServerEvent {
   output?: string;
 }
 
+export interface LaunchProfile {
+  name: string;
+  environment: string;  // ASPNETCORE_ENVIRONMENT value
+  applicationUrl?: string;
+}
+
 export interface DetectedServer {
   cmd: string;
   cwd: string;
   label: string;
   confidence: number;
+  profiles?: LaunchProfile[];
 }
 
 export interface DetectResult {

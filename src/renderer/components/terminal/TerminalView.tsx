@@ -1476,6 +1476,31 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       if (skipPermissions) {
         useTerminalStore.getState().updateTerminal(id, { skipPermissions: true });
       }
+      // Send task context as first prompt if terminal is linked to a task
+      if (terminal.task) {
+        const taskId = terminal.task.id;
+        window.electronAPI.getTaskManagerTask(taskId).then((taskResult: any) => {
+          if (!taskResult.success || !taskResult.data) return;
+          const task = taskResult.data;
+          const taskLabel = task.customId || task.id;
+          const parts = [
+            `I'm working on task ${taskLabel}: ${task.name}`,
+            `Status: ${task.status.name}`,
+          ];
+          if (task.priority) parts.push(`Priority: ${task.priority.name}`);
+          if (task.description) {
+            const desc = task.description.length > 1000
+              ? task.description.slice(0, 1000) + '...'
+              : task.description;
+            parts.push(`Description:\n${desc}`);
+          }
+          if (task.url) parts.push(`URL: ${task.url}`);
+          const prompt = parts.join('\n');
+          setTimeout(() => {
+            window.electronAPI.sendTerminalInput(id, prompt + '\n');
+          }, 3000);
+        }).catch(() => { /* non-critical */ });
+      }
     } else {
       setCliError(result.error || `Failed to start ${agentId}`);
       setTimeout(() => setCliError(null), 8000);

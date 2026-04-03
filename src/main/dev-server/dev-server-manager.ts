@@ -42,11 +42,16 @@ export function startDevServer(
     return { success: false, error: 'Server is already running' };
   }
 
-  const cmd = type === 'frontend' ? config.frontendCmd : config.backendCmd;
+  let cmd = type === 'frontend' ? config.frontendCmd : config.backendCmd;
   const cwd = type === 'frontend' ? config.frontendCwd : config.backendCwd;
 
   if (!cmd) {
     return { success: false, error: `No ${type} command configured` };
+  }
+
+  // Append launch profile for backend dotnet projects
+  if (type === 'backend' && config.backendProfile) {
+    cmd += ` --launch-profile "${config.backendProfile}"`;
   }
 
   // Resolve cwd relative to project path
