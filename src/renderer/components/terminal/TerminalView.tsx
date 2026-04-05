@@ -1473,6 +1473,11 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     });
     if (result.success) {
       useTerminalStore.getState().setClaudeMode(id, true);
+      // Show "Starting agent..." overlay while agent initializes
+      useTerminalStore.getState().updateTerminal(id, { isResuming: true });
+      setTimeout(() => {
+        useTerminalStore.getState().updateTerminal(id, { isResuming: false });
+      }, 6000);
       if (skipPermissions) {
         useTerminalStore.getState().updateTerminal(id, { skipPermissions: true });
       }

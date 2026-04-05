@@ -20,7 +20,7 @@ export interface Terminal {
   createdAt: Date;
   isClaudeMode: boolean;
   isClaudeBusy?: boolean;
-  claudeSessionId?: string;
+  agentSessionId?: string;
   claudeCwd?: string;
   projectId?: string;
   task?: TerminalTask;
@@ -38,6 +38,8 @@ export interface Terminal {
   needsRestore?: boolean;
   /** True when terminal is restored but agent session not yet resumed */
   needsResume?: boolean;
+  /** True while agent session is being resumed (shows overlay) */
+  isResuming?: boolean;
   /** URL for live preview panel (e.g. http://localhost:3000) */
   previewUrl?: string;
   /** Whether the preview panel is currently open */
@@ -89,7 +91,7 @@ function buildSaveableState(state: TerminalState) {
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
-      claudeSessionId: t.claudeSessionId,
+      agentSessionId: t.agentSessionId,
       claudeCwd: t.claudeCwd,
       agentProvider: t.agentProvider,
       skipPermissions: t.skipPermissions,
@@ -135,7 +137,7 @@ export function flushTerminalStateSync(): void {
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
-      claudeSessionId: t.claudeSessionId,
+      agentSessionId: t.agentSessionId,
       claudeCwd: t.claudeCwd,
       agentProvider: t.agentProvider,
       skipPermissions: t.skipPermissions,
@@ -537,7 +539,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // terminals get needsRestore=false so their PTY is created automatically.
       const restored: Terminal[] = saved.terminals
         .map((t: any) => {
-          const isAgent = !!(t.claudeSessionId || t.isClaudeMode);
+          // Support both new agentSessionId and legacy claudeSessionId from old saves
+          const sessionId = t.agentSessionId || t.claudeSessionId;
+          const isAgent = !!(sessionId || t.isClaudeMode);
           return {
             id: t.id,
             groupId: t.groupId,
@@ -548,7 +552,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             isClaudeMode: false,
             // Migrate legacy copilotProvider → agentProvider
             agentProvider: t.agentProvider || t.copilotProvider || 'claude',
-            claudeSessionId: t.claudeSessionId,
+            agentSessionId: sessionId,
             claudeCwd: t.claudeCwd,
             skipPermissions: t.skipPermissions || false,
             projectId: t.projectId,
@@ -601,7 +605,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         rows: 24,
       });
 
-      const hasSession = !!terminal.claudeSessionId;
+      const hasSession = !!terminal.agentSessionId;
+      const isAgentTerminal = hasSession || terminal.agentProvider !== 'claude';
 
       set((state) => ({
         terminals: state.terminals.map((t) =>
@@ -609,28 +614,37 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             ...t,
             needsRestore: false,
             needsResume: false,
-            // If there's a session to resume, go straight to claude-active
-            isClaudeMode: hasSession,
-            status: hasSession ? 'claude-active' as TerminalStatus : 'idle' as TerminalStatus,
+            isClaudeMode: isAgentTerminal,
+            isResuming: isAgentTerminal,
+            status: isAgentTerminal ? 'claude-active' as TerminalStatus : 'idle' as TerminalStatus,
           } : t
         ),
       }));
 
-      // Auto-resume agent session if available
-      if (hasSession) {
+      // Auto-resume agent session if it was an agent terminal
+      if (isAgentTerminal) {
         const agentId = terminal.agentProvider || 'claude';
         const resumeCwd = terminal.claudeCwd || terminal.cwd;
         try {
           await window.electronAPI.resumeAgent(terminal.id, agentId, {
-            sessionId: terminal.claudeSessionId,
+            sessionId: terminal.agentSessionId,
             cwd: resumeCwd,
             skipPermissions: terminal.skipPermissions,
           });
+          // Clear resuming overlay after delay (agent needs time to start + execute /resume)
+          const delay = terminal.agentSessionId ? 5000 : 3000;
+          setTimeout(() => {
+            set((state) => ({
+              terminals: state.terminals.map((t) =>
+                t.id === id ? { ...t, isResuming: false } : t
+              ),
+            }));
+          }, delay);
         } catch {
           // Resume failed — fall back to idle terminal with Start button
           set((state) => ({
             terminals: state.terminals.map((t) =>
-              t.id === id ? { ...t, isClaudeMode: false, status: 'idle' as TerminalStatus } : t
+              t.id === id ? { ...t, isClaudeMode: false, isResuming: false, status: 'idle' as TerminalStatus } : t
             ),
           }));
         }
@@ -658,18 +672,11 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       const agentId = terminal.agentProvider || 'claude';
       const resumeCwd = terminal.claudeCwd || terminal.cwd;
 
-      if (agentId === 'claude') {
-        await window.electronAPI.resumeAgent(terminal.id, 'claude', {
-          sessionId: terminal.claudeSessionId,
-          cwd: resumeCwd,
-          skipPermissions: terminal.skipPermissions,
-        });
-      } else {
-        await window.electronAPI.resumeAgent(terminal.id, agentId, {
-          cwd: terminal.cwd,
-          skipPermissions: terminal.skipPermissions,
-        });
-      }
+      await window.electronAPI.resumeAgent(terminal.id, agentId, {
+        sessionId: terminal.agentSessionId,
+        cwd: resumeCwd,
+        skipPermissions: terminal.skipPermissions,
+      });
     } catch {
       set((state) => ({
         terminals: state.terminals.map((t) =>
@@ -726,7 +733,7 @@ useTerminalStore.subscribe((state) => {
     projects: state.terminals.map((t) => t.projectId || '').join(','),
     active: state.activeTerminalId,
     activeGroup: state.activeGroupId,
-    claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.claudeSessionId || ''}:${t.agentProvider}`).join(','),
+    claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.agentSessionId || ''}:${t.agentProvider}`).join(','),
     worktrees: state.terminals.map((t) => t.worktreeBranch || '').join(','),
     tasks: state.terminals.map((t) => t.task?.id || '').join(','),
     timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}`).join(','),

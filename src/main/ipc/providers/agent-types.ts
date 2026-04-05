@@ -48,6 +48,9 @@ export interface IAgentProvider {
   /** (Optional) Detect an existing session in the working directory */
   detectSession?(cwd: string): Promise<string | null>;
 
+  /** (Optional) Return slash-command input to send after the agent starts (e.g. /resume SESSION-ID) */
+  getResumeInput?(options: AgentInvokeOptions): string | null;
+
   /** Return the list of models the user can choose from */
   getModels(): AgentModelOption[];
 

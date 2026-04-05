@@ -12,7 +12,7 @@ import { InsightsView } from './components/insights';
 import { QCView } from './components/qc';
 import { CodeReviewView } from './components/code-review';
 import { UpdateNotification } from './components/updates/UpdateNotification';
-import { TeamPanel } from './components/team/TeamPanel';
+// import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
 
 export type ViewType = 'terminals' | 'tasks' | 'qc' | 'insights' | 'code-review' | 'settings';
@@ -113,7 +113,7 @@ export default function App() {
         {activeView === 'settings' && <SettingsView />}
       </main>
       <UpdateNotification />
-      <TeamPanel />
+      {/* <TeamPanel /> */}
     </div>
   );
 }

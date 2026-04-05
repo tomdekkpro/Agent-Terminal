@@ -63,7 +63,7 @@ export function useGlobalTerminalListeners() {
     if (window.electronAPI.onTerminalAgentSession) {
       cleanups.push(
         window.electronAPI.onTerminalAgentSession((id, sessionId) => {
-          updateTerminal(id, { claudeSessionId: sessionId });
+          updateTerminal(id, { agentSessionId: sessionId });
         })
       );
     }
@@ -77,7 +77,7 @@ export function useGlobalTerminalListeners() {
 
     cleanups.push(
       window.electronAPI.onTerminalClaudeSession((id, sessionId) => {
-        updateTerminal(id, { claudeSessionId: sessionId });
+        updateTerminal(id, { agentSessionId: sessionId });
       })
     );
 

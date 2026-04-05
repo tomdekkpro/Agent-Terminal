@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2 } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -1029,6 +1029,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       ) : (
         <div className="flex-1 relative">
           <div ref={containerRef} className="absolute inset-0 bg-[#0f0f23] p-1" />
+          {terminal.isResuming && (
+            <div className="absolute inset-0 z-10 bg-[#0f0f23]/80 backdrop-blur-sm flex items-center justify-center">
+              <div className="flex items-center gap-3 px-5 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl">
+                <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
+                <span className="text-sm text-[var(--text-secondary)]">
+                  {terminal.agentSessionId ? 'Resuming session...' : 'Starting agent...'}
+                </span>
+              </div>
+            </div>
+          )}
           {terminal.needsResume && (
             <ResumeBanner terminal={terminal} />
           )}
@@ -1056,7 +1066,7 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
         {/* Icon */}
         <div className="flex justify-center">
           <div className="w-14 h-14 rounded-2xl bg-[var(--accent)]/10 flex items-center justify-center">
-            {terminal.claudeSessionId ? (
+            {terminal.agentSessionId ? (
               <Bot className="w-7 h-7 text-emerald-400" />
             ) : (
               <TerminalIcon className="w-7 h-7 text-blue-400" />
@@ -1075,11 +1085,14 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
               {terminal.cwd}
             </p>
           )}
-          {terminal.claudeSessionId && (
+          {terminal.needsRestore && (
             <p className="text-[11px] text-emerald-400/70 mt-1">
               Agent: {terminal.agentProvider}
               {terminal.skipPermissions && ' • YOLO'}
-              {' • Session will resume'}
+              {terminal.agentSessionId
+                ? <span className="text-[10px] text-[var(--text-muted)] ml-1 font-mono">({terminal.agentSessionId})</span>
+                : <span className="text-[10px] text-amber-400/70 ml-1">(no session — will use --continue)</span>
+              }
             </p>
           )}
         </div>

@@ -72,14 +72,29 @@ export function registerTerminalHandlers(
     return { success: true, data: loadOutputBuffers() };
   });
 
+  // Enrich saved state with agentSessionId from main process terminals
+  // (the renderer may not have received the IPC event yet)
+  function enrichWithSessionIds(state: SavedTerminalState): SavedTerminalState {
+    return {
+      ...state,
+      terminals: state.terminals.map((t) => {
+        const mainTerminal = terminalManager.getTerminal(t.id);
+        if (mainTerminal?.agentSessionId && !t.agentSessionId) {
+          return { ...t, agentSessionId: mainTerminal.agentSessionId };
+        }
+        return t;
+      }),
+    };
+  }
+
   ipcMain.handle(IPC_CHANNELS.TERMINAL_STATE_SAVE, async (_event, state: SavedTerminalState) => {
-    saveTerminalState(state);
+    saveTerminalState(enrichWithSessionIds(state));
     return { success: true };
   });
 
   // Synchronous save for beforeunload
   ipcMain.on(IPC_CHANNELS.TERMINAL_STATE_SAVE_SYNC, (event, state: SavedTerminalState) => {
-    saveTerminalState(state);
+    saveTerminalState(enrichWithSessionIds(state));
     event.returnValue = true;
   });
 }

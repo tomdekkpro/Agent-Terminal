@@ -196,6 +196,7 @@ export class TerminalManager {
     agentId: AgentProviderId,
     options: AgentInvokeOptions = {},
   ): { success: boolean; error?: string } {
+    debugLog('[InvokeAgent] Called:', { id, agentId, options });
     const terminal = this.terminals.get(id);
     if (!terminal) return { success: false, error: 'Terminal not found' };
 
@@ -238,10 +239,16 @@ export class TerminalManager {
       win.webContents.send(IPC_CHANNELS.TERMINAL_TITLE_CHANGE, id, provider.displayName);
     }
 
-    // Claude session detection
+    // Claude session detection (filesystem-based)
     if (agentId === 'claude' && preSnapshot) {
       const claudeDir = getClaudeProjectDir(dir);
       this.detectAgentSession(terminal, claudeDir, preSnapshot);
+    }
+
+    // Copilot session detection (filesystem-based, like Claude)
+    if (agentId === 'copilot') {
+      const copilotSnapshot = this.getCopilotSessionSnapshot();
+      this.detectCopilotSession(terminal, copilotSnapshot);
     }
 
     return { success: true };
@@ -252,11 +259,19 @@ export class TerminalManager {
     agentId: AgentProviderId,
     options: AgentInvokeOptions = {},
   ): void {
+    debugLog('[ResumeAgent] Called:', { id, agentId, sessionId: options.sessionId, cwd: options.cwd });
+
     const terminal = this.terminals.get(id);
-    if (!terminal) return;
+    if (!terminal) {
+      debugLog('[ResumeAgent] Terminal not found:', id);
+      return;
+    }
 
     const provider = agentRegistry.get(agentId);
-    if (!provider) return;
+    if (!provider) {
+      debugLog('[ResumeAgent] Provider not found:', agentId);
+      return;
+    }
 
     terminal.isAgentMode = true;
     terminal.agentProvider = agentId;
@@ -267,11 +282,44 @@ export class TerminalManager {
     terminal.agentCwd = dir;
     terminal.claudeCwd = dir;
 
+    // Store session ID on the terminal object so enrichWithSessionIds can find it
+    if (options.sessionId) {
+      terminal.agentSessionId = options.sessionId;
+      terminal.claudeSessionId = options.sessionId;
+    }
+
     const { cdCmd, separator } = buildShellCommand(terminal.shellType, dir);
     const agentCmd = provider.buildResumeCommand(options);
     // Skip clear command on resume so restored session history remains visible
     const command = `${cdCmd}${separator}${agentCmd}\r`;
+    debugLog('[ResumeAgent] Shell command:', command.replace(/\r/g, '\\r'));
     PtyManager.writeToPty(terminal, command);
+
+    // Send follow-up slash command after agent starts (e.g. /resume SESSION-ID for Copilot)
+    const resumeInput = provider.getResumeInput?.(options);
+    debugLog('[ResumeAgent] Resume input:', resumeInput ?? '(none)');
+    if (resumeInput) {
+      setTimeout(() => {
+        if (!terminal.hasExited) {
+          debugLog('[ResumeAgent] Sending follow-up input:', resumeInput);
+          PtyManager.writeToPty(terminal, resumeInput);
+          // Send Enter separately after a short delay to let autocomplete resolve
+          setTimeout(() => {
+            if (!terminal.hasExited) {
+              PtyManager.writeToPty(terminal, '\r');
+            }
+          }, 500);
+        } else {
+          debugLog('[ResumeAgent] Terminal already exited, skipping follow-up input');
+        }
+      }, 3000);
+    }
+
+    // Copilot session detection on resume — only if session ID not already known
+    if (agentId === 'copilot' && !options.sessionId && !terminal.agentSessionId) {
+      const copilotSnapshot = this.getCopilotSessionSnapshot();
+      this.detectCopilotSession(terminal, copilotSnapshot);
+    }
 
     const win = this.getWindow();
     if (win && !win.isDestroyed()) {
@@ -325,7 +373,7 @@ export class TerminalManager {
           if (prevMtime === undefined || mtime > prevMtime + 500) {
             const sessionId = f.replace('.jsonl', '');
             terminal.agentSessionId = sessionId;
-            terminal.claudeSessionId = sessionId;
+            terminal.claudeSessionId = sessionId; // deprecated alias
             debugLog('[TerminalManager] Detected agent session:', sessionId, 'for terminal:', terminal.id);
             const win = this.getWindow();
             if (win && !win.isDestroyed()) {
@@ -362,6 +410,70 @@ export class TerminalManager {
       }
     });
     return buffers;
+  }
+
+  /** Detect Copilot session by watching ~/.copilot/session-state/ for new directories */
+  private detectCopilotSession(
+    terminal: TerminalProcess,
+    preSnapshot: Set<string>,
+  ): void {
+    const sessionDir = join(os.homedir(), '.copilot', 'session-state');
+    let attempts = 0;
+    const MAX_ATTEMPTS = 30;
+
+    const poll = () => {
+      attempts++;
+      if (attempts > MAX_ATTEMPTS || terminal.hasExited || terminal.agentSessionId) return;
+
+      try {
+        if (!existsSync(sessionDir)) {
+          setTimeout(poll, 2000);
+          return;
+        }
+
+        for (const entry of readdirSync(sessionDir)) {
+          if (preSnapshot.has(entry)) continue;
+          // New directory found — check if it's a UUID
+          const fullPath = join(sessionDir, entry);
+          if (!statSync(fullPath).isDirectory()) continue;
+          const uuidMatch = entry.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+          if (!uuidMatch) continue;
+
+          const sessionId = entry;
+          terminal.agentSessionId = sessionId;
+          terminal.claudeSessionId = sessionId;
+          debugLog('[TerminalManager] Detected Copilot session from filesystem:', sessionId, 'for terminal:', terminal.id);
+          const win = this.getWindow();
+          if (win && !win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.TERMINAL_AGENT_SESSION, terminal.id, sessionId);
+            win.webContents.send(IPC_CHANNELS.TERMINAL_CLAUDE_SESSION, terminal.id, sessionId);
+          }
+          return;
+        }
+      } catch { /* ignore */ }
+
+      setTimeout(poll, 2000);
+    };
+
+    setTimeout(poll, 3000);
+  }
+
+  /** Snapshot existing Copilot session directories */
+  private getCopilotSessionSnapshot(): Set<string> {
+    const sessionDir = join(os.homedir(), '.copilot', 'session-state');
+    const result = new Set<string>();
+    try {
+      if (existsSync(sessionDir)) {
+        for (const entry of readdirSync(sessionDir)) {
+          result.add(entry);
+        }
+      }
+    } catch { /* ignore */ }
+    return result;
+  }
+
+  getTerminal(id: string): TerminalProcess | undefined {
+    return this.terminals.get(id);
   }
 
   getActiveTerminalIds(): string[] {
