@@ -124,6 +124,7 @@ export function PastSessionsList({ onNavigateToTerminal }: PastSessionsListProps
       updateTerminal(terminal.id, {
         title: session.summary || session.firstPrompt?.slice(0, 40) || 'Resumed Session',
         isClaudeMode: true,
+        agentProvider: 'claude',
         agentSessionId: session.sessionId,
         claudeCwd: cwd,
         status: 'claude-active',
