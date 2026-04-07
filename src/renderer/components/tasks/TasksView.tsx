@@ -332,6 +332,10 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
                         ? 'bg-[var(--accent)]/10 border border-[var(--accent)]/30'
                         : 'hover:bg-[var(--bg-tertiary)] border border-transparent',
                     )}
+                    style={terminal.task ? {
+                      borderLeftWidth: '3px',
+                      borderLeftColor: terminal.task.statusColor,
+                    } : undefined}
                   >
                     <div className="flex items-center gap-2">
                       {/* Icon */}
@@ -366,6 +370,28 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
                             </span>
                           )}
                         </div>
+                        {terminal.task && (
+                          <div className="flex items-center gap-1 mt-1 min-w-0">
+                            <span
+                              className="w-1.5 h-1.5 rounded-full shrink-0"
+                              style={{ backgroundColor: terminal.task.statusColor }}
+                            />
+                            {terminal.task.customId && (
+                              <span
+                                className="text-[9px] font-mono shrink-0 font-medium"
+                                style={{ color: terminal.task.statusColor }}
+                              >
+                                {terminal.task.customId}
+                              </span>
+                            )}
+                            <span
+                              className="text-[9px] truncate"
+                              style={{ color: `${terminal.task.statusColor}cc` }}
+                            >
+                              {terminal.task.name}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Time + actions */}

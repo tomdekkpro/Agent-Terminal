@@ -586,6 +586,25 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         }
       }
 
+      // Refresh task status colors from API so tabs reflect current status
+      for (const t of restored) {
+        if (!t.task) continue;
+        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
+          if (!res.success || !res.data) return;
+          const task = res.data;
+          const newStatus = task.status.name;
+          const newColor = task.status.color;
+          const current = get().terminals.find((x) => x.id === t.id);
+          if (current?.task && (newStatus !== current.task.status || newColor !== current.task.statusColor)) {
+            set((state) => ({
+              terminals: state.terminals.map((x) =>
+                x.id === t.id ? { ...x, task: { ...x.task!, status: newStatus, statusColor: newColor } } : x
+              ),
+            }));
+          }
+        }).catch(() => {});
+      }
+
       return restored;
     } catch {
       set({ isRestored: true });
@@ -735,7 +754,7 @@ useTerminalStore.subscribe((state) => {
     activeGroup: state.activeGroupId,
     claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.agentSessionId || ''}:${t.agentProvider}`).join(','),
     worktrees: state.terminals.map((t) => t.worktreeBranch || '').join(','),
-    tasks: state.terminals.map((t) => t.task?.id || '').join(','),
+    tasks: state.terminals.map((t) => t.task ? `${t.task.id}:${t.task.statusColor}:${t.task.status}` : '').join(','),
     timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}`).join(','),
     previews: state.terminals.map((t) => t.previewUrl || '').join(','),
   });

@@ -560,6 +560,12 @@ export function TaskPickerModal({
 }
 
 /** Complete Task Modal - single-step dialog with auto-selected base branch */
+export interface TaskCompleteOptions {
+  comment?: string;
+  setReadyForReview?: boolean;
+  taskId?: string;
+}
+
 function CompleteTaskModal({
   taskBranch,
   taskName,
@@ -586,8 +592,8 @@ function CompleteTaskModal({
   hasTaskManager: boolean;
   defaultBaseBranch?: string;
   onMerge: (targetBranch: string) => void;
-  onCreatePR: (targetBranch: string, title: string, body: string, autoMerge: boolean) => void;
-  onCreateBranchPR: (newBranch: string, targetBranch: string, title: string, body: string) => void;
+  onCreatePR: (targetBranch: string, title: string, body: string, autoMerge: boolean, taskOptions?: TaskCompleteOptions) => void;
+  onCreateBranchPR: (newBranch: string, targetBranch: string, title: string, body: string, taskOptions?: TaskCompleteOptions) => void;
   onCommit: (message: string) => void;
   onCancel: () => void;
 }) {
@@ -703,28 +709,41 @@ function CompleteTaskModal({
     if (!selectedBranch && action !== 'commit') return;
     setSubmitting(true);
 
-    try {
-      // Post comment to task manager if enabled
-      if (postComment && task && commentText.trim()) {
-        try {
-          await window.electronAPI.postTaskComment(task.id, commentText.trim());
-        } catch { /* non-critical */ }
-      }
+    // Build task manager options for deferred execution
+    const isPRAction = action === 'pr' || action === 'pr-auto' || action === 'branch-pr';
+    const hasTaskOptions = (postComment && task && commentText.trim()) || (setReadyForReview && task);
+    const deferTaskActions = isPRAction && isAgentRunning && hasTaskOptions;
 
-      // Update task status to ready for review
-      if (setReadyForReview && task) {
-        try {
-          await window.electronAPI.updateTaskStatus(task.id, 'ready for review');
-        } catch { /* non-critical */ }
+    const taskOptions: TaskCompleteOptions | undefined = deferTaskActions
+      ? {
+          comment: postComment && commentText.trim() ? commentText.trim() : undefined,
+          setReadyForReview: setReadyForReview || undefined,
+          taskId: task?.id,
+        }
+      : undefined;
+
+    try {
+      // Run task manager actions immediately only when NOT deferring
+      if (!deferTaskActions) {
+        if (postComment && task && commentText.trim()) {
+          try {
+            await window.electronAPI.postTaskComment(task.id, commentText.trim());
+          } catch { /* non-critical */ }
+        }
+        if (setReadyForReview && task) {
+          try {
+            await window.electronAPI.updateTaskStatus(task.id, 'ready for review');
+          } catch { /* non-critical */ }
+        }
       }
 
       // Execute the git action
       if (action === 'merge') {
         onMergeAction(selectedBranch);
       } else if (action === 'pr' || action === 'pr-auto') {
-        onCreatePR(selectedBranch, prTitle, prBody, action === 'pr-auto');
+        onCreatePR(selectedBranch, prTitle, prBody, action === 'pr-auto', taskOptions);
       } else if (action === 'branch-pr') {
-        onCreateBranchPR(defaultNewBranch, selectedBranch, prTitle, prBody);
+        onCreateBranchPR(defaultNewBranch, selectedBranch, prTitle, prBody, taskOptions);
       } else {
         onCommit(prTitle);
       }
@@ -1071,6 +1090,30 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         if (result.success && result.data) setAgentProviders(result.data);
       })
       .catch(() => {});
+  }, []);
+
+  // Refresh task status colors from API so tabs reflect current status
+  useEffect(() => {
+    const refresh = () => {
+      const terms = useTerminalStore.getState().terminals;
+      for (const t of terms) {
+        if (!t.task) continue;
+        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
+          if (!res.success || !res.data) return;
+          const task = res.data;
+          const newStatus = task.status.name;
+          const newColor = task.status.color;
+          if (newStatus !== t.task!.status || newColor !== t.task!.statusColor) {
+            useTerminalStore.getState().updateTerminal(t.id, {
+              task: { ...t.task!, status: newStatus, statusColor: newColor },
+            });
+          }
+        }).catch(() => {});
+      }
+    };
+    refresh();
+    const iv = setInterval(refresh, 60_000);
+    return () => clearInterval(iv);
   }, []);
 
   // Lazy-mount: only render TerminalPanel once a group has been active
@@ -1669,7 +1712,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     });
   }, [activeProject]);
 
-  const executeCreatePR = useCallback(async (targetBranch: string, title: string, body: string, autoMerge = false) => {
+  const executeCreatePR = useCallback(async (targetBranch: string, title: string, body: string, autoMerge = false, taskOptions?: TaskCompleteOptions) => {
     if (!mergeTarget || !activeProject?.path) return;
     const saved = mergeTarget;
     setMergeTarget(null);
@@ -1677,6 +1720,39 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     const taskBranch = saved.worktreeBranch || saved.currentBranch || '';
     const pushCwd = saved.worktreePath || saved.cwd || activeProject.path;
 
+    // If agent is running, send prompt to terminal
+    const terminal = useTerminalStore.getState().getTerminal(saved.id);
+    if (terminal?.isClaudeMode) {
+      let step = 1;
+      const parts = [
+        `Please create a pull request:`,
+        `${step++}. Stage and commit any uncommitted changes`,
+        `${step++}. Push branch "${taskBranch}" to origin`,
+        `${step++}. Create a PR targeting "${targetBranch}"`,
+        `   - Use this exact PR title: ${title}`,
+      ];
+      if (body.trim()) {
+        parts.push(`   - PR description:\n${body}`);
+      }
+      if (autoMerge) {
+        parts.push(`${step++}. Enable auto-merge on the PR after creating it`);
+      }
+      if (taskOptions?.setReadyForReview && taskOptions.taskId) {
+        parts.push(`${step++}. After the PR is created successfully, update the ClickUp task ${taskOptions.taskId} status to "ready for review"`);
+      }
+      if (taskOptions?.comment && taskOptions.taskId) {
+        parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+      }
+      parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
+
+      window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
+      await stopAndSyncTimer(saved.id, saved.task?.id);
+      setMergeStatus({ message: 'PR creation prompt sent to agent', type: 'success' });
+      setTimeout(() => setMergeStatus(null), 5000);
+      return;
+    }
+
+    // Fallback: agent not running — use IPC directly
     const result = await window.electronAPI.createPR(
       activeProject.path,
       pushCwd,
@@ -1737,13 +1813,44 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     setTimeout(() => setMergeStatus(null), 5000);
   }, [mergeTarget, activeProject, stopAndSyncTimer]);
 
-  const executeCreateBranchPR = useCallback(async (newBranch: string, targetBranch: string, title: string, body: string) => {
+  const executeCreateBranchPR = useCallback(async (newBranch: string, targetBranch: string, title: string, body: string, taskOptions?: TaskCompleteOptions) => {
     if (!mergeTarget || !activeProject?.path) return;
     const saved = mergeTarget;
     setMergeTarget(null);
 
     const cwd = saved.cwd || saved.worktreePath || activeProject.path;
 
+    // If agent is running, send prompt to terminal
+    const terminal = useTerminalStore.getState().getTerminal(saved.id);
+    if (terminal?.isClaudeMode) {
+      let step = 1;
+      const parts = [
+        `Please create a new branch and pull request:`,
+        `${step++}. Stage and commit any uncommitted changes`,
+        `${step++}. Create a new branch "${newBranch}" from current HEAD`,
+        `${step++}. Push branch "${newBranch}" to origin`,
+        `${step++}. Create a PR targeting "${targetBranch}"`,
+        `   - Use this exact PR title: ${title}`,
+      ];
+      if (body.trim()) {
+        parts.push(`   - PR description:\n${body}`);
+      }
+      if (taskOptions?.setReadyForReview && taskOptions.taskId) {
+        parts.push(`${step++}. After the PR is created successfully, update the ClickUp task ${taskOptions.taskId} status to "ready for review"`);
+      }
+      if (taskOptions?.comment && taskOptions.taskId) {
+        parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+      }
+      parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
+
+      window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
+      await stopAndSyncTimer(saved.id, saved.task?.id);
+      setMergeStatus({ message: 'Branch & PR prompt sent to agent', type: 'success' });
+      setTimeout(() => setMergeStatus(null), 5000);
+      return;
+    }
+
+    // Fallback: agent not running — use IPC directly
     const result = await window.electronAPI.createBranchPR(cwd, newBranch, targetBranch, title, body);
 
     if (result.success) {
@@ -1936,6 +2043,9 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                   : 'text-[var(--text-secondary)]',
                 dragOverGroupId === groupId && dragGroupId !== groupId && 'ring-2 ring-[var(--accent)] ring-inset',
               )}
+              style={firstTerminal.task ? {
+                backgroundColor: `${firstTerminal.task.statusColor}15`,
+              } : undefined}
             >
               <GripVertical className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-40 cursor-grab active:cursor-grabbing transition-opacity -mr-1" />
               {isGroupSplit ? (
