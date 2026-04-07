@@ -561,6 +561,7 @@ export function TaskPickerModal({
 
 /** Complete Task Modal - single-step dialog with auto-selected base branch */
 export interface TaskCompleteOptions {
+  postComment?: boolean;
   comment?: string;
   setReadyForReview?: boolean;
   taskId?: string;
@@ -711,11 +712,12 @@ function CompleteTaskModal({
 
     // Build task manager options for deferred execution
     const isPRAction = action === 'pr' || action === 'pr-auto' || action === 'branch-pr';
-    const hasTaskOptions = (postComment && task && commentText.trim()) || (setReadyForReview && task);
+    const hasTaskOptions = (postComment && task) || (setReadyForReview && task);
     const deferTaskActions = isPRAction && isAgentRunning && hasTaskOptions;
 
     const taskOptions: TaskCompleteOptions | undefined = deferTaskActions
       ? {
+          postComment: postComment || undefined,
           comment: postComment && commentText.trim() ? commentText.trim() : undefined,
           setReadyForReview: setReadyForReview || undefined,
           taskId: task?.id,
@@ -866,11 +868,14 @@ function CompleteTaskModal({
                       <MessageSquare className="w-3 h-3 text-[var(--text-muted)]" />
                       Post root cause & solution as comment
                     </div>
-                    {postComment && (
+                    {postComment && isAgentRunning && (
+                      <p className="mt-1 text-[10px] text-[var(--text-muted)]">Agent will generate and post the comment</p>
+                    )}
+                    {postComment && !isAgentRunning && (
                       commentLoading ? (
                         <div className="flex items-center gap-2 mt-2 text-xs text-[var(--text-muted)]">
                           <Loader2 className="w-3 h-3 animate-spin" />
-                          {isAgentRunning ? 'Asking agent for summary...' : 'Loading commit summary...'}
+                          Loading commit summary...
                         </div>
                       ) : (
                         <textarea
@@ -1740,8 +1745,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       if (taskOptions?.setReadyForReview && taskOptions.taskId) {
         parts.push(`${step++}. After the PR is created successfully, update the ClickUp task ${taskOptions.taskId} status to "ready for review"`);
       }
-      if (taskOptions?.comment && taskOptions.taskId) {
-        parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+      if (taskOptions?.postComment && taskOptions.taskId) {
+        if (taskOptions.comment) {
+          parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+        } else {
+          parts.push(`${step++}. Post a comment to ClickUp task ${taskOptions.taskId} summarizing the root cause of the issue and the solution. Include relevant file changes.`);
+        }
       }
       parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
 
@@ -1838,8 +1847,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       if (taskOptions?.setReadyForReview && taskOptions.taskId) {
         parts.push(`${step++}. After the PR is created successfully, update the ClickUp task ${taskOptions.taskId} status to "ready for review"`);
       }
-      if (taskOptions?.comment && taskOptions.taskId) {
-        parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+      if (taskOptions?.postComment && taskOptions.taskId) {
+        if (taskOptions.comment) {
+          parts.push(`${step++}. Post this comment to ClickUp task ${taskOptions.taskId}:\n${taskOptions.comment}`);
+        } else {
+          parts.push(`${step++}. Post a comment to ClickUp task ${taskOptions.taskId} summarizing the root cause of the issue and the solution. Include relevant file changes.`);
+        }
       }
       parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
 

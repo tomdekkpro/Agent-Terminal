@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2 } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -42,6 +42,109 @@ interface TerminalPanelProps {
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico']);
+
+/** Actions dropdown — sends prompt-based actions to the agent terminal */
+function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
+  terminal: Terminal;
+  isSplit?: boolean;
+  onMergeComplete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const sendPrompt = (prompt: string) => {
+    window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+    setOpen(false);
+  };
+
+  const isAgent = terminal.isClaudeMode;
+  const taskLabel = terminal.task?.customId || terminal.task?.id || '';
+
+  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean }[] = [
+    {
+      icon: <GitMerge className="w-3.5 h-3.5" />,
+      label: 'Complete Task',
+      description: 'Merge, create PR, or push code',
+      action: () => { setOpen(false); onMergeComplete(); },
+    },
+    {
+      icon: <GitCommitVertical className="w-3.5 h-3.5" />,
+      label: 'Commit Changes',
+      action: () => sendPrompt(`Please commit all changes with a descriptive commit message based on what was changed.`),
+      agentOnly: true,
+    },
+    {
+      icon: <GitPullRequest className="w-3.5 h-3.5" />,
+      label: 'Create PR',
+      action: () => sendPrompt(`Please commit all changes, push the current branch to origin, and create a pull request. Use a descriptive title and summary based on the changes.`),
+      agentOnly: true,
+    },
+    {
+      icon: <MessageSquare className="w-3.5 h-3.5" />,
+      label: 'Post Root Cause & Solution',
+      description: `Comment on ${taskLabel}`,
+      action: () => sendPrompt(`Please analyze the changes made in this session and post a comment to ClickUp task ${terminal.task?.id} summarizing the root cause of the issue and the solution. Include relevant file changes.`),
+      agentOnly: true,
+    },
+    {
+      icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+      label: 'Set Ready for Review',
+      description: `Update ${taskLabel} status`,
+      action: () => sendPrompt(`Please update the ClickUp task ${terminal.task?.id} status to "ready for review".`),
+      agentOnly: true,
+    },
+    {
+      icon: <ListTodo className="w-3.5 h-3.5" />,
+      label: 'Summarize Work',
+      action: () => sendPrompt(`Please summarize all the work done in this session: what was changed, which files were modified, and any remaining items.`),
+      agentOnly: true,
+    },
+  ];
+
+  const visibleActions = isAgent ? actions : actions.filter((a) => !a.agentOnly);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+        title="Task actions"
+      >
+        <Zap className="w-3.5 h-3.5" />
+        {!isSplit && 'Actions'}
+        <ChevronDown className="w-3 h-3 opacity-60" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-30 py-1 overflow-hidden">
+          {visibleActions.map((a, i) => (
+            <button
+              key={i}
+              onClick={(e) => { e.stopPropagation(); a.action(); }}
+              className="w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-[var(--bg-tertiary)] transition-colors"
+            >
+              <span className="mt-0.5 text-[var(--text-muted)]">{a.icon}</span>
+              <div className="min-w-0">
+                <div className="text-xs text-[var(--text-primary)]">{a.label}</div>
+                {a.description && (
+                  <div className="text-[10px] text-[var(--text-muted)] truncate">{a.description}</div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const TERMINAL_THEME = {
   background: '#0f0f23',
@@ -688,16 +791,11 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             </div>
           )}
           {terminal.task && onMergeComplete && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onMergeComplete(); }}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
-              title={terminal.worktreeBranch
-                ? `Complete task — merge or create PR for ${terminal.worktreeBranch}`
-                : 'Complete task — create PR or push code'}
-            >
-              <GitMerge className="w-3.5 h-3.5" />
-              {!isSplit && 'Complete'}
-            </button>
+            <ActionsDropdown
+              terminal={terminal}
+              isSplit={isSplit}
+              onMergeComplete={onMergeComplete}
+            />
           )}
           {!terminal.task && onLinkTask && (
             <button
