@@ -12,7 +12,6 @@ import { agentRegistry } from './providers/agent-registry';
 const clickUpProvider = new ClickUpProvider();
 
 const GH_TIMEOUT = 120000;
-const MAX_DIFF = 50000; // cap diff size — we truncate to this anyway before sending to Claude
 
 // ─── Scheduler state ──────────────────────────────────────────
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -57,57 +56,6 @@ function ghExec(command: string, cwd: string): Promise<string> {
   });
 }
 
-/**
- * Stream `gh pr diff` and stop reading after MAX_DIFF bytes.
- * Avoids the maxBuffer exceeded error from exec() on large PRs.
- */
-function streamGhDiff(prNumber: number, cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('gh', ['pr', 'diff', String(prNumber)], {
-      cwd,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let truncated = false;
-    let stderr = '';
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (truncated) return;
-      output += chunk.toString();
-      if (output.length >= MAX_DIFF) {
-        truncated = true;
-        output = output.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]';
-        child.kill('SIGTERM');
-      }
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`gh pr diff timed out after ${GH_TIMEOUT / 1000}s`));
-    }, GH_TIMEOUT);
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      // code may be non-zero when we killed it after truncation — that's fine
-      if (truncated || code === 0) {
-        resolve(output);
-      } else {
-        reject(new Error(`gh pr diff exited with code ${code}: ${stderr.trim()}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
-}
 
 function sendReviewEvent(getWindow: () => BrowserWindow | null, event: CodeReviewEvent) {
   const win = getWindow();
@@ -282,42 +230,25 @@ async function findPRsForTask(task: { id: string; customId?: string; description
   return results;
 }
 
-/** Fetch PR info using gh CLI */
+/** Fetch PR metadata using gh CLI (no diff — Claude fetches that itself) */
 async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
   title: string;
   url: string;
   branch: string;
   state: string;
   mergeable: string;
-  diff: string;
-  additions: number;
-  deletions: number;
-  files: string[];
 }> {
   const infoJson = await ghExec(
-    `gh pr view ${prNumber} --json title,url,headRefName,additions,deletions,files,state,mergeable`,
+    `gh pr view ${prNumber} --json title,url,headRefName,state,mergeable`,
     projectPath,
   );
   const info = JSON.parse(infoJson);
-  const state = (info.state || '').toUpperCase();
-  const mergeable = (info.mergeable || '').toUpperCase();
-
-  // Only fetch diff for open PRs — stream and cap at MAX_DIFF to avoid maxBuffer blow-up
-  let diff = '';
-  if (state === 'OPEN') {
-    diff = await streamGhDiff(prNumber, projectPath);
-  }
-
   return {
     title: info.title,
     url: info.url,
     branch: info.headRefName,
-    state,
-    mergeable,
-    diff,
-    additions: info.additions || 0,
-    deletions: info.deletions || 0,
-    files: (info.files || []).map((f: any) => f.path),
+    state: (info.state || '').toUpperCase(),
+    mergeable: (info.mergeable || '').toUpperCase(),
   };
 }
 
@@ -401,10 +332,8 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
 }
 
 async function runAIReview(
-  diff: string,
-  prTitle: string,
-  files: string[],
-  projectPath: string | undefined,
+  prNumber: number,
+  projectPath: string,
   taskContext?: { taskName?: string; description?: string; comments?: string },
   taskId?: string,
 ): Promise<{ passed: boolean; findings: CodeReviewFinding[] }> {
@@ -412,11 +341,6 @@ async function runAIReview(
   if (!agentProvider || !agentProvider.isAvailable()) {
     throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
   }
-
-  // Diff is already capped by streamGhDiff, but guard in case called with raw diff
-  const truncatedDiff = diff.length > MAX_DIFF
-    ? diff.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]'
-    : diff;
 
   // Build task context section
   let taskSection = '';
@@ -442,32 +366,27 @@ async function runAIReview(
 
   // Read REVIEW.md from the project if it exists
   let reviewGuidelines = '';
-  if (projectPath) {
-    try {
-      const reviewMdPath = path.join(projectPath, 'REVIEW.md');
-      const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
-      if (content.trim()) {
-        const trimmed = content.length > 3000
-          ? content.substring(0, 3000) + '\n...[truncated]'
-          : content;
-        reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
-      }
-    } catch { /* REVIEW.md not found — that's fine */ }
-  }
+  try {
+    const reviewMdPath = path.join(projectPath, 'REVIEW.md');
+    const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
+    if (content.trim()) {
+      const trimmed = content.length > 3000
+        ? content.substring(0, 3000) + '\n...[truncated]'
+        : content;
+      reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
+    }
+  } catch { /* REVIEW.md not found — that's fine */ }
 
   const prompt = `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text.
 
-Analyze this Pull Request for real bugs and issues. You act as a fleet of specialized reviewers — examine the changes from multiple angles: correctness, security, performance, and error handling. For each potential issue, verify it against the actual code behavior before reporting. Only report issues you are confident are real problems.
+Analyze Pull Request #${prNumber} for real bugs and issues.
+
+First, run these commands to get the PR details:
+1. \`gh pr view ${prNumber} --json title,files,additions,deletions\` — to see what changed
+2. \`gh pr diff ${prNumber}\` — to see the actual diff
+
+Then act as a fleet of specialized reviewers — examine the changes from multiple angles: correctness, security, performance, and error handling. For each potential issue, verify it against the actual code behavior before reporting. Only report issues you are confident are real problems. You have full access to the project files, so you can read any source file to understand context beyond the diff.
 ${taskSection}${reviewGuidelines}
-## Pull Request
-Title: ${prTitle}
-Files changed: ${files.join(', ')}
-
-## Diff
-\`\`\`diff
-${truncatedDiff}
-\`\`\`
-
 ## Review Checklist
 
 ### 1. Correctness & Task Verification
@@ -510,7 +429,7 @@ ${truncatedDiff}
 - If the code correctly solves the task with no real issues, pass the review.
 
 ## Output Format
-Respond with ONLY this JSON object — no text before or after:
+After your analysis, respond with ONLY this JSON object as your final output — no text before or after:
 
 {"passed": false, "findings": [{"severity": "critical", "file": "src/example.ts", "line": 42, "description": "What is wrong and why", "suggestion": "How to fix it"}]}
 
@@ -519,16 +438,16 @@ If no issues found:
 {"passed": true, "findings": []}`;
 
   return new Promise((resolve, reject) => {
-    // Use stdin piping instead of -p flag to avoid Windows command line length limits
+    // Claude fetches the diff itself via gh — we just pass the prompt with PR number
     const args = ['--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '-'];
-    if (projectPath) args.push('--add-dir', projectPath);
+    args.push('--add-dir', projectPath);
 
     const env = { ...process.env };
     delete env.CLAUDECODE;
 
     const child = spawn('claude', args, {
       env,
-      cwd: projectPath || undefined,
+      cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -544,20 +463,15 @@ If no issues found:
     let stderr = '';
     let settled = false;
 
-    // Dynamic timeout: 3 min base + 1 min per 5KB of diff, capped at 20 min
-    const baseMs = 3 * 60_000;
-    const perChunkMs = 1 * 60_000;
-    const chunkSize = 5000;
-    const maxMs = 20 * 60_000;
-    const dynamicMs = Math.min(baseMs + Math.ceil(truncatedDiff.length / chunkSize) * perChunkMs, maxMs);
-    const timeoutMinutes = Math.round(dynamicMs / 60_000);
+    // Claude fetches diff + reads files itself, so allow generous timeout (20 min)
+    const timeoutMs = 20 * 60_000;
 
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill('SIGTERM');
-      reject(new Error(`Code review timed out after ${timeoutMinutes} minutes`));
-    }, dynamicMs);
+      reject(new Error('Code review timed out after 20 minutes'));
+    }, timeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -747,13 +661,13 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             continue;
           }
 
-          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber} (${prInfo.files.length} files, ${prInfo.additions}+ / ${prInfo.deletions}-)...` });
+          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber}...` });
 
           // Fetch task context for informed review
           const taskCtx = await fetchTaskContext(task.id);
 
-          // Run AI review with task context
-          const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
+          // Run AI review — Claude fetches the diff itself
+          const result = await runAIReview(prNumber, projectPath, {
             taskName: task.name,
             description: taskCtx.description,
             comments: taskCtx.comments,
@@ -941,7 +855,7 @@ export function registerCodeReviewHandlers(
     IPC_CHANNELS.CODE_REVIEW_RUN,
     async (_event, projectPath: string, taskId: string, prNumber: number) => {
       try {
-        sendReviewEvent(getWindow, { type: 'progress', taskId, message: 'Fetching PR info...' });
+        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Checking PR #${prNumber}...` });
 
         const prInfo = await fetchPRInfo(projectPath, prNumber);
 
@@ -973,12 +887,13 @@ export function registerCodeReviewHandlers(
           };
         }
 
-        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing ${prInfo.files.length} files (${prInfo.additions}+ / ${prInfo.deletions}-)...` });
+        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing PR #${prNumber}...` });
 
         // Fetch task context for informed review
         const taskCtx = await fetchTaskContext(taskId);
 
-        const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
+        // Claude fetches the diff itself via gh CLI
+        const result = await runAIReview(prNumber, projectPath, {
           taskName: prInfo.title,
           description: taskCtx.description,
           comments: taskCtx.comments,
