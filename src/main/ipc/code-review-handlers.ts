@@ -646,22 +646,6 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             continue;
           }
 
-          // Fail immediately if PR has merge conflicts
-          if (prInfo.mergeable === 'CONFLICTING') {
-            debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
-            const conflictFinding: CodeReviewFinding = {
-              severity: 'critical',
-              file: 'PR',
-              description: `PR #${prNumber}: This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.`,
-            };
-            allFindings.push(conflictFinding);
-            anyFailed = true;
-            allPassed = false;
-            await clickUpProvider.postComment(settings, task.id, `## ❌ Code Review Failed — Merge Conflict\n\n**PR:** #${prNumber} — ${prInfo.title}\n\n🔴 **Critical**: This PR has merge conflicts and cannot be merged. Please resolve the conflicts and request a new review.\n\n---\n_Automated review by Agent Terminal_`);
-            sendReviewEvent(getWindow, { type: 'done', taskId: eventTaskId, status: 'failed', findings: [conflictFinding] });
-            continue;
-          }
-
           sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber}...` });
 
           // Fetch task context for informed review
@@ -673,6 +657,18 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             description: taskCtx.description,
             comments: taskCtx.comments,
           }, eventTaskId);
+
+          // Check for merge conflicts after review and append as a finding
+          if (prInfo.mergeable === 'CONFLICTING') {
+            debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
+            result.findings.push({
+              severity: 'critical',
+              file: 'PR',
+              description: `PR #${prNumber}: This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts.`,
+            });
+            result.passed = false;
+          }
+
           const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
 
           if (result.passed) {
@@ -872,27 +868,6 @@ export function registerCodeReviewHandlers(
           return { success: true, data: { passed: false, findings: [], prTitle: prInfo.title, prUrl: prInfo.url, prBranch: prInfo.branch, skipped: true } };
         }
 
-        // Fail immediately if PR has merge conflicts
-        if (prInfo.mergeable === 'CONFLICTING') {
-          const conflictFinding: CodeReviewFinding = {
-            severity: 'critical',
-            file: 'PR',
-            description: 'This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.',
-          };
-          sendReviewEvent(getWindow, { type: 'finding', taskId, finding: conflictFinding });
-          sendReviewEvent(getWindow, { type: 'done', taskId, status: 'failed', findings: [conflictFinding] });
-          return {
-            success: true,
-            data: {
-              passed: false,
-              findings: [conflictFinding],
-              prTitle: prInfo.title,
-              prUrl: prInfo.url,
-              prBranch: prInfo.branch,
-            },
-          };
-        }
-
         sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing PR #${prNumber}...` });
 
         // Fetch task context for informed review
@@ -904,6 +879,16 @@ export function registerCodeReviewHandlers(
           description: taskCtx.description,
           comments: taskCtx.comments,
         }, taskId);
+
+        // Check for merge conflicts after review and append as a finding
+        if (prInfo.mergeable === 'CONFLICTING') {
+          result.findings.push({
+            severity: 'critical',
+            file: 'PR',
+            description: 'This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts.',
+          });
+          result.passed = false;
+        }
 
         for (const finding of result.findings) {
           sendReviewEvent(getWindow, { type: 'finding', taskId, finding });
