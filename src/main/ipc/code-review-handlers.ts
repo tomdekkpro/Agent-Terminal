@@ -1,6 +1,7 @@
 import type { BrowserWindow, IpcMain } from 'electron';
 import { exec, spawn } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem } from '../../shared/types';
@@ -684,8 +685,13 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             await clickUpProvider.postComment(settings, task.id, comment);
             // Post comment on GitHub PR
             try {
-              const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
-              await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
+              const tmpFile = path.join(os.tmpdir(), `cr-comment-${Date.now()}.md`);
+              fs.writeFileSync(tmpFile, comment, 'utf-8');
+              try {
+                await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+              } finally {
+                fs.unlinkSync(tmpFile);
+              }
             } catch {
               // Non-critical
             }
@@ -956,8 +962,13 @@ export function registerCodeReviewHandlers(
           }
           // Post comment on GitHub PR
           try {
-            const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
-            await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
+            const tmpFile = path.join(os.tmpdir(), `cr-comment-${Date.now()}.md`);
+            fs.writeFileSync(tmpFile, comment, 'utf-8');
+            try {
+              await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+            } finally {
+              fs.unlinkSync(tmpFile);
+            }
             debugLog('[CodeReview] Posted review comment on PR #', prNumber);
           } catch (ghErr) {
             debugError('[CodeReview] Failed to post GitHub comment:', ghErr);
