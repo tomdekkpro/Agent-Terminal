@@ -341,6 +341,15 @@ export interface QCTask {
   durationMs?: number;
   createdAt: string;
   updatedAt: string;
+  /** Linked ClickUp (or other task manager) task */
+  linkedTask?: {
+    id: string;
+    customId?: string;
+    name: string;
+    status: string;
+    statusColor: string;
+    url: string;
+  };
 }
 
 export interface InsightsMessage {
@@ -404,6 +413,7 @@ export interface InsightsSessionMeta {
   qcTotal?: number;
   qcDurationMs?: number;
   linkedTaskName?: string;
+  linkedTaskColor?: string;
   createdAt: string;
   updatedAt: string;
 }

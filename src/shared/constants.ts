@@ -38,6 +38,7 @@ export const IPC_CHANNELS = {
   TASK_MANAGER_GET_LISTS: 'task-manager:get-lists',
   TASK_MANAGER_ADD_TAG: 'task-manager:add-tag',
   TASK_MANAGER_REMOVE_TAG: 'task-manager:remove-tag',
+  TASK_MANAGER_GET_TASK_STATUSES: 'task-manager:get-task-statuses',
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',

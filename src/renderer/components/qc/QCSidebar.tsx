@@ -127,6 +127,10 @@ export function QCSidebar({
             ? 'bg-[var(--accent)]/10 border-[var(--accent)]'
             : 'border-transparent hover:bg-[var(--bg-tertiary)]',
         )}
+        style={s.linkedTaskColor ? {
+          backgroundColor: s.id === activeSessionId ? undefined : `${s.linkedTaskColor}15`,
+          borderLeftColor: s.id === activeSessionId ? undefined : s.linkedTaskColor,
+        } : undefined}
       >
         {renamingId === s.id ? (
           <input

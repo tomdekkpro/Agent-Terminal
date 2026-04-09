@@ -382,4 +382,25 @@ export class ClickUpProvider implements ITaskManagerProvider {
       };
     }
   }
+
+  async getTaskStatuses(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>> {
+    try {
+      // Fetch the task to get its list.id, then fetch that list for statuses
+      const task = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}`);
+      const listId = task.list?.id;
+      if (!listId) throw new Error('Could not determine task list');
+
+      const list = await clickUpFetch(settings.clickupApiKey, `/list/${listId}`);
+      const statuses: { name: string; color: string }[] = (list.statuses || []).map((s: any) => ({
+        name: s.status as string,
+        color: (s.color as string) || '#999',
+      }));
+      return { success: true, data: statuses };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get statuses',
+      };
+    }
+  }
 }

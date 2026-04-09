@@ -1,4 +1,7 @@
 import { spawn, execSync, type ChildProcess } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import { app } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import type { BrowserWindow } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -7,6 +10,13 @@ import { getSession, saveSession } from '../insights/session-storage';
 import { DEFAULT_PERSONAS } from '../../shared/types';
 import { agentRegistry } from '../ipc/providers/agent-registry';
 import { loadPersonas } from '../insights/persona-storage';
+
+/** Get or create a directory for QC screenshots */
+function getScreenshotDir(sessionId: string): string {
+  const dir = path.join(app.getPath('userData'), 'qc-screenshots', sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 /** Load the QC persona's systemPrompt (falls back to default if not found) */
 async function getQCPersonaPrompt(): Promise<string> {
@@ -253,6 +263,8 @@ export async function runTestCase(
     ? `\nLOGIN CREDENTIALS (use these whenever login/authentication is needed):\n${credentials.map(c => `  ${c.label}: ${c.value}`).join('\n')}\n`
     : '';
 
+  const screenshotDir = getScreenshotDir(sessionId);
+
   const prompt = `${personaPrompt}
 
 You are executing a manual test case using a real browser.
@@ -269,9 +281,15 @@ INSTRUCTIONS:
 1. Use browser_navigate to open the target URL
 2. For each step:
    a. Perform the action described (click, type, navigate, etc.) using the appropriate browser tool
-   b. Take a screenshot using browser_take_screenshot after the action
+   b. IMPORTANT: After performing the action, ALWAYS take a screenshot for evidence.
+      Call browser_take_screenshot to capture the current state of the page.
    c. Evaluate if the actual result matches the expected result
 3. After all steps, provide a summary
+
+SCREENSHOT REQUIREMENTS:
+- You MUST take a screenshot after EVERY step for evidence
+- Use browser_take_screenshot after each action
+- This is critical for QC documentation
 
 RESPOND WITH ONLY valid JSON (no markdown):
 {
@@ -290,6 +308,9 @@ RESPOND WITH ONLY valid JSON (no markdown):
 IMPORTANT: Actually use the browser tools to navigate and interact with the page. Do NOT just imagine the results. Use browser_navigate, browser_click, browser_type, browser_take_screenshot, browser_snapshot, etc.`;
 
   const modelId = model === 'opus' ? 'claude-opus-4-6' : model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
+
+  // Record start time so we can find screenshots created during this test
+  const testStartTime = Date.now();
 
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
@@ -320,6 +341,7 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
     let lastReportedStep = 0;
     let recentText = ''; // Accumulate recent text for step detection across fragments
     const screenshotPaths: Map<number, string> = new Map(); // stepOrder -> file path
+    let resultText = ''; // The final result payload from Claude CLI
 
     child.stderr?.on('data', (chunk: Buffer) => {
       stderrOutput += chunk.toString();
@@ -353,13 +375,29 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
       if (recentText.length > 500) recentText = recentText.slice(-200);
     };
 
+    let screenshotCounter = 0;
+
     // Extract screenshot file path from tool_result content
     const extractScreenshotPath = (content: string): string | undefined => {
       // Match paths like .playwright-mcp\page-xxx.png or absolute paths
-      const match = content.match(/\.(playwright-mcp[\\/][^\s)]+\.png)/i)
-        || content.match(/([A-Za-z]:[\\/][^\s)]+\.png)/i)
-        || content.match(/([\\/][^\s)]+\.png)/i);
+      const match = content.match(/\.(playwright-mcp[\\/][^\s)\]"]+\.png)/i)
+        || content.match(/([A-Za-z]:[\\/][^\s)\]"]+\.(?:png|jpg|jpeg))/i)
+        || content.match(/([\\/][^\s)\]"]+\.(?:png|jpg|jpeg))/i)
+        || content.match(/(playwright[^\s)\]"]*\.(?:png|jpg|jpeg))/i);
       return match ? match[0] : undefined;
+    };
+
+    // Save base64 image data to a file and return the path
+    const saveBase64Screenshot = (base64Data: string): string | undefined => {
+      try {
+        screenshotCounter++;
+        const filename = `step-${currentStepOrder || screenshotCounter}-${Date.now()}.png`;
+        const filePath = path.join(screenshotDir, filename);
+        // Strip data URI prefix if present
+        const raw = base64Data.replace(/^data:image\/\w+;base64,/, '');
+        fs.writeFileSync(filePath, Buffer.from(raw, 'base64'));
+        return filePath;
+      } catch { return undefined; }
     };
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -380,7 +418,10 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
             const text = typeof parsed.result === 'string'
               ? parsed.result
               : parsed.result.content?.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('') || '';
-            if (text) fullText += text;
+            if (text) {
+              fullText += text;
+              resultText = text; // Keep the final result — most reliable source for JSON
+            }
           }
           if (parsed.type === 'assistant' && parsed.content) {
             const text = parsed.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
@@ -420,11 +461,69 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
           }
           // Capture screenshot file paths from tool results
           if (parsed.type === 'tool_result') {
-            const resultText = typeof parsed.output === 'string' ? parsed.output
-              : Array.isArray(parsed.content) ? parsed.content.map((b: any) => b.text || '').join('') : '';
-            const screenshotPath = extractScreenshotPath(resultText);
-            if (screenshotPath && currentStepOrder > 0) {
+            // Extract text from various tool_result formats
+            const texts: string[] = [];
+            if (typeof parsed.output === 'string') texts.push(parsed.output);
+            if (typeof parsed.content === 'string') texts.push(parsed.content);
+            if (Array.isArray(parsed.content)) {
+              for (const block of parsed.content) {
+                if (block.type === 'text' && block.text) texts.push(block.text);
+                // Handle base64 image content blocks from Playwright MCP
+                if (block.type === 'image' && block.data) {
+                  const saved = saveBase64Screenshot(block.data);
+                  if (saved && currentStepOrder > 0) {
+                    screenshotPaths.set(currentStepOrder, saved);
+                    sendQCEvent(getWindow, {
+                      type: 'screenshot',
+                      sessionId,
+                      taskId,
+                      testCaseId: testCase.id,
+                      stepOrder: currentStepOrder,
+                      screenshot: saved,
+                      message: `Step ${currentStepOrder}: Screenshot saved`,
+                    });
+                  }
+                }
+              }
+            }
+            // Also check parsed.result for nested content
+            if (parsed.result) {
+              if (typeof parsed.result === 'string') texts.push(parsed.result);
+              if (Array.isArray(parsed.result)) {
+                for (const block of parsed.result) {
+                  if (block.type === 'text' && block.text) texts.push(block.text);
+                  if (block.type === 'image' && block.data) {
+                    const saved = saveBase64Screenshot(block.data);
+                    if (saved && currentStepOrder > 0) {
+                      screenshotPaths.set(currentStepOrder, saved);
+                    }
+                  }
+                }
+              }
+            }
+
+            const combinedText = texts.join(' ');
+            const screenshotPath = extractScreenshotPath(combinedText);
+            if (screenshotPath && currentStepOrder > 0 && !screenshotPaths.has(currentStepOrder)) {
               screenshotPaths.set(currentStepOrder, screenshotPath);
+              sendQCEvent(getWindow, {
+                type: 'screenshot',
+                sessionId,
+                taskId,
+                testCaseId: testCase.id,
+                stepOrder: currentStepOrder,
+                screenshot: screenshotPath,
+                message: `Step ${currentStepOrder}: Screenshot captured`,
+              });
+            }
+
+            // Also check for base64 data URI in text
+            const base64Match = combinedText.match(/data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+/);
+            if (base64Match && currentStepOrder > 0 && !screenshotPaths.has(currentStepOrder)) {
+              const saved = saveBase64Screenshot(base64Match[0]);
+              if (saved) {
+                screenshotPaths.set(currentStepOrder, saved);
+              }
             }
           }
         } catch {
@@ -436,16 +535,128 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
     child.on('close', () => {
       activeProcesses.delete(`${sessionId}:${testCase.id}`);
 
-      try {
-        let jsonStr = fullText.trim();
-        const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-        if (jsonMatch) jsonStr = jsonMatch[0];
+      // Scan for Playwright MCP screenshots created during this test.
+      // Playwright MCP saves screenshots to .playwright-mcp/ in the cwd.
+      // We collect all image files created after testStartTime and assign them to steps.
+      const collectScreenshotFiles = (): string[] => {
+        const files: string[] = [];
+        // Check common Playwright MCP screenshot locations
+        const searchDirs = [
+          path.join(process.cwd(), '.playwright-mcp'),
+          path.join(process.env.HOME || process.env.USERPROFILE || '', '.playwright-mcp'),
+          screenshotDir,
+        ];
+        for (const dir of searchDirs) {
+          try {
+            if (!fs.existsSync(dir)) continue;
+            const entries = fs.readdirSync(dir);
+            for (const entry of entries) {
+              if (!/\.(png|jpe?g|webp)$/i.test(entry)) continue;
+              const fullPath = path.join(dir, entry);
+              try {
+                const stat = fs.statSync(fullPath);
+                if (stat.mtimeMs >= testStartTime) {
+                  files.push(fullPath);
+                }
+              } catch { /* skip */ }
+            }
+          } catch { /* dir doesn't exist or not readable */ }
+        }
+        // Sort by modification time
+        files.sort((a, b) => {
+          try {
+            return fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs;
+          } catch { return 0; }
+        });
+        return files;
+      };
 
-        const result = JSON.parse(jsonStr) as {
+      // Collect screenshot files and assign to steps that don't have one yet
+      const screenshotFiles = collectScreenshotFiles();
+      if (screenshotFiles.length > 0) {
+        let fileIdx = 0;
+        for (let stepOrder = 1; stepOrder <= testCase.steps.length && fileIdx < screenshotFiles.length; stepOrder++) {
+          if (!screenshotPaths.has(stepOrder)) {
+            screenshotPaths.set(stepOrder, screenshotFiles[fileIdx]);
+            fileIdx++;
+          }
+        }
+        // If there are leftover files and some steps still missing, assign them
+        for (let stepOrder = 1; stepOrder <= testCase.steps.length && fileIdx < screenshotFiles.length; stepOrder++) {
+          // Overwrite with later screenshot if step already has one (prefer latest)
+          if (fileIdx < screenshotFiles.length) {
+            screenshotPaths.set(stepOrder, screenshotFiles[fileIdx]);
+            fileIdx++;
+          }
+        }
+      }
+
+      try {
+        // Try multiple sources for the JSON result, in order of reliability:
+        // 1. The final 'result' payload from Claude CLI (most reliable)
+        // 2. The full accumulated text (fallback)
+        const candidates = [resultText, fullText].filter(Boolean);
+
+        let result: {
           steps: Array<{ order: number; actual: string; status: string; screenshot?: string }>;
           overallStatus: string;
           summary: string;
-        };
+        } | null = null;
+
+        for (const candidate of candidates) {
+          if (result) break;
+          const trimmed = candidate.trim();
+
+          // Strategy 1: Try parsing the entire trimmed text as JSON
+          try { result = JSON.parse(trimmed); } catch { /* not pure JSON */ }
+          if (result?.steps && result?.overallStatus) break;
+          result = null;
+
+          // Strategy 2: Extract the last JSON object using brace matching
+          // Walk backwards through the string to find balanced { ... }
+          for (let end = trimmed.length - 1; end >= 0; end--) {
+            if (trimmed[end] !== '}') continue;
+            let depth = 0;
+            let start = -1;
+            for (let j = end; j >= 0; j--) {
+              if (trimmed[j] === '}') depth++;
+              if (trimmed[j] === '{') depth--;
+              if (depth === 0) { start = j; break; }
+            }
+            if (start >= 0) {
+              const fragment = trimmed.slice(start, end + 1);
+              try {
+                const parsed = JSON.parse(fragment);
+                if (parsed.steps && parsed.overallStatus) { result = parsed; break; }
+              } catch { /* try next closing brace */ }
+            }
+          }
+          if (result) break;
+
+          // Strategy 3: greedy regex first-to-last brace
+          const greedyMatch = trimmed.match(/\{[\s\S]*\}/);
+          if (greedyMatch) {
+            try {
+              const parsed = JSON.parse(greedyMatch[0]);
+              if (parsed.steps && parsed.overallStatus) result = parsed;
+            } catch { /* give up on this candidate */ }
+          }
+        }
+
+        if (!result || !result.steps || !result.overallStatus) {
+          throw new Error(`No valid test result JSON found in output (resultText length: ${resultText.length}, fullText length: ${fullText.length}, last 300 chars: ${(resultText || fullText).slice(-300)})`);
+        }
+
+        // Copy screenshots to persistent session directory so they survive cleanup
+        for (const [stepOrder, srcPath] of screenshotPaths) {
+          // Skip if already in the session screenshot dir
+          if (srcPath.startsWith(screenshotDir)) continue;
+          try {
+            const destPath = path.join(screenshotDir, `step-${stepOrder}-${path.basename(srcPath)}`);
+            fs.copyFileSync(srcPath, destPath);
+            screenshotPaths.set(stepOrder, destPath);
+          } catch { /* non-critical — keep original path */ }
+        }
 
         // Merge results into test case
         const updatedSteps: QCTestStep[] = testCase.steps.map((step) => {
@@ -485,13 +696,68 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
         });
 
         resolve(updatedTestCase);
-      } catch {
-        // If JSON parsing fails, try to extract useful info from the text
+      } catch (parseErr) {
+        console.error('[QC] JSON parse failed:', parseErr instanceof Error ? parseErr.message : parseErr);
+        console.error('[QC] resultText length:', resultText.length, 'fullText length:', fullText.length);
+        console.error('[QC] resultText last 500:', resultText.slice(-500));
+        console.error('[QC] fullText last 500:', fullText.slice(-500));
+        console.error('[QC] stderr:', stderrOutput.slice(0, 500));
+
+        // Copy screenshots to persistent dir even on parse failure
+        for (const [stepOrder, srcPath] of screenshotPaths) {
+          if (srcPath.startsWith(screenshotDir)) continue;
+          try {
+            const destPath = path.join(screenshotDir, `step-${stepOrder}-${path.basename(srcPath)}`);
+            fs.copyFileSync(srcPath, destPath);
+            screenshotPaths.set(stepOrder, destPath);
+          } catch { /* non-critical */ }
+        }
+
+        // If JSON parsing fails, try to extract per-step results from text patterns
+        const textToScan = resultText || fullText;
+        // Start with steps that have screenshots attached
+        let inferredSteps: QCTestStep[] = testCase.steps.map(step => {
+          const screenshotFile = screenshotPaths.get(step.order);
+          return screenshotFile ? { ...step, screenshot: screenshotFile } : step;
+        });
+        let inferredStatus: 'passed' | 'failed' | 'error' = 'error';
+        let inferredSummary = '';
+
+        // Try to infer step results from text like "Step 1: passed", "Step 2: failed", etc.
+        const passedSteps = new Set<number>();
+        const failedSteps = new Set<number>();
+        for (const m of textToScan.matchAll(/[Ss]tep\s+(\d+)[^]*?(?:status|result)[^:]*:\s*["']?(passed|failed)["']?/gi)) {
+          const stepNum = parseInt(m[1], 10);
+          if (m[2].toLowerCase() === 'passed') passedSteps.add(stepNum);
+          else failedSteps.add(stepNum);
+        }
+        // Also match simpler patterns like "✅ Step 1" or "❌ Step 2"
+        for (const m of textToScan.matchAll(/(?:✅|pass(?:ed)?)\s*[:\-]?\s*[Ss]tep\s+(\d+)/gi)) {
+          passedSteps.add(parseInt(m[1], 10));
+        }
+        for (const m of textToScan.matchAll(/(?:❌|fail(?:ed)?)\s*[:\-]?\s*[Ss]tep\s+(\d+)/gi)) {
+          failedSteps.add(parseInt(m[1], 10));
+        }
+
+        if (passedSteps.size > 0 || failedSteps.size > 0) {
+          inferredSteps = testCase.steps.map((step) => {
+            const screenshotFile = screenshotPaths.get(step.order);
+            if (passedSteps.has(step.order)) return { ...step, status: 'passed' as const, screenshot: screenshotFile || step.screenshot };
+            if (failedSteps.has(step.order)) return { ...step, status: 'failed' as const, screenshot: screenshotFile || step.screenshot };
+            return { ...step, screenshot: screenshotFile || step.screenshot };
+          });
+          inferredStatus = failedSteps.size > 0 ? 'failed' : 'passed';
+          inferredSummary = `Inferred: ${passedSteps.size} passed, ${failedSteps.size} failed (JSON parse failed, results extracted from text)`;
+        }
+
         const tcErrCompletedAt = new Date().toISOString();
         const updatedTestCase: QCTestCase = {
           ...testCase,
-          status: 'error',
-          errorMessage: fullText.slice(0, 500) || stderrOutput.slice(0, 500) || 'Failed to parse test results',
+          steps: inferredSteps,
+          status: inferredStatus,
+          errorMessage: inferredStatus === 'error'
+            ? (fullText.slice(0, 500) || stderrOutput.slice(0, 500) || 'Failed to parse test results')
+            : inferredSummary,
           completedAt: tcErrCompletedAt,
           durationMs: testCase.startedAt
             ? new Date(tcErrCompletedAt).getTime() - new Date(testCase.startedAt).getTime()
@@ -503,9 +769,11 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
           sessionId,
           taskId,
           testCaseId: testCase.id,
-          status: 'error',
+          status: updatedTestCase.status,
           testCase: updatedTestCase,
-          message: 'Test execution completed but results could not be parsed',
+          message: inferredStatus !== 'error'
+            ? inferredSummary
+            : 'Test execution completed but results could not be parsed',
         });
 
         resolve(updatedTestCase);

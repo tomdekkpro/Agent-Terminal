@@ -119,4 +119,14 @@ export function registerTaskManagerHandlers(ipcMain: IpcMain): void {
       return provider.removeTag(getSettings(), taskId, tagName);
     },
   );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TASK_MANAGER_GET_TASK_STATUSES,
+    async (_event, taskId: string) => {
+      const provider = getActiveProvider();
+      if (!provider) return { success: false, error: 'No task manager configured' };
+      if (!provider.getTaskStatuses) return { success: false, error: 'Provider does not support statuses' };
+      return provider.getTaskStatuses(getSettings(), taskId);
+    },
+  );
 }

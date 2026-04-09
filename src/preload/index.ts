@@ -73,6 +73,7 @@ const electronAPI = {
   postTaskTimeEntry: (taskId: string, startMs: number, durationMs: number, description?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_TIME_ENTRY, taskId, startMs, durationMs, description),
   getTaskTimeEntries: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TIME_ENTRIES, taskId),
+  getTaskStatuses: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK_STATUSES, taskId),
 
   // Usage Monitor
   requestUsageUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.USAGE_REQUEST),

@@ -42,4 +42,6 @@ export interface ITaskManagerProvider {
   removeTag?(settings: AppSettings, taskId: string, tagName: string): Promise<ProviderResult<any>>;
 
   getComments?(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>>;
+
+  getTaskStatuses?(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
 }
