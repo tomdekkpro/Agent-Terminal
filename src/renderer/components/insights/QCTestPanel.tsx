@@ -31,7 +31,7 @@ interface QCTestPanelProps {
   onRenameSession?: (title: string) => void | Promise<void>;
 }
 
-function StepStatusIcon({ status, running, executed }: { status: QCTestStep['status']; running?: boolean; executed?: boolean }) {
+function StepStatusIcon({ status, running, executed, queued }: { status: QCTestStep['status']; running?: boolean; executed?: boolean; queued?: boolean }) {
   if (running) {
     return <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" />;
   }
@@ -45,6 +45,8 @@ function StepStatusIcon({ status, running, executed }: { status: QCTestStep['sta
     default:
       // Step was executed (before current running step) but final result not yet known
       if (executed) return <CheckCircle className="w-3.5 h-3.5 text-blue-400/60" />;
+      // Step is queued — test is running but hasn't reached this step yet
+      if (queued) return <Clock className="w-3.5 h-3.5 text-blue-400/40 animate-pulse" />;
       return <Clock className="w-3.5 h-3.5 text-[var(--text-muted)]" />;
   }
 }
@@ -71,6 +73,7 @@ function EditableStep({
   editing,
   running,
   executed,
+  queued,
   onSave,
   onDelete,
   onStartEdit,
@@ -85,6 +88,7 @@ function EditableStep({
   editing: boolean;
   running?: boolean;
   executed?: boolean;
+  queued?: boolean;
   onSave: (step: QCTestStep) => void;
   onDelete: () => void;
   onStartEdit: () => void;
@@ -158,6 +162,7 @@ function EditableStep({
         "group/step text-xs border rounded-md overflow-hidden transition-colors",
         running ? "border-blue-500/30 bg-blue-500/5"
         : hasResult ? (step.status === 'passed' ? "border-emerald-500/20 bg-emerald-500/5" : "border-red-500/20 bg-red-500/5")
+        : queued ? "border-blue-500/10 bg-blue-500/[0.02]"
         : "border-[var(--border)] bg-[var(--bg-primary)]",
         dragOverStep === step.id && "ring-2 ring-[var(--accent)]",
       )}
@@ -187,7 +192,7 @@ function EditableStep({
         <div className="shrink-0 cursor-grab active:cursor-grabbing text-[var(--text-muted)] hover:text-[var(--text-secondary)]">
           <GripVertical className="w-3 h-3" />
         </div>
-        <StepStatusIcon status={step.status} running={running} executed={executed} />
+        <StepStatusIcon status={step.status} running={running} executed={executed} queued={queued} />
         <span className="text-[var(--text-muted)] font-mono text-[10px]">Step {step.order}</span>
         <span className="flex-1 text-[var(--text-primary)] truncate">{step.action}</span>
         <div className="flex items-center gap-0.5 opacity-0 group-hover/step:opacity-100 transition-opacity shrink-0">
@@ -497,6 +502,7 @@ function TestCaseCard({
                 editing={editingStepId === step.id}
                 running={isRunning && runningStepOrder === step.order}
                 executed={isRunning && runningStepOrder != null && runningStepOrder > 0 && step.order < runningStepOrder}
+                queued={isRunning && runningStepOrder != null && step.order > runningStepOrder && step.status === 'pending'}
                 onSave={handleSaveStep}
                 onDelete={() => handleDeleteStep(step.id)}
                 onStartEdit={() => setEditingStepId(step.id)}
