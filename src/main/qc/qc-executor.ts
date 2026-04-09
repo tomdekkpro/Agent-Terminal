@@ -581,14 +581,6 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
             fileIdx++;
           }
         }
-        // If there are leftover files and some steps still missing, assign them
-        for (let stepOrder = 1; stepOrder <= testCase.steps.length && fileIdx < screenshotFiles.length; stepOrder++) {
-          // Overwrite with later screenshot if step already has one (prefer latest)
-          if (fileIdx < screenshotFiles.length) {
-            screenshotPaths.set(stepOrder, screenshotFiles[fileIdx]);
-            fileIdx++;
-          }
-        }
       }
 
       try {
