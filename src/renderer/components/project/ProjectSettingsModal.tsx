@@ -30,8 +30,19 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [agentModel, setAgentModel] = useState(project.agentModel || '');
   const [agentConfig, setAgentConfig] = useState<Record<string, string>>(project.agentConfig || {});
   const [skills, setSkills] = useState<ProjectSkill[]>(project.skills || []);
+  const [claudeSkills, setClaudeSkills] = useState<ProjectSkill[]>([]);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [skillDraft, setSkillDraft] = useState<Partial<ProjectSkill>>({});
+
+  // Load .claude/skills from project directory
+  useEffect(() => {
+    if (!project.path) { setClaudeSkills([]); return; }
+    window.electronAPI.loadClaudeSkills(project.path)
+      .then((result: any) => {
+        if (result?.success && result.data) setClaudeSkills(result.data);
+      })
+      .catch(() => {});
+  }, [project.path]);
   const [devServer, setDevServer] = useState<DevServerConfig>(project.devServer || {
     frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '', backendProfile: undefined,
   });
@@ -198,9 +209,9 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
             >
               {tab.icon}
               {tab.label}
-              {tab.id === 'skills' && skills.length > 0 && (
+              {tab.id === 'skills' && (skills.length + claudeSkills.length) > 0 && (
                 <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full bg-[var(--accent)]/20 text-[var(--accent)]">
-                  {skills.length}
+                  {skills.length + claudeSkills.length}
                 </span>
               )}
             </button>
@@ -474,50 +485,89 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
               )}
 
               {/* Skills list */}
-              {skills.length === 0 && !editingSkillId && (
+              {skills.length === 0 && claudeSkills.length === 0 && !editingSkillId && (
                 <div className="text-center py-8 text-xs text-[var(--text-muted)]">
                   No skills yet. Add a skill to create reusable agent prompts.
                 </div>
               )}
 
-              {skills.map((skill) => (
-                <div
-                  key={skill.id}
-                  className={cn(
-                    'flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] hover:bg-[var(--bg-tertiary)] transition-colors cursor-pointer group',
-                    editingSkillId === skill.id && 'ring-1 ring-[var(--accent)]',
+              {skills.length > 0 && (
+                <div className="space-y-2">
+                  {claudeSkills.length > 0 && (
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] px-1">Project Skills</div>
                   )}
-                  onClick={() => editingSkillId !== skill.id && startEditSkill(skill)}
-                >
-                  <div
-                    className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-                    style={{ backgroundColor: `${skill.color || '#6366f1'}20`, color: skill.color || '#6366f1' }}
-                  >
-                    <SkillIcon name={skill.icon || 'Zap'} className="w-4 h-4" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
-                      {skill.agentProvider && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
-                          {agentProviders.find((p) => p.id === skill.agentProvider)?.displayName || skill.agentProvider}
-                        </span>
+                  {skills.map((skill) => (
+                    <div
+                      key={skill.id}
+                      className={cn(
+                        'flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] hover:bg-[var(--bg-tertiary)] transition-colors cursor-pointer group',
+                        editingSkillId === skill.id && 'ring-1 ring-[var(--accent)]',
                       )}
+                      onClick={() => editingSkillId !== skill.id && startEditSkill(skill)}
+                    >
+                      <div
+                        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+                        style={{ backgroundColor: `${skill.color || '#6366f1'}20`, color: skill.color || '#6366f1' }}
+                      >
+                        <SkillIcon name={skill.icon || 'Zap'} className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
+                          {skill.agentProvider && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
+                              {agentProviders.find((p) => p.id === skill.agentProvider)?.displayName || skill.agentProvider}
+                            </span>
+                          )}
+                        </div>
+                        {skill.description && (
+                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
+                        )}
+                        <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteSkill(skill.id); }}
+                        className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error)]/10 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                        title="Delete"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
                     </div>
-                    {skill.description && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
-                    )}
-                    <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteSkill(skill.id); }}
-                    className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error)]/10 opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
+                  ))}
                 </div>
-              ))}
+              )}
+
+              {/* .claude/skills (read-only) */}
+              {claudeSkills.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] px-1">.claude/skills</div>
+                  {claudeSkills.map((skill) => (
+                    <div
+                      key={skill.id}
+                      className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/50"
+                    >
+                      <div
+                        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+                        style={{ backgroundColor: `${skill.color || '#8b5cf6'}20`, color: skill.color || '#8b5cf6' }}
+                      >
+                        <SkillIcon name={skill.icon || 'FileText'} className="w-4 h-4" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
+                            slash command
+                          </span>
+                        </div>
+                        {skill.description && (
+                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
+                        )}
+                        <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
