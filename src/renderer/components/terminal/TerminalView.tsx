@@ -1639,11 +1639,11 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Invoke agent first, then send skill prompt after it starts
       await handleInvokeAgent(terminalId);
       setTimeout(() => {
-        window.electronAPI.sendTerminalInput(terminalId, skill.prompt + '\n');
+        window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
       }, 3000);
     } else {
       // Agent already running — send prompt directly
-      window.electronAPI.sendTerminalInput(terminalId, skill.prompt + '\n');
+      window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
     }
   }, [handleInvokeAgent]);
 

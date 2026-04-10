@@ -123,7 +123,7 @@ async function loadClaudeSkills(projectPath: string): Promise<ProjectSkill[]> {
         id: skillId,
         name,
         description: fm.description || undefined,
-        prompt: `/skill ${name}`,
+        prompt: `/${name} `,
         icon: 'FileText',
         color: '#8b5cf6',
       });
