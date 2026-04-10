@@ -1,18 +1,19 @@
 import { useEffect } from 'react';
 import { useTerminalStore, flushTerminalStateSync } from '../stores/terminal-store';
+import { postTimeEntriesByDateSync } from '../utils/time-tracking';
 
-/** Sync all running/paused timers to task manager (fire-and-forget) */
+/** Sync all running timers to task manager, split by date (fire-and-forget) */
 function syncAllTimers() {
   const terminals = useTerminalStore.getState().terminals;
+  const now = Date.now();
   for (const t of terminals) {
     if (!t.timeTracking || !t.task) continue;
-    const { startedAt, elapsed } = t.timeTracking;
-    const total = elapsed + (startedAt ? Date.now() - startedAt : 0);
-    if (total <= 0) continue;
-    const start = startedAt || Date.now() - total;
-    try {
-      window.electronAPI.postTaskTimeEntry(t.task.id, start, total);
-    } catch { /* best effort */ }
+    const { startedAt } = t.timeTracking;
+    // Only post the current running session (paused time was already posted on stop)
+    if (!startedAt) continue;
+    const sessionMs = now - startedAt;
+    if (sessionMs <= 0) continue;
+    postTimeEntriesByDateSync(t.task.id, startedAt, now);
   }
 }
 

@@ -4,18 +4,21 @@ import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, GitBranch, GitMerge, GitPullRequest,
   ArrowLeft, FolderGit2, Folder, GitCommitVertical, Download, RefreshCw, List,
-  Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus,
+  Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus, FolderOpen,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
 import { PreviewPanel } from './PreviewPanel';
+import { FilesPanel } from './FilesPanel';
+import { SkillsPanel } from './SkillsPanel';
 import { UsageIndicator } from '../usage/UsageIndicator';
 import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
 import { SystemMonitor } from '../status/SystemMonitor';
 import { cn } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
+import { postTimeEntriesByDate } from '../../utils/time-tracking';
 
 const PICKER_PAGE_SIZE = 100;
 
@@ -1217,6 +1220,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [currentBranch, setCurrentBranch] = useState<string>('');
   const [fetchStatus, setFetchStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [pullStatus, setPullStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const [behindCount, setBehindCount] = useState<number>(0);
   const [pullMessage, setPullMessage] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
@@ -1334,12 +1339,18 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           useTerminalStore.getState().updateTerminal(terminal.id, { title, task: terminalTask });
         }
 
-        // Fetch existing tracked time as initial elapsed
+        // Fetch existing tracked time as initial elapsed (with today breakdown)
         try {
           const timeResult = await window.electronAPI.getTaskTimeEntries(task.id);
-          if (timeResult.success && timeResult.data?.totalMs > 0) {
+          if (timeResult.success && timeResult.data) {
+            const today = new Date().toISOString().slice(0, 10);
             useTerminalStore.getState().updateTerminal(terminal.id, {
-              timeTracking: { startedAt: null, elapsed: timeResult.data.totalMs },
+              timeTracking: {
+                startedAt: null,
+                elapsed: timeResult.data.totalMs || 0,
+                todayMs: timeResult.data.todayMs || 0,
+                todayDate: today,
+              },
             });
           }
         } catch { /* non-critical */ }
@@ -1387,12 +1398,18 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       useTerminalStore.getState().updateTerminal(terminalId, { title, task: terminalTask });
 
-      // Fetch existing tracked time as initial elapsed
+      // Fetch existing tracked time as initial elapsed (with today breakdown)
       try {
         const timeResult = await window.electronAPI.getTaskTimeEntries(task.id);
-        if (timeResult.success && timeResult.data?.totalMs > 0) {
+        if (timeResult.success && timeResult.data) {
+          const today = new Date().toISOString().slice(0, 10);
           useTerminalStore.getState().updateTerminal(terminalId, {
-            timeTracking: { startedAt: null, elapsed: timeResult.data.totalMs },
+            timeTracking: {
+              startedAt: null,
+              elapsed: timeResult.data.totalMs || 0,
+              todayMs: timeResult.data.todayMs || 0,
+              todayDate: today,
+            },
           });
         }
       } catch { /* non-critical */ }
@@ -1465,20 +1482,19 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     }
   }, [canAddTerminal, settings.taskManagerProvider, createTerminalSplit]);
 
-  /** Sync timer to task manager for a terminal if it has a running/accumulated timer */
-  const syncTimerBeforeClose = useCallback(async (terminal: { id: string; task?: TerminalTask; timeTracking?: { startedAt: number | null; elapsed: number } }) => {
+  /** Sync timer to task manager for a terminal if it has a running timer, split by date */
+  const syncTimerBeforeClose = useCallback(async (terminal: { id: string; task?: TerminalTask; timeTracking?: { startedAt: number | null; elapsed: number; todayMs?: number; todayDate?: string } }) => {
     if (!terminal.timeTracking || !terminal.task) return;
-    const { startedAt, elapsed } = terminal.timeTracking;
-    const total = elapsed + (startedAt ? Date.now() - startedAt : 0);
-    if (total > 0 && startedAt) {
-      try {
-        await window.electronAPI.postTaskTimeEntry(terminal.task.id, startedAt, total);
-      } catch { /* non-critical */ }
-    } else if (total > 0 && !startedAt) {
-      // Timer was paused but has accumulated time — use current time as reference
-      try {
-        await window.electronAPI.postTaskTimeEntry(terminal.task.id, Date.now() - total, total);
-      } catch { /* non-critical */ }
+    const { startedAt } = terminal.timeTracking;
+    // Only post the current running session (paused time was already posted on stop)
+    if (startedAt) {
+      const now = Date.now();
+      const sessionMs = now - startedAt;
+      if (sessionMs > 0) {
+        try {
+          await postTimeEntriesByDate(terminal.task.id, startedAt, now);
+        } catch { /* non-critical */ }
+      }
     }
   }, []);
 
@@ -1596,7 +1612,21 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     useTerminalStore.getState().updateTerminal(terminalId, { baseBranch: branch });
   }, []);
 
-  const projectSkills = activeProject?.skills || [];
+  // Merge manual project skills with auto-loaded .claude/skills
+  const [claudeSkills, setClaudeSkills] = useState<import('../../../shared/types').ProjectSkill[]>([]);
+  useEffect(() => {
+    if (!activeProject?.path) { setClaudeSkills([]); return; }
+    window.electronAPI.loadClaudeSkills(activeProject.path)
+      .then((result: any) => {
+        if (result?.success && result.data) setClaudeSkills(result.data);
+      })
+      .catch(() => {});
+  }, [activeProject?.path]);
+
+  const projectSkills = [
+    ...(activeProject?.skills || []),
+    ...claudeSkills,
+  ];
 
   const handleInvokeSkill = useCallback(async (terminalId: string, skill: import('../../../shared/types').ProjectSkill) => {
     const terminal = useTerminalStore.getState().getTerminal(terminalId);
@@ -1987,6 +2017,38 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                 <Download className={cn('w-3 h-3', pullStatus === 'loading' && 'animate-bounce')} />
                 <span>Pull</span>
               </button>
+              {activeProject?.docsPath && (
+                <button
+                  onClick={() => setFilesOpen((v) => !v)}
+                  title={filesOpen ? 'Close files panel' : 'Open project documents'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
+                    'hover:bg-[var(--bg-tertiary)] border border-transparent',
+                    filesOpen
+                      ? 'text-amber-400 border-amber-500/20 bg-amber-500/10'
+                      : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>Files</span>
+                </button>
+              )}
+              {projectSkills.length > 0 && (
+                <button
+                  onClick={() => setSkillsOpen((v) => !v)}
+                  title={skillsOpen ? 'Close skills panel' : 'Open skills panel'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
+                    'hover:bg-[var(--bg-tertiary)] border border-transparent',
+                    skillsOpen
+                      ? 'text-violet-400 border-violet-500/20 bg-violet-500/10'
+                      : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  <Zap className="w-3 h-3" />
+                  <span>Skills</span>
+                </button>
+              )}
             </div>
           )}
           <SystemMonitor />
@@ -2224,8 +2286,9 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         </div>
       )}
 
-      {/* Terminal panels */}
-      <div className="flex-1 relative min-h-0">
+      {/* Terminal panels + optional files panel */}
+      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 relative min-h-0 min-w-0 overflow-hidden">
         {terminals.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-[var(--text-muted)] gap-4">
             {!projectId ? (
@@ -2376,6 +2439,30 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             );
           })
         )}
+      </div>
+
+      {/* Right-side panels */}
+      {filesOpen && activeProject?.docsPath && (
+        <div className="w-72 shrink-0 min-h-0">
+          <FilesPanel
+            docsPath={activeProject.docsPath}
+            onClose={() => setFilesOpen(false)}
+          />
+        </div>
+      )}
+      {skillsOpen && projectSkills.length > 0 && (
+        <div className="w-80 shrink-0 min-h-0">
+          <SkillsPanel
+            skills={projectSkills}
+            onInvokeSkill={(skill) => {
+              const active = useTerminalStore.getState().getActiveTerminal();
+              if (active) handleInvokeSkill(active.id, skill);
+            }}
+            projectPath={activeProject?.path}
+            onClose={() => setSkillsOpen(false)}
+          />
+        </div>
+      )}
       </div>
     </div>
   );

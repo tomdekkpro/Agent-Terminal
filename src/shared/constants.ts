@@ -148,6 +148,10 @@ export const IPC_CHANNELS = {
   // System Monitor
   SYSTEM_MONITOR_REQUEST: 'system-monitor:request',
   SYSTEM_MONITOR_UPDATED: 'system-monitor:updated',
+  // Files
+  FILES_LIST_DIR: 'files:list-dir',
+  FILES_LOAD_CLAUDE_SKILLS: 'files:load-claude-skills',
+  FILES_READ_FILE: 'files:read-file',
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',

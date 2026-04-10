@@ -366,7 +366,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
     }
   }
 
-  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; entries: any[] }>> {
+  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; todayMs: number; entries: any[] }>> {
     try {
       const teamId = settings.clickupWorkspaceId;
       if (!teamId) throw new Error('Workspace ID not configured');
@@ -374,7 +374,21 @@ export class ClickUpProvider implements ITaskManagerProvider {
       const data = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/time_entries?task_id=${taskId}`);
       const entries = data.data || [];
       const totalMs = entries.reduce((sum: number, e: any) => sum + Number(e.duration || 0), 0);
-      return { success: true, data: { totalMs, entries } };
+
+      // Compute today's tracked time
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const todayMs = entries.reduce((sum: number, e: any) => {
+        const start = Number(e.start || 0);
+        const dur = Number(e.duration || 0);
+        if (start >= todayStart) return sum + dur;
+        // Entry started before today but may overlap into today
+        const end = start + dur;
+        if (end > todayStart) return sum + (end - todayStart);
+        return sum;
+      }, 0);
+
+      return { success: true, data: { totalMs, todayMs, entries } };
     } catch (error) {
       return {
         success: false,

@@ -2,8 +2,30 @@ import type { BrowserWindow, IpcMain } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { InsightsModel, QCTask } from '../../shared/types';
+import { splitTimeByDate } from '../../shared/utils';
 import { generateTestCases, runAllTests, runTestCase, abortQC } from '../qc/qc-executor';
 import { getSession, saveSession } from '../insights/session-storage';
+import { getActiveProvider } from './task-manager-handlers';
+import { getSettings } from './settings-handlers';
+
+/** Post QC duration as time entries split by calendar day to the linked task */
+async function postQCTimeEntries(task: QCTask): Promise<void> {
+  if (!task.linkedTask || !task.startedAt) return;
+  const provider = getActiveProvider();
+  if (!provider) return;
+
+  const startMs = new Date(task.startedAt).getTime();
+  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : Date.now();
+  if (endMs <= startMs) return;
+
+  const entries = splitTimeByDate(startMs, endMs);
+  const settings = getSettings();
+  for (const entry of entries) {
+    try {
+      await provider.postTimeEntry(settings, task.linkedTask.id, entry.startMs, entry.durationMs, `QC: ${task.title}`);
+    } catch { /* non-critical */ }
+  }
+}
 
 export function registerQCHandlers(
   ipcMain: IpcMain,
@@ -77,6 +99,9 @@ export function registerQCHandlers(
           await saveSession(freshSession);
         }
 
+        // Post QC time entries to linked task (split by date)
+        try { await postQCTimeEntries(updatedTask); } catch { /* non-critical */ }
+
         return { success: true, data: updatedTask };
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : 'Failed to run tests' };
@@ -113,6 +138,22 @@ export function registerQCHandlers(
           );
           freshSession.qcTask.updatedAt = new Date().toISOString();
           await saveSession(freshSession);
+
+          // Post single test case time entry to linked task (split by date)
+          if (freshSession.qcTask.linkedTask && result.startedAt && result.durationMs) {
+            const provider = getActiveProvider();
+            if (provider) {
+              const startMs = new Date(result.startedAt).getTime();
+              const endMs = result.completedAt ? new Date(result.completedAt).getTime() : startMs + result.durationMs;
+              const entries = splitTimeByDate(startMs, endMs);
+              const settings = getSettings();
+              for (const entry of entries) {
+                try {
+                  await provider.postTimeEntry(settings, freshSession.qcTask.linkedTask.id, entry.startMs, entry.durationMs, `QC: ${result.name}`);
+                } catch { /* non-critical */ }
+              }
+            }
+          }
         }
 
         return { success: true, data: result };

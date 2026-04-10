@@ -358,12 +358,25 @@ export class JiraProvider implements ITaskManagerProvider {
     }
   }
 
-  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; entries: any[] }>> {
+  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; todayMs: number; entries: any[] }>> {
     try {
       const data = await jiraFetch(settings, `/rest/api/3/issue/${taskId}/worklog`);
       const entries = data.worklogs || [];
       const totalMs = entries.reduce((sum: number, e: any) => sum + (e.timeSpentSeconds || 0) * 1000, 0);
-      return { success: true, data: { totalMs, entries } };
+
+      // Compute today's tracked time
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const todayMs = entries.reduce((sum: number, e: any) => {
+        const start = e.started ? new Date(e.started).getTime() : 0;
+        const dur = (e.timeSpentSeconds || 0) * 1000;
+        if (start >= todayStart) return sum + dur;
+        const end = start + dur;
+        if (end > todayStart) return sum + (end - todayStart);
+        return sum;
+      }, 0);
+
+      return { success: true, data: { totalMs, todayMs, entries } };
     } catch (error) {
       return {
         success: false,

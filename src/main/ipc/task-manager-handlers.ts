@@ -6,7 +6,7 @@ import { ClickUpProvider, JiraProvider, type ITaskManagerProvider } from './prov
 const clickUpProvider = new ClickUpProvider();
 const jiraProvider = new JiraProvider();
 
-function getActiveProvider(): ITaskManagerProvider | null {
+export function getActiveProvider(): ITaskManagerProvider | null {
   const settings = getSettings();
   switch (settings.taskManagerProvider) {
     case 'clickup': return clickUpProvider;

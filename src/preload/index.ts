@@ -103,6 +103,11 @@ const electronAPI = {
   getTabState: () => ipcRenderer.invoke(IPC_CHANNELS.TAB_STATE_GET),
   saveTabState: (tabState: any) => ipcRenderer.invoke(IPC_CHANNELS.TAB_STATE_SAVE, tabState),
 
+  // Files
+  listDir: (dirPath: string, depth?: number) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LIST_DIR, dirPath, depth),
+  loadClaudeSkills: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LOAD_CLAUDE_SKILLS, projectPath),
+  readFile: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_READ_FILE, filePath),
+
   // Git
   createTaskWorktree: (projectPath: string, taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId),
   removeTaskWorktree: (projectPath: string, worktreePath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_REMOVE_WORKTREE, projectPath, worktreePath),

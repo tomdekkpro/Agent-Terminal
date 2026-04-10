@@ -44,33 +44,52 @@ export function SkillsDropdown({ skills, onInvokeSkill, disabled }: SkillsDropdo
         <ChevronDown className="w-3 h-3" />
       </button>
 
-      {isOpen && (
-        <div className="absolute left-0 top-full mt-1 z-50 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl overflow-hidden">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border)]">
-            Project Skills
-          </div>
-          {skills.map((skill) => (
-            <button
-              key={skill.id}
-              onClick={() => { onInvokeSkill(skill); setIsOpen(false); }}
-              className="w-full flex items-start gap-2.5 px-3 py-2 hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+      {isOpen && (() => {
+        const manualSkills = skills.filter((s) => !s.id.startsWith('claude-skill:'));
+        const claudeSkills = skills.filter((s) => s.id.startsWith('claude-skill:'));
+
+        const renderSkill = (skill: ProjectSkill) => (
+          <button
+            key={skill.id}
+            onClick={() => { onInvokeSkill(skill); setIsOpen(false); }}
+            className="w-full flex items-start gap-2.5 px-3 py-2 hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+          >
+            <div
+              className="w-6 h-6 rounded flex items-center justify-center shrink-0 mt-0.5"
+              style={{ backgroundColor: `${skill.color || '#6366f1'}20`, color: skill.color || '#6366f1' }}
             >
-              <div
-                className="w-6 h-6 rounded flex items-center justify-center shrink-0 mt-0.5"
-                style={{ backgroundColor: `${skill.color || '#6366f1'}20`, color: skill.color || '#6366f1' }}
-              >
-                <SkillIcon name={skill.icon || 'Zap'} className="w-3 h-3" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium text-[var(--text-primary)]">{skill.name}</div>
-                {skill.description && (
-                  <div className="text-[10px] text-[var(--text-muted)] truncate">{skill.description}</div>
-                )}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+              <SkillIcon name={skill.icon || 'Zap'} className="w-3 h-3" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-[var(--text-primary)]">{skill.name}</div>
+              {skill.description && (
+                <div className="text-[10px] text-[var(--text-muted)] truncate">{skill.description}</div>
+              )}
+            </div>
+          </button>
+        );
+
+        return (
+          <div className="absolute left-0 top-full mt-1 z-50 w-72 max-h-80 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+            {manualSkills.length > 0 && (
+              <>
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border)]">
+                  Project Skills
+                </div>
+                {manualSkills.map(renderSkill)}
+              </>
+            )}
+            {claudeSkills.length > 0 && (
+              <>
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border)] flex items-center gap-1">
+                  <span>.claude/skills</span>
+                </div>
+                {claudeSkills.map(renderSkill)}
+              </>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -266,6 +266,8 @@ export interface Project {
   agentConfig?: Record<string, string>;
   skills?: ProjectSkill[];
   devServer?: DevServerConfig;
+  /** Path to documentation/reference files for this project */
+  docsPath?: string;
 }
 
 export interface ProjectTabState {

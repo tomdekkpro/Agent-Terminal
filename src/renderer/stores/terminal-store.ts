@@ -8,7 +8,17 @@ export type TerminalStatus = 'idle' | 'running' | 'claude-active' | 'exited';
 
 export interface TimeTracking {
   startedAt: number | null;  // Unix timestamp ms when current session started
-  elapsed: number;           // Accumulated ms from previous sessions
+  elapsed: number;           // Total accumulated ms (historical + all sessions)
+  todayMs: number;           // Today's accumulated ms (from API + sessions today)
+  todayDate: string;         // ISO date string (YYYY-MM-DD) for todayMs
+}
+
+/** Return value from stopTimer — includes session boundaries for posting */
+export interface StopTimerResult extends TimeTracking {
+  /** Original startedAt before stop (when play was clicked) */
+  sessionStartMs: number;
+  /** Timestamp when stop was called */
+  sessionEndMs: number;
 }
 
 export interface Terminal {
@@ -183,7 +193,7 @@ interface TerminalState {
   reorderGroups: (projectId: string | undefined, fromGroupId: string, toGroupId: string) => void;
   reorderTerminalsInGroup: (fromTerminalId: string, toTerminalId: string) => void;
   startTimer: (id: string) => void;
-  stopTimer: (id: string) => TimeTracking | null;
+  stopTimer: (id: string) => StopTimerResult | null;
   writeToTerminal: (terminalId: string, data: string) => void;
   restoreState: () => Promise<Terminal[]>;
   /** Create PTY for a single restored terminal (no agent resume) */
@@ -472,31 +482,59 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   startTimer: (id: string) => {
+    const today = new Date().toISOString().slice(0, 10);
     set((state) => ({
-      terminals: state.terminals.map((t) =>
-        t.id === id
-          ? { ...t, timeTracking: { startedAt: Date.now(), elapsed: t.timeTracking?.elapsed || 0 } }
-          : t
-      ),
+      terminals: state.terminals.map((t) => {
+        if (t.id !== id) return t;
+        const prev = t.timeTracking;
+        // Reset todayMs if the date changed since last tracking
+        const todayMs = prev?.todayDate === today ? (prev.todayMs || 0) : 0;
+        return {
+          ...t,
+          timeTracking: {
+            startedAt: Date.now(),
+            elapsed: prev?.elapsed || 0,
+            todayMs,
+            todayDate: today,
+          },
+        };
+      }),
     }));
   },
 
-  stopTimer: (id: string) => {
+  stopTimer: (id: string): StopTimerResult | null => {
     const terminal = get().terminals.find((t) => t.id === id);
     if (!terminal?.timeTracking?.startedAt) return null;
 
     const now = Date.now();
-    const sessionMs = now - terminal.timeTracking.startedAt;
+    const sessionStartMs = terminal.timeTracking.startedAt;
+    const sessionMs = now - sessionStartMs;
     const totalElapsed = terminal.timeTracking.elapsed + sessionMs;
-    const result: TimeTracking = { startedAt: null, elapsed: totalElapsed };
+
+    // Compute today's portion of this session
+    const today = new Date().toISOString().slice(0, 10);
+    const todayMidnight = new Date(now).setHours(0, 0, 0, 0);
+    const sessionTodayMs = Math.max(0, now - Math.max(sessionStartMs, todayMidnight));
+    const prevTodayMs = terminal.timeTracking.todayDate === today ? (terminal.timeTracking.todayMs || 0) : 0;
+
+    const updated: TimeTracking = {
+      startedAt: null,
+      elapsed: totalElapsed,
+      todayMs: prevTodayMs + sessionTodayMs,
+      todayDate: today,
+    };
 
     set((state) => ({
       terminals: state.terminals.map((t) =>
-        t.id === id ? { ...t, timeTracking: result } : t
+        t.id === id ? { ...t, timeTracking: updated } : t
       ),
     }));
 
-    return { ...result, startedAt: terminal.timeTracking.startedAt };
+    return {
+      ...updated,
+      sessionStartMs,
+      sessionEndMs: now,
+    };
   },
 
   writeToTerminal: (terminalId: string, data: string) => {
@@ -755,7 +793,7 @@ useTerminalStore.subscribe((state) => {
     claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.agentSessionId || ''}:${t.agentProvider}`).join(','),
     worktrees: state.terminals.map((t) => t.worktreeBranch || '').join(','),
     tasks: state.terminals.map((t) => t.task ? `${t.task.id}:${t.task.statusColor}:${t.task.status}` : '').join(','),
-    timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}`).join(','),
+    timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}:${t.timeTracking?.todayMs || 0}:${t.timeTracking?.todayDate || ''}`).join(','),
     previews: state.terminals.map((t) => t.previewUrl || '').join(','),
   });
   if (snap !== prevSnapshot) {

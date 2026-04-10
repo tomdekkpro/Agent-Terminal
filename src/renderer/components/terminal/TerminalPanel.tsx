@@ -10,6 +10,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
+import { postTimeEntriesByDate } from '../../utils/time-tracking';
 
 /** Format milliseconds to HH:MM:SS */
 function formatElapsed(ms: number): string {
@@ -224,19 +225,24 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
     ? tracking.elapsed + (tracking.startedAt ? now - tracking.startedAt : 0)
     : 0;
 
+  // Today's elapsed — only time tracked today (from API + current session's today-portion)
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayMidnight = new Date(now).setHours(0, 0, 0, 0);
+  const prevTodayMs = tracking && tracking.todayDate === todayStr ? (tracking.todayMs || 0) : 0;
+  const sessionTodayMs = tracking?.startedAt
+    ? Math.max(0, now - Math.max(tracking.startedAt, todayMidnight))
+    : 0;
+  const todayElapsed = prevTodayMs + sessionTodayMs;
+
   const handleToggleTimer = useCallback(async () => {
     if (isTimerRunning) {
       const result = stopTimer(terminal.id);
-      // Sync to ClickUp
-      if (result && result.startedAt && terminal.task) {
-        const duration = result.elapsed;
-        if (duration > 0) {
+      // Sync session time to task manager, split by calendar day
+      if (result && result.sessionStartMs && terminal.task) {
+        const sessionMs = result.sessionEndMs - result.sessionStartMs;
+        if (sessionMs > 0) {
           try {
-            await window.electronAPI.postTaskTimeEntry(
-              terminal.task.id,
-              result.startedAt,
-              duration,
-            );
+            await postTimeEntriesByDate(terminal.task.id, result.sessionStartMs, result.sessionEndMs);
           } catch { /* non-critical */ }
         }
       }
@@ -552,7 +558,8 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       e.preventDefault();
       dragCounter++;
       const hasFiles = e.dataTransfer?.types.includes('Files');
-      if (hasFiles) {
+      const hasFilePath = e.dataTransfer?.types.includes('application/x-file-path');
+      if (hasFiles || hasFilePath) {
         setIsDragOver(true);
       }
     };
@@ -576,6 +583,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       e.stopPropagation();
       setIsDragOver(false);
       dragCounter = 0;
+
+      // Handle file path drag from FilesPanel
+      const filePathData = e.dataTransfer?.getData('application/x-file-path');
+      if (filePathData) {
+        const needsQuoting = /[\s'"$`\\!&|;(){}]/.test(filePathData);
+        const quoted = needsQuoting ? `"${filePathData.replace(/["$`\\]/g, '\\$&')}"` : filePathData;
+        window.electronAPI.sendTerminalInput(terminal.id, quoted + ' ');
+        if (xtermRef.current) xtermRef.current.focus();
+        return;
+      }
 
       const files = e.dataTransfer?.files;
       if (!files || files.length === 0) return;
@@ -779,13 +796,13 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               >
                 {isTimerRunning ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
               </button>
-              {(currentElapsed > 0 || isTimerRunning) && (
+              {(todayElapsed > 0 || isTimerRunning) && (
                 <span className={cn(
                   'text-[11px] font-mono tabular-nums',
                   isTimerRunning ? 'text-red-400' : 'text-[var(--text-muted)]'
                 )}>
                   <Clock className="w-3 h-3 inline-block mr-0.5 -mt-px" />
-                  {formatElapsed(currentElapsed)}
+                  {formatElapsed(todayElapsed)}
                 </span>
               )}
             </div>
@@ -1035,6 +1052,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             e.preventDefault();
             e.stopPropagation();
             setIsDragOver(false);
+
+            // Handle file path drag from FilesPanel
+            const filePathData = e.dataTransfer?.getData('application/x-file-path');
+            if (filePathData) {
+              const needsQuoting = /[\s'"$`\\!&|;(){}]/.test(filePathData);
+              const quoted = needsQuoting ? `"${filePathData.replace(/["$`\\]/g, '\\$&')}"` : filePathData;
+              window.electronAPI.sendTerminalInput(terminal.id, quoted + ' ');
+              if (xtermRef.current) xtermRef.current.focus();
+              return;
+            }
 
             const files = e.dataTransfer?.files;
             if (!files || files.length === 0) return;

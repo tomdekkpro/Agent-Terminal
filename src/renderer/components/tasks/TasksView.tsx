@@ -322,6 +322,16 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
                     (terminal.timeTracking.startedAt ? Date.now() - terminal.timeTracking.startedAt : 0)
                   : 0;
 
+                // Today's elapsed
+                const todayStr = new Date().toISOString().slice(0, 10);
+                const todayMidnight = new Date().setHours(0, 0, 0, 0);
+                const tt = terminal.timeTracking;
+                const prevTodayMs = tt && tt.todayDate === todayStr ? (tt.todayMs || 0) : 0;
+                const sessionTodayMs = tt?.startedAt
+                  ? Math.max(0, Date.now() - Math.max(tt.startedAt, todayMidnight))
+                  : 0;
+                const todayElapsed = prevTodayMs + sessionTodayMs;
+
                 return (
                   <button
                     key={terminal.id}
@@ -364,9 +374,9 @@ export function TasksView({ onNavigateToTerminal }: TasksViewProps) {
                               <FolderOpen className="w-2 h-2" />{projectName}
                             </span>
                           )}
-                          {elapsed > 0 && (
+                          {todayElapsed > 0 && (
                             <span className="text-[9px] text-[var(--text-muted)] flex items-center gap-0.5">
-                              <Clock className="w-2 h-2" />{formatElapsed(elapsed)}
+                              <Clock className="w-2 h-2" />{formatElapsed(todayElapsed)}
                             </span>
                           )}
                         </div>

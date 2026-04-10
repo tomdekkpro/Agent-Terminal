@@ -9,6 +9,7 @@ import {
 import type { QCTask, QCTestCase, QCTestStep, QCCredential, TaskManagerTask } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settings-store';
 import { cn } from '../../../shared/utils';
+import { postTimeEntriesByDate } from '../../utils/time-tracking';
 import { TaskPickerModal } from '../terminal/TerminalView';
 
 function formatDuration(ms: number): string {
@@ -294,14 +295,12 @@ function TestCaseCard({
   const [dragOverStepId, setDragOverStepId] = useState<string | null>(null);
   const [, setDraggingStepId] = useState<string | null>(null);
 
-  // Auto-expand when running, auto-collapse when finished
+  // Auto-expand when running — stay expanded after completion so screenshots are visible
   useEffect(() => {
     if (isRunning) {
       setExpanded(true);
-    } else if (testCase.status === 'passed' || testCase.status === 'failed' || testCase.status === 'error') {
-      setExpanded(false);
     }
-  }, [isRunning, testCase.status]);
+  }, [isRunning]);
 
   const handleRunSingle = async () => {
     setRunning(true);
@@ -960,6 +959,18 @@ function QCActionsDropdown({ task }: { task: QCTask }) {
     setOpen(false);
   };
 
+  const handlePostTime = async () => {
+    if (!task.linkedTask || !task.startedAt) return;
+    setPosting('time');
+    try {
+      const startMs = new Date(task.startedAt).getTime();
+      const endMs = task.completedAt ? new Date(task.completedAt).getTime() : Date.now();
+      await postTimeEntriesByDate(task.linkedTask.id, startMs, endMs);
+    } catch { /* non-critical */ }
+    setPosting(null);
+    setOpen(false);
+  };
+
   const handleUpdateStatus = async (status: string) => {
     if (!task.linkedTask) return;
     setPosting('status');
@@ -999,6 +1010,14 @@ function QCActionsDropdown({ task }: { task: QCTask }) {
       action: handlePostResults,
       disabled: !hasLinkedTask || !hasResults,
       loading: posting === 'results',
+    },
+    {
+      icon: <Timer className="w-3.5 h-3.5" />,
+      label: 'Post QC Time',
+      description: hasLinkedTask ? `Track time on ${taskLabel}` : 'Link a task first',
+      action: handlePostTime,
+      disabled: !hasLinkedTask || !task.startedAt,
+      loading: posting === 'time',
     },
     {
       icon: <CheckCircle2 className="w-3.5 h-3.5" />,
@@ -1096,31 +1115,36 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
   const [editUrl, setEditUrl] = useState('');
   // Track which step is currently running per test case: { [testCaseId]: stepOrder }
   const [runningSteps, setRunningSteps] = useState<Record<string, number>>({});
-  // Ref to always access the latest qcTask inside event listeners (avoids stale closures).
-  // IMPORTANT: Only sync from the prop via useEffect (not on every render) so that
-  // manual ref updates from event handlers are not overwritten by intermediate re-renders
-  // (e.g. from setRunningSteps/setTestLogs) before the parent has processed the prop update.
-  const qcTaskRef = useRef(qcTask);
+
+  // Live task state — updated instantly by real-time events without disk writes.
+  // The prop `qcTask` is the persisted version (from disk); `liveTask` overlays
+  // real-time changes (step status, screenshots) so the UI updates immediately.
+  const [liveTask, setLiveTask] = useState(qcTask);
+  const liveTaskRef = useRef(liveTask);
+  liveTaskRef.current = liveTask;
+
+  // Sync liveTask from prop when persisted data changes (e.g. after handleRunAll returns)
   useEffect(() => {
-    qcTaskRef.current = qcTask;
+    setLiveTask(qcTask);
+    liveTaskRef.current = qcTask;
   }, [qcTask]);
+
   const onTaskUpdateRef = useRef(onTaskUpdate);
   onTaskUpdateRef.current = onTaskUpdate;
 
-  // Keep runningAll in sync with persisted task/test-case status
+  // Keep runningAll in sync with task status
   useEffect(() => {
-    const isRunning = qcTask?.status === 'running' || (qcTask?.testCases.some(tc => tc.status === 'running') ?? false);
+    const isRunning = liveTask?.status === 'running' || (liveTask?.testCases.some(tc => tc.status === 'running') ?? false);
     setRunningAll(isRunning);
-  }, [qcTask?.status, qcTask?.testCases]);
+  }, [liveTask?.status, liveTask?.testCases]);
 
-  // Listen for QC events — uses refs to always read the latest qcTask/onTaskUpdate
-  // so that completed test cases keep their final status (passed/failed) instead of
-  // being reverted to 'running' by a stale closure.
+  // Listen for QC events — updates liveTask for instant UI without disk writes.
+  // The main process persists after each test case and at completion, so the
+  // prop will eventually sync via the parent.
   useEffect(() => {
     const cleanup = window.electronAPI.onQCEvent((event: any) => {
       if (event.sessionId !== sessionId) return;
-      const task = qcTaskRef.current;
-      const update = onTaskUpdateRef.current;
+      const task = liveTaskRef.current;
 
       // Track step progress
       if (event.type === 'step-update' && event.testCaseId && event.stepOrder) {
@@ -1128,34 +1152,34 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
         if (task) {
           const tc = task.testCases.find(t => t.id === event.testCaseId);
           if (tc && tc.status !== 'running') {
-            const updatedTask = {
+            const updated = {
               ...task,
               testCases: task.testCases.map(t =>
                 t.id === event.testCaseId ? { ...t, status: 'running' as const } : t,
               ),
             };
-            qcTaskRef.current = updatedTask;
-            update(updatedTask);
+            liveTaskRef.current = updated;
+            setLiveTask(updated);
           }
         }
       }
 
       if (event.type === 'test-start' && event.testCaseId && task) {
         setRunningSteps(prev => ({ ...prev, [event.testCaseId!]: 0 }));
-        const updatedTask = {
+        const updated = {
           ...task,
           status: 'running' as const,
           testCases: task.testCases.map(tc =>
             tc.id === event.testCaseId ? { ...tc, status: 'running' as const } : tc,
           ),
         };
-        qcTaskRef.current = updatedTask;
-        update(updatedTask);
+        liveTaskRef.current = updated;
+        setLiveTask(updated);
       }
 
-      // Attach screenshot to step in real-time
+      // Attach screenshot to step in real-time — instant UI update, no disk write
       if (event.type === 'screenshot' && event.testCaseId && event.stepOrder && event.screenshot && task) {
-        const updatedTask = {
+        const updated = {
           ...task,
           testCases: task.testCases.map(tc =>
             tc.id === event.testCaseId
@@ -1163,8 +1187,8 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
               : tc,
           ),
         };
-        qcTaskRef.current = updatedTask;
-        update(updatedTask);
+        liveTaskRef.current = updated;
+        setLiveTask(updated);
       }
 
       if (event.type === 'test-done' && event.testCase && task) {
@@ -1173,14 +1197,14 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
           delete next[event.testCaseId!];
           return next;
         });
-        const updatedTask = {
+        const updated = {
           ...task,
           testCases: task.testCases.map((tc: QCTestCase) =>
             tc.id === event.testCaseId ? event.testCase! : tc,
           ),
         };
-        qcTaskRef.current = updatedTask;
-        update(updatedTask);
+        liveTaskRef.current = updated;
+        setLiveTask(updated);
       }
 
       if (event.type === 'all-done' && event.summary) {
@@ -1301,13 +1325,14 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
     setDraggingTcId(null);
   }, [qcTask, onTaskUpdate]);
 
-  // Summary stats
-  const passed = qcTask?.testCases.filter((tc) => tc.status === 'passed').length || 0;
-  const failed = qcTask?.testCases.filter((tc) => tc.status === 'failed').length || 0;
-  const errors = qcTask?.testCases.filter((tc) => tc.status === 'error').length || 0;
-  const running = qcTask?.testCases.filter((tc) => tc.status === 'running').length || 0;
-  const pending = qcTask?.testCases.filter((tc) => tc.status === 'pending').length || 0;
-  const total = qcTask?.testCases.length || 0;
+  // Summary stats — use liveTask for real-time display
+  const displayTask = liveTask || qcTask;
+  const passed = displayTask?.testCases.filter((tc) => tc.status === 'passed').length || 0;
+  const failed = displayTask?.testCases.filter((tc) => tc.status === 'failed').length || 0;
+  const errors = displayTask?.testCases.filter((tc) => tc.status === 'error').length || 0;
+  const running = displayTask?.testCases.filter((tc) => tc.status === 'running').length || 0;
+  const pending = displayTask?.testCases.filter((tc) => tc.status === 'pending').length || 0;
+  const total = displayTask?.testCases.length || 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -1317,19 +1342,19 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
           <ShieldCheck className="w-4 h-4 text-amber-400" />
           <h3 className="text-sm font-medium text-[var(--text-primary)]">QC Testing</h3>
           <div className="flex items-center gap-2 ml-auto text-[10px]">
-            {qcTask && total > 0 && (
+            {displayTask && total > 0 && (
               <>
                 {running > 0 && <span className="flex items-center gap-0.5 text-blue-400"><Loader2 className="w-2.5 h-2.5 animate-spin" />{running} running</span>}
                 {passed > 0 && <span className="flex items-center gap-0.5 text-emerald-400"><CheckCircle className="w-2.5 h-2.5" />{passed}</span>}
                 {failed > 0 && <span className="flex items-center gap-0.5 text-red-400"><XCircle className="w-2.5 h-2.5" />{failed}</span>}
                 {errors > 0 && <span className="flex items-center gap-0.5 text-red-400"><AlertTriangle className="w-2.5 h-2.5" />{errors}</span>}
                 {pending > 0 && <span className="flex items-center gap-0.5 text-[var(--text-muted)]"><Clock className="w-2.5 h-2.5" />{pending}</span>}
-                {qcTask.durationMs != null && (
-                  <span className="flex items-center gap-0.5 text-[var(--text-muted)]"><Timer className="w-2.5 h-2.5" />{formatDuration(qcTask.durationMs)}</span>
+                {displayTask.durationMs != null && (
+                  <span className="flex items-center gap-0.5 text-[var(--text-muted)]"><Timer className="w-2.5 h-2.5" />{formatDuration(displayTask.durationMs)}</span>
                 )}
               </>
             )}
-            {qcTask && <QCActionsDropdown task={qcTask} />}
+            {displayTask && <QCActionsDropdown task={displayTask} />}
           </div>
         </div>
       </div>
@@ -1603,7 +1628,7 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
                   disabled={total === 0}
                   className="flex-1 flex items-center justify-center gap-2 text-sm px-4 py-2 rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors disabled:opacity-50"
                 >
-                  {qcTask.status === 'completed' ? (
+                  {displayTask?.status === 'completed' ? (
                     <><RotateCcw className="w-3.5 h-3.5" /> Re-run All Tests ({total})</>
                   ) : (
                     <><Play className="w-3.5 h-3.5" /> Run All Tests ({total})</>
@@ -1621,18 +1646,18 @@ export function QCTestPanel({ sessionId, qcTask, model, onTaskUpdate, onNewTask:
             </div>
 
             {/* Summary */}
-            {qcTask.summary && (
+            {displayTask?.summary && (
               <div className={cn(
                 'text-xs px-3 py-2 rounded-lg',
                 failed > 0 ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400',
               )}>
-                {qcTask.summary}
+                {displayTask.summary}
               </div>
             )}
 
             {/* Test case list */}
             <div className="space-y-2">
-              {qcTask.testCases.map((tc) => (
+              {displayTask?.testCases.map((tc) => (
                 <TestCaseCard
                   key={tc.id}
                   testCase={tc}

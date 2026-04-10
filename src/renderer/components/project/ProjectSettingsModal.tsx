@@ -35,6 +35,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [devServer, setDevServer] = useState<DevServerConfig>(project.devServer || {
     frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '', backendProfile: undefined,
   });
+  const [docsPath, setDocsPath] = useState(project.docsPath || '');
   const [hasChanges, setHasChanges] = useState(false);
   const [detected, setDetected] = useState<DetectResult | null>(null);
   const [detecting, setDetecting] = useState(false);
@@ -87,9 +88,10 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
       (agentModel || undefined) !== (project.agentModel || undefined) ||
       JSON.stringify(agentConfig) !== JSON.stringify(project.agentConfig || {}) ||
       JSON.stringify(skills) !== JSON.stringify(project.skills || []) ||
-      JSON.stringify(devServer) !== JSON.stringify(project.devServer || { frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '' });
+      JSON.stringify(devServer) !== JSON.stringify(project.devServer || { frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '' }) ||
+      (docsPath || undefined) !== (project.docsPath || undefined);
     setHasChanges(changed);
-  }, [name, agentProvider, agentModel, agentConfig, skills, devServer, project]);
+  }, [name, agentProvider, agentModel, agentConfig, skills, devServer, docsPath, project]);
 
   const handleSave = useCallback(async () => {
     // Only persist devServer if at least one command is set
@@ -101,9 +103,10 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
       agentConfig: Object.keys(agentConfig).length > 0 ? agentConfig : undefined,
       skills: skills.length > 0 ? skills : undefined,
       devServer: hasDevServer ? devServer : undefined,
+      docsPath: docsPath || undefined,
     });
     onClose();
-  }, [updateProject, project.id, name, agentProvider, agentModel, agentConfig, skills, devServer, onClose]);
+  }, [updateProject, project.id, name, agentProvider, agentModel, agentConfig, skills, devServer, docsPath, onClose]);
 
   // Get models for selected provider
   const selectedProvider = agentProviders.find((p) => p.id === agentProvider);
@@ -221,6 +224,28 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                 <div className="mt-1 text-sm text-[var(--text-secondary)] bg-[var(--bg-primary)] border border-[var(--border)] rounded-md px-3 py-2 select-all">
                   {project.path}
                 </div>
+              </div>
+              <div>
+                <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Documents Path</label>
+                <div className="flex gap-2 mt-1">
+                  <input
+                    value={docsPath}
+                    onChange={(e) => setDocsPath(e.target.value)}
+                    placeholder="D:\DpProject\dekkpro-docs"
+                    className="flex-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)]"
+                  />
+                  <button
+                    onClick={async () => {
+                      const result = await window.electronAPI.selectProjectFolder();
+                      if (result?.success && result.data?.path) setDocsPath(result.data.path);
+                    }}
+                    className="px-3 py-2 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                    title="Browse for folder"
+                  >
+                    <FolderOpen className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-[10px] text-[var(--text-muted)] mt-1">Reference docs and business files available in the Files panel</p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
