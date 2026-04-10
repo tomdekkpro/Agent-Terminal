@@ -321,7 +321,7 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
       '--output-format', 'stream-json',
       '--verbose',
       '--model', modelId,
-      '--allowedTools', 'mcp__playwright__*',
+      '--allowedTools', 'mcp__plugin_playwright_playwright__*',
       '--dangerously-skip-permissions',
     ], {
       env,
