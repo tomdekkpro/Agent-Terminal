@@ -342,6 +342,9 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
     let recentText = ''; // Accumulate recent text for step detection across fragments
     const screenshotPaths: Map<number, string> = new Map(); // stepOrder -> file path
     let resultText = ''; // The final result payload from Claude CLI
+    // Queue of step orders at the time each browser_take_screenshot was requested.
+    // Popped when the corresponding tool_result with image data arrives.
+    const screenshotStepQueue: number[] = [];
 
     child.stderr?.on('data', (chunk: Buffer) => {
       stderrOutput += chunk.toString();
@@ -353,7 +356,8 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
       const matches = [...recentText.matchAll(/\b[Ss]tep\s+(\d+)\b/g)];
       if (matches.length > 0) {
         const stepNum = parseInt(matches[matches.length - 1][1], 10);
-        if (stepNum >= 1 && stepNum <= testCase.steps.length && stepNum !== lastReportedStep) {
+        // Only advance forward — never go backward (Claude may reference earlier steps in text)
+        if (stepNum >= 1 && stepNum <= testCase.steps.length && stepNum > lastReportedStep) {
           currentStepOrder = stepNum;
           lastReportedStep = stepNum;
           const step = testCase.steps.find(s => s.order === stepNum);
@@ -388,10 +392,10 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
     };
 
     // Save base64 image data to a file and return the path
-    const saveBase64Screenshot = (base64Data: string): string | undefined => {
+    const saveBase64Screenshot = (base64Data: string, forStep: number): string | undefined => {
       try {
         screenshotCounter++;
-        const filename = `step-${currentStepOrder || screenshotCounter}-${Date.now()}.png`;
+        const filename = `step-${forStep || screenshotCounter}-${Date.now()}.png`;
         const filePath = path.join(screenshotDir, filename);
         // Strip data URI prefix if present
         const raw = base64Data.replace(/^data:image\/\w+;base64,/, '');
@@ -432,16 +436,6 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
           // Detect tool_use events - browser interactions
           if (parsed.type === 'tool_use') {
             const toolName: string = parsed.name || '';
-            if (toolName.includes('screenshot')) {
-              sendQCEvent(getWindow, {
-                type: 'screenshot',
-                sessionId,
-                taskId,
-                testCaseId: testCase.id,
-                stepOrder: currentStepOrder,
-                message: `Step ${currentStepOrder}: Taking screenshot...`,
-              });
-            }
             // If no step detected yet, default to step 1 on first browser tool
             if (currentStepOrder === 0 && (toolName.includes('navigate') || toolName.includes('click') || toolName.includes('type') || toolName.includes('fill'))) {
               currentStepOrder = 1;
@@ -458,9 +452,33 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
                 message: `Running step 1: ${step?.action || ''}`,
               });
             }
+            if (toolName.includes('screenshot')) {
+              // Record which step this screenshot was requested for — currentStepOrder may
+              // advance before the tool_result arrives, so we snapshot it now.
+              screenshotStepQueue.push(currentStepOrder);
+              sendQCEvent(getWindow, {
+                type: 'screenshot',
+                sessionId,
+                taskId,
+                testCaseId: testCase.id,
+                stepOrder: currentStepOrder,
+                message: `Step ${currentStepOrder}: Taking screenshot...`,
+              });
+            }
           }
           // Capture screenshot file paths from tool results
           if (parsed.type === 'tool_result') {
+            // Check if this tool_result contains image data (i.e. a screenshot response)
+            const hasImage = (Array.isArray(parsed.content) && parsed.content.some((b: any) => b.type === 'image'))
+              || (Array.isArray(parsed.result) && parsed.result.some((b: any) => b.type === 'image'));
+
+            // Use the step order recorded at tool_use time (from the queue).
+            // This is more reliable than currentStepOrder which may have advanced
+            // while the screenshot tool was executing.
+            const stepForScreenshot = hasImage && screenshotStepQueue.length > 0
+              ? screenshotStepQueue.shift()!
+              : currentStepOrder;
+
             // Extract text from various tool_result formats
             const texts: string[] = [];
             if (typeof parsed.output === 'string') texts.push(parsed.output);
@@ -470,17 +488,17 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
                 if (block.type === 'text' && block.text) texts.push(block.text);
                 // Handle base64 image content blocks from Playwright MCP
                 if (block.type === 'image' && block.data) {
-                  const saved = saveBase64Screenshot(block.data);
-                  if (saved && currentStepOrder > 0) {
-                    screenshotPaths.set(currentStepOrder, saved);
+                  const saved = saveBase64Screenshot(block.data, stepForScreenshot);
+                  if (saved && stepForScreenshot > 0) {
+                    screenshotPaths.set(stepForScreenshot, saved);
                     sendQCEvent(getWindow, {
                       type: 'screenshot',
                       sessionId,
                       taskId,
                       testCaseId: testCase.id,
-                      stepOrder: currentStepOrder,
+                      stepOrder: stepForScreenshot,
                       screenshot: saved,
-                      message: `Step ${currentStepOrder}: Screenshot saved`,
+                      message: `Step ${stepForScreenshot}: Screenshot saved`,
                     });
                   }
                 }
@@ -493,9 +511,9 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
                 for (const block of parsed.result) {
                   if (block.type === 'text' && block.text) texts.push(block.text);
                   if (block.type === 'image' && block.data) {
-                    const saved = saveBase64Screenshot(block.data);
-                    if (saved && currentStepOrder > 0) {
-                      screenshotPaths.set(currentStepOrder, saved);
+                    const saved = saveBase64Screenshot(block.data, stepForScreenshot);
+                    if (saved && stepForScreenshot > 0) {
+                      screenshotPaths.set(stepForScreenshot, saved);
                     }
                   }
                 }
@@ -504,25 +522,25 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
 
             const combinedText = texts.join(' ');
             const screenshotPath = extractScreenshotPath(combinedText);
-            if (screenshotPath && currentStepOrder > 0 && !screenshotPaths.has(currentStepOrder)) {
-              screenshotPaths.set(currentStepOrder, screenshotPath);
+            if (screenshotPath && stepForScreenshot > 0 && !screenshotPaths.has(stepForScreenshot)) {
+              screenshotPaths.set(stepForScreenshot, screenshotPath);
               sendQCEvent(getWindow, {
                 type: 'screenshot',
                 sessionId,
                 taskId,
                 testCaseId: testCase.id,
-                stepOrder: currentStepOrder,
+                stepOrder: stepForScreenshot,
                 screenshot: screenshotPath,
-                message: `Step ${currentStepOrder}: Screenshot captured`,
+                message: `Step ${stepForScreenshot}: Screenshot captured`,
               });
             }
 
             // Also check for base64 data URI in text
             const base64Match = combinedText.match(/data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+/);
-            if (base64Match && currentStepOrder > 0 && !screenshotPaths.has(currentStepOrder)) {
-              const saved = saveBase64Screenshot(base64Match[0]);
+            if (base64Match && stepForScreenshot > 0 && !screenshotPaths.has(stepForScreenshot)) {
+              const saved = saveBase64Screenshot(base64Match[0], stepForScreenshot);
               if (saved) {
-                screenshotPaths.set(currentStepOrder, saved);
+                screenshotPaths.set(stepForScreenshot, saved);
               }
             }
           }
