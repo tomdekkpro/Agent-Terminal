@@ -944,7 +944,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               </div>
             </>
           )}
-          {/* Preview toggle */}
+          {/* Changes toggle */}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -957,10 +957,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 ? 'bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
                 : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80'
             )}
-            title={terminal.previewOpen ? 'Close preview' : 'Open live preview'}
+            title={terminal.previewOpen ? 'Close changes panel' : 'Show code changes'}
           >
-            {terminal.previewOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-            {!isSplit && (terminal.previewOpen ? 'Preview' : 'Preview')}
+            <GitCommitVertical className="w-3.5 h-3.5" />
+            {!isSplit && 'Changes'}
           </button>
           {isSplit && onClose && (
             <button

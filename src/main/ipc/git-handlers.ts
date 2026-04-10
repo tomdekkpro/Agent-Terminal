@@ -610,6 +610,118 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
     }
   );
 
+  // ─── Diff Files — per-file diffs for Changes panel ────────────
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_DIFF_FILES,
+    async (_event, cwd: string, baseBranch?: string) => {
+      try {
+        if (!isGitRepo(cwd)) {
+          return { success: false, error: 'Not a git repository' };
+        }
+
+        interface DiffFile { path: string; status: string; diff: string }
+        const files: DiffFile[] = [];
+
+        // Get current branch
+        let currentBranch = '';
+        try { currentBranch = await gitExec('git rev-parse --abbrev-ref HEAD', cwd); } catch { /* ignore */ }
+
+        // Uncommitted changes (staged + unstaged combined)
+        try {
+          const diff = await gitExec('git diff HEAD --unified=3 --no-color', cwd);
+          if (diff) {
+            // Parse into per-file diffs
+            const fileDiffs = diff.split(/^diff --git /m).filter(Boolean);
+            for (const chunk of fileDiffs) {
+              const pathMatch = chunk.match(/^a\/(.*?) b\//);
+              const path = pathMatch ? pathMatch[1] : 'unknown';
+              // Determine status from diff header
+              let status = 'modified';
+              if (chunk.includes('new file mode')) status = 'added';
+              else if (chunk.includes('deleted file mode')) status = 'deleted';
+              files.push({ path, status, diff: 'diff --git ' + chunk });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Untracked new files
+        try {
+          const untracked = await gitExec('git ls-files --others --exclude-standard', cwd);
+          if (untracked) {
+            for (const filePath of untracked.split('\n').filter(Boolean)) {
+              // Don't include diff content for untracked (too large), just mark as new
+              files.push({ path: filePath, status: 'untracked', diff: '' });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Staged changes not in HEAD (for files that are only staged)
+        try {
+          const staged = await gitExec('git diff --cached --unified=3 --no-color', cwd);
+          if (staged) {
+            const fileDiffs = staged.split(/^diff --git /m).filter(Boolean);
+            for (const chunk of fileDiffs) {
+              const pathMatch = chunk.match(/^a\/(.*?) b\//);
+              const path = pathMatch ? pathMatch[1] : 'unknown';
+              // Skip if already in the list from HEAD diff
+              if (files.some((f) => f.path === path)) continue;
+              let status = 'staged';
+              if (chunk.includes('new file mode')) status = 'added';
+              files.push({ path, status, diff: 'diff --git ' + chunk });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Branch diff (committed changes vs base)
+        let branchFiles: DiffFile[] = [];
+        if (baseBranch && baseBranch !== currentBranch) {
+          try {
+            const branchDiff = await gitExec(
+              `git diff ${baseBranch}...${currentBranch} --unified=3 --no-color`,
+              cwd,
+            );
+            if (branchDiff) {
+              const fileDiffs = branchDiff.split(/^diff --git /m).filter(Boolean);
+              for (const chunk of fileDiffs) {
+                const pathMatch = chunk.match(/^a\/(.*?) b\//);
+                const path = pathMatch ? pathMatch[1] : 'unknown';
+                let status = 'modified';
+                if (chunk.includes('new file mode')) status = 'added';
+                else if (chunk.includes('deleted file mode')) status = 'deleted';
+                branchFiles.push({ path, status, diff: 'diff --git ' + chunk });
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Commit log
+        let commits: string[] = [];
+        if (baseBranch && baseBranch !== currentBranch) {
+          try {
+            const log = await gitExec(
+              `git log --pretty=format:"%h %s" ${baseBranch}..${currentBranch}`,
+              cwd,
+            );
+            if (log) commits = log.split('\n').filter(Boolean);
+          } catch { /* ignore */ }
+        }
+
+        return {
+          success: true,
+          data: {
+            uncommitted: files,
+            branch: branchFiles,
+            commits,
+            currentBranch,
+            baseBranch: baseBranch || '',
+          },
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to get diff' };
+      }
+    },
+  );
+
   // ─── Enable Auto-Merge on PR ─────────────────────────────────
   ipcMain.handle(
     IPC_CHANNELS.GIT_ENABLE_PR_AUTO_MERGE,

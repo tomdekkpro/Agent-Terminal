@@ -66,6 +66,7 @@ export const IPC_CHANNELS = {
   GIT_ENABLE_PR_AUTO_MERGE: 'git:enable-pr-auto-merge',
   GIT_CREATE_BRANCH_PR: 'git:create-branch-pr',
   GIT_TASK_SUMMARY: 'git:task-summary',
+  GIT_DIFF_FILES: 'git:diff-files',
   GIT_PUSH_BRANCH: 'git:push-branch',
   GIT_FETCH: 'git:fetch',
   GIT_PULL: 'git:pull',

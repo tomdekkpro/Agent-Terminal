@@ -10,7 +10,7 @@ import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
-import { PreviewPanel } from './PreviewPanel';
+import { ChangesPanel } from './ChangesPanel';
 import { FilesPanel } from './FilesPanel';
 import { SkillsPanel } from './SkillsPanel';
 import { UsageIndicator } from '../usage/UsageIndicator';
@@ -981,31 +981,29 @@ function CompleteTaskModal({
 /** Grid column class based on terminal count */
 // ─── Preview Split Layout ───────────────────────────────────────
 
-function PreviewSplitLayout({
-  previewTerminal,
+function ChangesSplitLayout({
+  terminal,
   children,
 }: {
-  previewTerminal: import('../../stores/terminal-store').Terminal;
+  terminal: import('../../stores/terminal-store').Terminal;
   children: React.ReactNode;
 }) {
   const togglePreview = useTerminalStore((s) => s.togglePreview);
-  const setPreviewUrl = useTerminalStore((s) => s.setPreviewUrl);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [splitPercent, setSplitPercent] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Track auto-reload trigger — increments when agent finishes
-  const [reloadTrigger, setReloadTrigger] = useState(0);
-  const prevBusyRef = useRef(previewTerminal.isClaudeBusy);
+  // Track auto-refresh trigger — increments when agent finishes
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const prevBusyRef = useRef(terminal.isClaudeBusy);
 
   useEffect(() => {
-    // When agent transitions from busy → not busy, trigger reload
-    if (prevBusyRef.current && !previewTerminal.isClaudeBusy) {
-      setReloadTrigger((n) => n + 1);
+    if (prevBusyRef.current && !terminal.isClaudeBusy) {
+      setRefreshTrigger((n) => n + 1);
     }
-    prevBusyRef.current = previewTerminal.isClaudeBusy;
-  }, [previewTerminal.isClaudeBusy]);
+    prevBusyRef.current = terminal.isClaudeBusy;
+  }, [terminal.isClaudeBusy]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1029,9 +1027,10 @@ function PreviewSplitLayout({
     document.addEventListener('mouseup', onMouseUp);
   }, []);
 
+  const cwd = terminal.worktreePath || terminal.claudeCwd || terminal.cwd || '';
+
   return (
     <div ref={containerRef} className="flex h-full relative">
-      {/* Drag overlay — covers everything so webview/xterm can't steal mouse events */}
       {isDragging && (
         <div className="absolute inset-0 z-50 cursor-col-resize" />
       )}
@@ -1049,17 +1048,16 @@ function PreviewSplitLayout({
         )}
         onMouseDown={handleMouseDown}
       >
-        {/* Wider invisible hit area */}
         <div className="absolute inset-y-0 -left-2 -right-2 z-10" />
       </div>
 
-      {/* Preview side */}
+      {/* Changes panel side */}
       <div className="min-w-0 min-h-0" style={{ width: `${100 - splitPercent}%` }}>
-        <PreviewPanel
-          url={previewTerminal.previewUrl || ''}
-          onUrlChange={(url) => setPreviewUrl(previewTerminal.id, url)}
-          onClose={() => togglePreview(previewTerminal.id)}
-          autoReloadTrigger={reloadTrigger}
+        <ChangesPanel
+          cwd={cwd}
+          baseBranch={terminal.baseBranch}
+          onClose={() => togglePreview(terminal.id)}
+          autoRefreshTrigger={refreshTrigger}
         />
       </div>
     </div>
@@ -2324,12 +2322,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             const isCurrentGroup = activeGroupId === groupId;
             const isGroupSplit = groupTerminals.length > 1;
 
-            // Find preview terminal — use active terminal if it has preview, otherwise first with preview
+            // Find terminal with changes panel open
             const activeTerminalObj = groupTerminals.find((t) => t.id === activeTerminalId);
-            const previewTerminal = activeTerminalObj?.previewOpen
+            const changesTerminal = activeTerminalObj?.previewOpen
               ? activeTerminalObj
               : groupTerminals.find((t) => t.previewOpen);
-            const hasPreview = !!previewTerminal;
+            const hasChanges = !!changesTerminal;
 
             const terminalContent = isGroupSplit ? (
               /* Grid layout for split terminals */
@@ -2426,12 +2424,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                   !isCurrentGroup && 'invisible pointer-events-none'
                 )}
               >
-                {hasPreview ? (
-                  <PreviewSplitLayout
-                    previewTerminal={previewTerminal!}
+                {hasChanges ? (
+                  <ChangesSplitLayout
+                    terminal={changesTerminal!}
                   >
                     {terminalContent}
-                  </PreviewSplitLayout>
+                  </ChangesSplitLayout>
                 ) : (
                   terminalContent
                 )}
