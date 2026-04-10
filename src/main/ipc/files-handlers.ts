@@ -1,5 +1,5 @@
 import type { IpcMain } from 'electron';
-import { readdir, stat, readFile } from 'fs/promises';
+import { readdir, stat, readFile, writeFile, mkdir } from 'fs/promises';
 import { join, extname, basename } from 'path';
 import { existsSync } from 'fs';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -175,6 +175,33 @@ export function registerFilesHandlers(ipcMain: IpcMain): void {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to read file',
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL,
+    async (_event, projectPath: string, skillName: string, content: string) => {
+      try {
+        const skillsDir = join(projectPath, '.claude', 'skills');
+        await mkdir(skillsDir, { recursive: true });
+
+        // Check folder layout first: {name}/SKILL.md
+        const folderPath = join(skillsDir, skillName, 'SKILL.md');
+        if (existsSync(folderPath)) {
+          await writeFile(folderPath, content, 'utf-8');
+          return { success: true };
+        }
+
+        // Flat file layout: {name}.md
+        const filePath = join(skillsDir, `${skillName}.md`);
+        await writeFile(filePath, content, 'utf-8');
+        return { success: true };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to save skill',
         };
       }
     },

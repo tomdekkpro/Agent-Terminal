@@ -33,9 +33,13 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [claudeSkills, setClaudeSkills] = useState<ProjectSkill[]>([]);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [skillDraft, setSkillDraft] = useState<Partial<ProjectSkill>>({});
+  // Claude skill file editing
+  const [editingClaudeSkillId, setEditingClaudeSkillId] = useState<string | null>(null);
+  const [claudeSkillContent, setClaudeSkillContent] = useState<string>('');
+  const [claudeSkillSaving, setClaudeSkillSaving] = useState(false);
 
   // Load .claude/skills from project directory
-  useEffect(() => {
+  const reloadClaudeSkills = useCallback(() => {
     if (!project.path) { setClaudeSkills([]); return; }
     window.electronAPI.loadClaudeSkills(project.path)
       .then((result: any) => {
@@ -43,6 +47,8 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
       })
       .catch(() => {});
   }, [project.path]);
+
+  useEffect(() => { reloadClaudeSkills(); }, [reloadClaudeSkills]);
   const [devServer, setDevServer] = useState<DevServerConfig>(project.devServer || {
     frontendCmd: '', frontendCwd: '', backendCmd: '', backendCwd: '', backendProfile: undefined,
   });
@@ -167,6 +173,37 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
       setEditingSkillId(null);
       setSkillDraft({});
     }
+  };
+
+  // Claude skill file editing
+  const startEditClaudeSkill = async (skill: ProjectSkill) => {
+    if (!project.path) return;
+    setEditingClaudeSkillId(skill.id);
+    setClaudeSkillContent('');
+    const skillFileName = skill.id.replace('claude-skill:', '');
+    const base = project.path.replace(/\\/g, '/');
+    const paths = [
+      `${base}/.claude/skills/${skillFileName}/SKILL.md`,
+      `${base}/.claude/skills/${skillFileName}.md`,
+    ].map((p) => p.replace(/\//g, '\\'));
+    for (const p of paths) {
+      try {
+        const result = await window.electronAPI.readFile(p);
+        if (result?.success) { setClaudeSkillContent(result.data); return; }
+      } catch { /* try next */ }
+    }
+  };
+
+  const saveClaudeSkill = async () => {
+    if (!project.path || !editingClaudeSkillId) return;
+    const skillFileName = editingClaudeSkillId.replace('claude-skill:', '');
+    setClaudeSkillSaving(true);
+    try {
+      await window.electronAPI.saveClaudeSkill(project.path, skillFileName, claudeSkillContent);
+      reloadClaudeSkills();
+      setEditingClaudeSkillId(null);
+    } catch { /* ignore */ }
+    setClaudeSkillSaving(false);
   };
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -537,33 +574,63 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                 </div>
               )}
 
-              {/* .claude/skills (read-only) */}
+              {/* .claude/skills */}
               {claudeSkills.length > 0 && (
                 <div className="space-y-2">
                   <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] px-1">.claude/skills</div>
                   {claudeSkills.map((skill) => (
-                    <div
-                      key={skill.id}
-                      className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/50"
-                    >
+                    <div key={skill.id} className="space-y-0">
                       <div
-                        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-                        style={{ backgroundColor: `${skill.color || '#8b5cf6'}20`, color: skill.color || '#8b5cf6' }}
-                      >
-                        <SkillIcon name={skill.icon || 'FileText'} className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
-                            slash command
-                          </span>
-                        </div>
-                        {skill.description && (
-                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
+                        className={cn(
+                          'flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] hover:bg-[var(--bg-tertiary)] transition-colors cursor-pointer',
+                          editingClaudeSkillId === skill.id && 'ring-1 ring-[var(--accent)] rounded-b-none',
                         )}
-                        <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
+                        onClick={() => editingClaudeSkillId === skill.id ? setEditingClaudeSkillId(null) : startEditClaudeSkill(skill)}
+                      >
+                        <div
+                          className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+                          style={{ backgroundColor: `${skill.color || '#8b5cf6'}20`, color: skill.color || '#8b5cf6' }}
+                        >
+                          <SkillIcon name={skill.icon || 'FileText'} className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
+                              slash command
+                            </span>
+                          </div>
+                          {skill.description && (
+                            <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
+                          )}
+                          <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
+                        </div>
                       </div>
+                      {editingClaudeSkillId === skill.id && (
+                        <div className="border border-t-0 border-[var(--accent)]/30 rounded-b-lg p-3 bg-[var(--bg-secondary)] space-y-2">
+                          <textarea
+                            value={claudeSkillContent}
+                            onChange={(e) => setClaudeSkillContent(e.target.value)}
+                            rows={12}
+                            className="w-full text-xs bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-2 outline-none focus:border-[var(--accent)] resize-none font-mono leading-relaxed"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => setEditingClaudeSkillId(null)}
+                              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-3 py-1.5 rounded hover:bg-[var(--bg-tertiary)]"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={saveClaudeSkill}
+                              disabled={claudeSkillSaving}
+                              className="flex items-center gap-1 text-xs text-white bg-[var(--accent)] hover:bg-[var(--accent-hover)] px-3 py-1.5 rounded disabled:opacity-50"
+                            >
+                              <Save className="w-3 h-3" /> {claudeSkillSaving ? 'Saving...' : 'Save'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

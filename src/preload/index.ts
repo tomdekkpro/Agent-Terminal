@@ -107,6 +107,7 @@ const electronAPI = {
   listDir: (dirPath: string, depth?: number) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LIST_DIR, dirPath, depth),
   loadClaudeSkills: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LOAD_CLAUDE_SKILLS, projectPath),
   readFile: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_READ_FILE, filePath),
+  saveClaudeSkill: (projectPath: string, skillName: string, content: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL, projectPath, skillName, content),
 
   // Git
   createTaskWorktree: (projectPath: string, taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId),

@@ -153,6 +153,7 @@ export const IPC_CHANNELS = {
   FILES_LIST_DIR: 'files:list-dir',
   FILES_LOAD_CLAUDE_SKILLS: 'files:load-claude-skills',
   FILES_READ_FILE: 'files:read-file',
+  FILES_SAVE_CLAUDE_SKILL: 'files:save-claude-skill',
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',
