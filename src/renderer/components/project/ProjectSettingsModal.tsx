@@ -132,20 +132,13 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   // Get settings fields for selected provider
   const settingsFields = selectedProvider?.settingsFields || [];
 
-  // Skill editing
+  // Skill editing — all skills are .claude/skills/{name}.md files
   const startNewSkill = () => {
-    const id = uuid();
-    setEditingSkillId(id);
-    setSkillDraft({
-      id,
-      name: '',
-      description: '',
-      prompt: '',
-      icon: 'Zap',
-      color: SKILL_COLORS[skills.length % SKILL_COLORS.length],
-    });
+    setEditingClaudeSkillId('__new__');
+    setClaudeSkillContent('---\nname: \ndescription: \n---\n\n');
   };
 
+  // Legacy project skill editing (for existing project skills)
   const startEditSkill = (skill: ProjectSkill) => {
     setEditingSkillId(skill.id);
     setSkillDraft({ ...skill });
@@ -196,10 +189,20 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
 
   const saveClaudeSkill = async () => {
     if (!project.path || !editingClaudeSkillId) return;
-    const skillFileName = editingClaudeSkillId.replace('claude-skill:', '');
     setClaudeSkillSaving(true);
     try {
-      await window.electronAPI.saveClaudeSkill(project.path, skillFileName, claudeSkillContent);
+      if (editingClaudeSkillId === '__new__') {
+        // Extract name from frontmatter for filename
+        const nameMatch = claudeSkillContent.match(/^---[\s\S]*?name:\s*(.+?)[\s]*\n/m);
+        const skillName = nameMatch?.[1]?.trim();
+        if (!skillName) { setClaudeSkillSaving(false); return; }
+        // Sanitize for filename
+        const fileName = skillName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-');
+        await window.electronAPI.saveClaudeSkill(project.path, fileName, claudeSkillContent);
+      } else {
+        const skillFileName = editingClaudeSkillId.replace('claude-skill:', '');
+        await window.electronAPI.saveClaudeSkill(project.path, skillFileName, claudeSkillContent);
+      }
       reloadClaudeSkills();
       setEditingClaudeSkillId(null);
     } catch { /* ignore */ }
@@ -401,7 +404,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-[var(--text-muted)]">
-                  Reusable prompt templates for quick agent invocation.
+                  Skills are stored as <code className="text-[10px] bg-[var(--bg-tertiary)] px-1 rounded">.claude/skills/&#123;name&#125;/SKILL.md</code> files.
                 </p>
                 <button
                   onClick={startNewSkill}
@@ -411,166 +414,41 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                 </button>
               </div>
 
-              {/* Skill editor */}
-              {editingSkillId && (
-                <div className="border border-[var(--accent)]/30 rounded-lg p-4 bg-[var(--bg-secondary)] space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Name</label>
-                      <input
-                        value={skillDraft.name || ''}
-                        onChange={(e) => setSkillDraft({ ...skillDraft, name: e.target.value })}
-                        placeholder="e.g. Code Review"
-                        className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 outline-none focus:border-[var(--accent)]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Description</label>
-                      <input
-                        value={skillDraft.description || ''}
-                        onChange={(e) => setSkillDraft({ ...skillDraft, description: e.target.value })}
-                        placeholder="Brief description"
-                        className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 outline-none focus:border-[var(--accent)]"
-                      />
-                    </div>
+              {/* New skill editor */}
+              {editingClaudeSkillId === '__new__' && (
+                <div className="border border-[var(--accent)]/30 rounded-lg p-3 bg-[var(--bg-secondary)] space-y-2">
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    New skill — edit the frontmatter (name, description) and body below:
                   </div>
-
-                  <div>
-                    <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Prompt</label>
-                    <textarea
-                      value={skillDraft.prompt || ''}
-                      onChange={(e) => setSkillDraft({ ...skillDraft, prompt: e.target.value })}
-                      placeholder="The instruction that will be sent to the agent..."
-                      rows={4}
-                      className="w-full mt-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 outline-none focus:border-[var(--accent)] resize-none font-mono"
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-4">
-                    <div>
-                      <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Agent Override</label>
-                      <div className="relative mt-1">
-                        <select
-                          value={skillDraft.agentProvider || ''}
-                          onChange={(e) => setSkillDraft({ ...skillDraft, agentProvider: e.target.value as AgentProviderId || undefined })}
-                          className="text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 outline-none focus:border-[var(--accent)] appearance-none pr-7"
-                        >
-                          <option value="">Use Project Default</option>
-                          {agentProviders.filter((p) => p.available).map((p) => (
-                            <option key={p.id} value={p.id}>{p.displayName}</option>
-                          ))}
-                        </select>
-                        <ChevronDown className="w-3 h-3 absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Color</label>
-                      <div className="flex gap-1.5 mt-1">
-                        {SKILL_COLORS.map((c) => (
-                          <button
-                            key={c}
-                            onClick={() => setSkillDraft({ ...skillDraft, color: c })}
-                            className={cn(
-                              'w-5 h-5 rounded-full border-2 transition-transform',
-                              skillDraft.color === c ? 'border-white scale-110' : 'border-transparent',
-                            )}
-                            style={{ backgroundColor: c }}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Icon</label>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {SKILL_ICONS.map((iconName) => (
-                        <button
-                          key={iconName}
-                          onClick={() => setSkillDraft({ ...skillDraft, icon: iconName })}
-                          className={cn(
-                            'w-7 h-7 rounded flex items-center justify-center text-xs transition-colors',
-                            skillDraft.icon === iconName
-                              ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
-                              : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]',
-                          )}
-                          title={iconName}
-                        >
-                          <SkillIcon name={iconName} className="w-3.5 h-3.5" />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end gap-2 pt-1">
+                  <textarea
+                    value={claudeSkillContent}
+                    onChange={(e) => setClaudeSkillContent(e.target.value)}
+                    rows={12}
+                    autoFocus
+                    className="w-full text-xs bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-2 outline-none focus:border-[var(--accent)] resize-none font-mono leading-relaxed"
+                    placeholder={"---\nname: My Skill\ndescription: What this skill does\n---\n\nYour skill prompt here..."}
+                  />
+                  <div className="flex justify-end gap-2">
                     <button
-                      onClick={() => { setEditingSkillId(null); setSkillDraft({}); }}
+                      onClick={() => setEditingClaudeSkillId(null)}
                       className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-3 py-1.5 rounded hover:bg-[var(--bg-tertiary)]"
                     >
                       Cancel
                     </button>
                     <button
-                      onClick={saveSkill}
-                      disabled={!skillDraft.name || !skillDraft.prompt}
+                      onClick={saveClaudeSkill}
+                      disabled={claudeSkillSaving}
                       className="flex items-center gap-1 text-xs text-white bg-[var(--accent)] hover:bg-[var(--accent-hover)] px-3 py-1.5 rounded disabled:opacity-50"
                     >
-                      <Save className="w-3 h-3" /> Save Skill
+                      <Save className="w-3 h-3" /> {claudeSkillSaving ? 'Saving...' : 'Save'}
                     </button>
                   </div>
                 </div>
               )}
 
-              {/* Skills list */}
-              {skills.length === 0 && claudeSkills.length === 0 && !editingSkillId && (
+              {skills.length === 0 && claudeSkills.length === 0 && editingClaudeSkillId !== '__new__' && (
                 <div className="text-center py-8 text-xs text-[var(--text-muted)]">
-                  No skills yet. Add a skill to create reusable agent prompts.
-                </div>
-              )}
-
-              {skills.length > 0 && (
-                <div className="space-y-2">
-                  {claudeSkills.length > 0 && (
-                    <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] px-1">Project Skills</div>
-                  )}
-                  {skills.map((skill) => (
-                    <div
-                      key={skill.id}
-                      className={cn(
-                        'flex items-start gap-3 px-3 py-2.5 rounded-lg border border-[var(--border)] hover:bg-[var(--bg-tertiary)] transition-colors cursor-pointer group',
-                        editingSkillId === skill.id && 'ring-1 ring-[var(--accent)]',
-                      )}
-                      onClick={() => editingSkillId !== skill.id && startEditSkill(skill)}
-                    >
-                      <div
-                        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-                        style={{ backgroundColor: `${skill.color || '#6366f1'}20`, color: skill.color || '#6366f1' }}
-                      >
-                        <SkillIcon name={skill.icon || 'Zap'} className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
-                          {skill.agentProvider && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
-                              {agentProviders.find((p) => p.id === skill.agentProvider)?.displayName || skill.agentProvider}
-                            </span>
-                          )}
-                        </div>
-                        {skill.description && (
-                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{skill.description}</p>
-                        )}
-                        <p className="text-[11px] text-[var(--text-muted)] truncate mt-0.5 font-mono">{skill.prompt}</p>
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); deleteSkill(skill.id); }}
-                        className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error)]/10 opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
+                  No skills yet. Click "Add Skill" to create one.
                 </div>
               )}
 

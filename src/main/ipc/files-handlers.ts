@@ -185,18 +185,18 @@ export function registerFilesHandlers(ipcMain: IpcMain): void {
     async (_event, projectPath: string, skillName: string, content: string) => {
       try {
         const skillsDir = join(projectPath, '.claude', 'skills');
-        await mkdir(skillsDir, { recursive: true });
 
-        // Check folder layout first: {name}/SKILL.md
-        const folderPath = join(skillsDir, skillName, 'SKILL.md');
-        if (existsSync(folderPath)) {
-          await writeFile(folderPath, content, 'utf-8');
+        // Check if flat file layout exists: {name}.md — update in place
+        const flatPath = join(skillsDir, `${skillName}.md`);
+        if (existsSync(flatPath)) {
+          await writeFile(flatPath, content, 'utf-8');
           return { success: true };
         }
 
-        // Flat file layout: {name}.md
-        const filePath = join(skillsDir, `${skillName}.md`);
-        await writeFile(filePath, content, 'utf-8');
+        // Default to folder layout: {name}/SKILL.md
+        const folderDir = join(skillsDir, skillName);
+        await mkdir(folderDir, { recursive: true });
+        await writeFile(join(folderDir, 'SKILL.md'), content, 'utf-8');
         return { success: true };
       } catch (error) {
         return {
