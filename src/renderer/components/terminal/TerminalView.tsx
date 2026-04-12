@@ -2054,7 +2054,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           <UsageIndicator />
           <span className="text-xs text-[var(--text-muted)]">
             {terminals.filter((t) => t.status !== 'exited').length}/
-            {useTerminalStore.getState().maxTerminals}
+            {settings.maxTerminals || useTerminalStore.getState().maxTerminals}
           </span>
         </div>
       </div>

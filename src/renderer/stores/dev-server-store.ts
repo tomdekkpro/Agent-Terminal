@@ -1,66 +1,69 @@
 import { create } from 'zustand';
-import type { DevServerType, DevServerStatus, DevServerEvent } from '../../shared/types';
-
-export interface DevServerLogEntry {
-  text: string;
-  timestamp: number;
-}
+import type { DevServerType, DevServerStatus } from '../../shared/types';
 
 interface DevServerState {
   /** Status per project: { [projectId]: { frontend, backend } } */
   status: Record<string, { frontend: DevServerStatus; backend: DevServerStatus }>;
-  /** Log lines per project+type key: `${projectId}:${type}` */
-  logs: Record<string, DevServerLogEntry[]>;
+  /** Terminal ID per project+type key: `${projectId}:${type}` */
+  terminalIds: Record<string, string>;
   /** Which log panel is open: null = closed */
   activeLog: { projectId: string; type: DevServerType } | null;
 
-  /** Process a dev server event (status + optional output) */
-  handleEvent: (event: DevServerEvent) => void;
+  /** Update status for a given project/type */
+  setStatus: (projectId: string, type: DevServerType, status: DevServerStatus) => void;
+  /** Get status for a given project/type */
+  getStatus: (projectId: string, type: DevServerType) => DevServerStatus;
+  /** Store terminal ID for a given project/type */
+  setTerminalId: (projectId: string, type: DevServerType, terminalId: string) => void;
+  /** Get terminal ID for a given project/type */
+  getTerminalId: (projectId: string, type: DevServerType) => string | undefined;
+  /** Clear terminal ID for a given project/type */
+  clearTerminalId: (projectId: string, type: DevServerType) => void;
   /** Toggle the log panel for a given project/type */
   toggleLog: (projectId: string, type: DevServerType) => void;
   /** Close the log panel */
   closeLog: () => void;
-  /** Clear logs for a given project/type */
-  clearLog: (projectId: string, type: DevServerType) => void;
 }
-
-const MAX_LOG_LINES = 5000;
 
 function logKey(projectId: string, type: DevServerType): string {
   return `${projectId}:${type}`;
 }
 
-export const useDevServerStore = create<DevServerState>((set) => ({
+export const useDevServerStore = create<DevServerState>((set, get) => ({
   status: {},
-  logs: {},
+  terminalIds: {},
   activeLog: null,
 
-  handleEvent: (event) =>
+  setStatus: (projectId, type, status) =>
     set((state) => {
-      const k = logKey(event.projectId, event.type);
-
-      // Update status
-      const current = state.status[event.projectId] || { frontend: 'stopped', backend: 'stopped' };
-      const newStatus = {
-        ...state.status,
-        [event.projectId]: { ...current, [event.type]: event.status },
+      const current = state.status[projectId] || { frontend: 'stopped', backend: 'stopped' };
+      return {
+        status: {
+          ...state.status,
+          [projectId]: { ...current, [type]: status },
+        },
       };
+    }),
 
-      // Append log output if present
-      let newLogs = state.logs;
-      if (event.output || event.error) {
-        const text = event.output || `[ERROR] ${event.error}`;
-        const existing = state.logs[k] || [];
-        const entry: DevServerLogEntry = { text, timestamp: Date.now() };
-        const updated = [...existing, entry];
-        // Trim to max lines
-        newLogs = {
-          ...state.logs,
-          [k]: updated.length > MAX_LOG_LINES ? updated.slice(-MAX_LOG_LINES) : updated,
-        };
-      }
+  getStatus: (projectId, type) => {
+    const s = get().status[projectId];
+    return s ? s[type] : 'stopped';
+  },
 
-      return { status: newStatus, logs: newLogs };
+  setTerminalId: (projectId, type, terminalId) =>
+    set((state) => ({
+      terminalIds: { ...state.terminalIds, [logKey(projectId, type)]: terminalId },
+    })),
+
+  getTerminalId: (projectId, type) => {
+    return get().terminalIds[logKey(projectId, type)];
+  },
+
+  clearTerminalId: (projectId, type) =>
+    set((state) => {
+      const updated = { ...state.terminalIds };
+      delete updated[logKey(projectId, type)];
+      return { terminalIds: updated };
     }),
 
   toggleLog: (projectId, type) =>
@@ -71,9 +74,4 @@ export const useDevServerStore = create<DevServerState>((set) => ({
     }),
 
   closeLog: () => set({ activeLog: null }),
-
-  clearLog: (projectId, type) =>
-    set((state) => ({
-      logs: { ...state.logs, [logKey(projectId, type)]: [] },
-    })),
 }));

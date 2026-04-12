@@ -1,10 +1,11 @@
 import { useCallback, useState, useRef, useEffect } from 'react';
+import { v4 as uuid } from 'uuid';
 import { FolderOpen, Plus, X, ChevronDown, GripVertical, Settings, Play, Square, ScrollText } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useDevServerStore } from '../../stores/dev-server-store';
 import { cn } from '../../../shared/utils';
-import type { AgentProviderMeta, DevServerEvent } from '../../../shared/types';
+import type { AgentProviderMeta, DevServerType } from '../../../shared/types';
 import { ProjectSettingsModal } from '../project/ProjectSettingsModal';
 
 export function ProjectTabBar() {
@@ -26,7 +27,7 @@ export function ProjectTabBar() {
 
   // Dev server status tracking (from store)
   const serverStatus = useDevServerStore((s) => s.status);
-  const handleDevServerEvent = useDevServerStore((s) => s.handleEvent);
+  const setServerStatus = useDevServerStore((s) => s.setStatus);
   const toggleLog = useDevServerStore((s) => s.toggleLog);
   const activeLog = useDevServerStore((s) => s.activeLog);
 
@@ -41,43 +42,82 @@ export function ProjectTabBar() {
       .catch(() => {});
   }, [settingsProjectId]);
 
-  // Fetch dev server status for active project
+  // Listen for dev server terminal exits — update status to stopped
   useEffect(() => {
-    if (!activeProjectId) return;
-    window.electronAPI.getDevServerStatus?.(activeProjectId)
-      .then((result: any) => {
-        if (result?.success && result.data) {
-          // Seed the store with initial status
-          handleDevServerEvent({ projectId: activeProjectId, type: 'frontend', status: result.data.frontend });
-          handleDevServerEvent({ projectId: activeProjectId, type: 'backend', status: result.data.backend });
+    const cleanup = window.electronAPI.onTerminalExit((id: string) => {
+      const store = useDevServerStore.getState();
+      for (const [key, terminalId] of Object.entries(store.terminalIds)) {
+        if (terminalId === id) {
+          const [pid, tp] = key.split(':');
+          store.setStatus(pid, tp as DevServerType, 'stopped');
+          store.clearTerminalId(pid, tp as DevServerType);
         }
-      })
-      .catch(() => {});
-  }, [activeProjectId, handleDevServerEvent]);
-
-  // Listen for dev server events — pipe into store
-  useEffect(() => {
-    const unsub = window.electronAPI.onDevServerEvent?.((event: DevServerEvent) => {
-      handleDevServerEvent(event);
+      }
     });
-    return () => { unsub?.(); };
-  }, [handleDevServerEvent]);
+    return () => { cleanup(); };
+  }, []);
 
-  const handleToggleServer = useCallback(async (projectId: string, type: 'frontend' | 'backend') => {
+  const handleToggleServer = useCallback(async (projectId: string, type: DevServerType) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project?.devServer) return;
+
     const current = serverStatus[projectId]?.[type] || 'stopped';
+
     if (current === 'running' || current === 'starting') {
-      await window.electronAPI.stopDevServer?.(projectId, type);
+      // Stop: send Ctrl+C to the terminal
+      const terminalId = useDevServerStore.getState().getTerminalId(projectId, type);
+      if (terminalId) {
+        window.electronAPI.sendTerminalInput(terminalId, '\x03');
+      }
+      setServerStatus(projectId, type, 'stopped');
     } else {
-      const result = await window.electronAPI.startDevServer?.(projectId, type);
-      if (result && !result.success) {
-        // Brief flash of error via store
-        handleDevServerEvent({ projectId, type, status: 'error', error: result.error });
+      // Start: create a background PTY (no terminal tab) and run the command
+      const config = project.devServer;
+      let cmd = type === 'frontend' ? config.frontendCmd : config.backendCmd;
+      const subCwd = type === 'frontend' ? config.frontendCwd : config.backendCwd;
+
+      if (!cmd) return;
+      if (type === 'backend' && config.backendProfile) {
+        cmd += ` --launch-profile "${config.backendProfile}"`;
+      }
+
+      const resolvedCwd = subCwd ? `${project.path}/${subCwd}` : project.path;
+
+      // Destroy old PTY if it still exists
+      const oldId = useDevServerStore.getState().getTerminalId(projectId, type);
+      if (oldId) {
+        window.electronAPI.destroyTerminal(oldId).catch(() => {});
+        useDevServerStore.getState().clearTerminalId(projectId, type);
+      }
+
+      // Create a new background PTY
+      const terminalId = `devserver-${type}-${uuid()}`;
+      setServerStatus(projectId, type, 'starting');
+      useDevServerStore.getState().setTerminalId(projectId, type, terminalId);
+
+      try {
+        await window.electronAPI.createTerminal({
+          id: terminalId,
+          cwd: resolvedCwd,
+          cols: 120,
+          rows: 30,
+        });
+
+        // Wait for shell to be ready, then write the command
+        const cmdToSend = cmd;
         setTimeout(() => {
-          handleDevServerEvent({ projectId, type, status: 'stopped' });
-        }, 2000);
+          window.electronAPI.sendTerminalInput(terminalId, cmdToSend + '\r');
+          setServerStatus(projectId, type, 'running');
+        }, 500);
+
+        // Auto-open the log panel
+        useDevServerStore.getState().toggleLog(projectId, type);
+      } catch {
+        setServerStatus(projectId, type, 'error');
+        setTimeout(() => setServerStatus(projectId, type, 'stopped'), 2000);
       }
     }
-  }, [serverStatus, handleDevServerEvent]);
+  }, [projects, serverStatus, setServerStatus]);
 
   // Drag state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -117,6 +157,21 @@ export function ProjectTabBar() {
     await addProject();
   }, [addProject]);
 
+  /** Destroy any background dev-server PTYs for a project */
+  const cleanupDevServerPtys = useCallback((projectId: string) => {
+    const store = useDevServerStore.getState();
+    for (const type of ['frontend', 'backend'] as DevServerType[]) {
+      const tid = store.getTerminalId(projectId, type);
+      if (tid) {
+        window.electronAPI.destroyTerminal(tid).catch(() => {});
+        store.clearTerminalId(projectId, type);
+        store.setStatus(projectId, type, 'stopped');
+      }
+    }
+    // Close log panel if it was showing this project
+    if (store.activeLog?.projectId === projectId) store.closeLog();
+  }, []);
+
   const handleCloseTab = useCallback(
     (e: React.MouseEvent, projectId: string) => {
       e.stopPropagation();
@@ -128,9 +183,10 @@ export function ProjectTabBar() {
         }
         useTerminalStore.getState().removeTerminal(t.id);
       }
+      cleanupDevServerPtys(projectId);
       closeProjectTab(projectId);
     },
-    [closeProjectTab]
+    [closeProjectTab, cleanupDevServerPtys]
   );
 
   const handleReopenProject = useCallback(
@@ -152,9 +208,10 @@ export function ProjectTabBar() {
         }
         useTerminalStore.getState().removeTerminal(t.id);
       }
+      cleanupDevServerPtys(projectId);
       removeProject(projectId);
     },
-    [removeProject]
+    [removeProject, cleanupDevServerPtys]
   );
 
   // Drag handlers

@@ -219,8 +219,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   // Create a terminal in a new group (new tab)
   addTerminal: (cwd?: string, projectId?: string) => {
     const state = get();
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
     const activeCount = state.terminals.filter(t => t.status !== 'exited').length;
-    if (activeCount >= state.maxTerminals) return null;
+    if (activeCount >= maxTerminals) return null;
 
     const groupId = uuid();
     const project = projectId ? useProjectStore.getState().projects.find(p => p.id === projectId) : undefined;
@@ -249,8 +250,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   // Create a terminal in the active group (split)
   splitTerminal: (cwd?: string, projectId?: string) => {
     const state = get();
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
     const activeCount = state.terminals.filter(t => t.status !== 'exited').length;
-    if (activeCount >= state.maxTerminals) return null;
+    if (activeCount >= maxTerminals) return null;
     if (!state.activeGroupId) return null;
 
     const project = projectId ? useProjectStore.getState().projects.find(p => p.id === projectId) : undefined;
@@ -399,7 +401,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
   canAddTerminal: () => {
     const state = get();
-    return state.terminals.filter(t => t.status !== 'exited').length < state.maxTerminals;
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
+    return state.terminals.filter(t => t.status !== 'exited').length < maxTerminals;
   },
   getTerminalsByProject: (projectId?: string) => {
     const state = get();

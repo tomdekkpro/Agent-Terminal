@@ -409,6 +409,8 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               });
               xtermRef.current!.loadAddon(addon);
               webglAddonRef.current = addon;
+              // WebGL addon changes renderer metrics — re-fit to sync dimensions
+              try { fitAddonRef.current!.fit(); } catch { /* not ready */ }
             } catch {
               // WebGL not supported — silently fall back to DOM renderer
             }
@@ -420,8 +422,11 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             for (const data of pending) {
               try { xtermRef.current!.write(data); } catch { /* skip */ }
             }
+            // Re-fit after flushing buffered data to ensure dimensions are correct
+            try { fitAddonRef.current!.fit(); } catch { /* not ready */ }
           }
 
+          // Read final cols/rows after all addons loaded and buffer flushed
           const cols = xtermRef.current.cols;
           const rows = xtermRef.current.rows;
           if (cols > 0 && rows > 0) {
@@ -528,7 +533,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             safeFit();
           }
         }
-      }, 200);
+      }, 80);
     });
 
     observer.observe(container);

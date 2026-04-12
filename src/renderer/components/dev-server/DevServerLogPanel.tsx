@@ -1,57 +1,202 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { X, Trash2, ArrowDown, Monitor, Server } from 'lucide-react';
+import { X, Monitor, Server } from 'lucide-react';
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { useDevServerStore } from '../../stores/dev-server-store';
-import { useSettingsStore } from '../../stores/settings-store';
+import { registerOutputCallback, unregisterOutputCallback } from '../../stores/terminal-store';
 import { cn } from '../../../shared/utils';
 import type { DevServerType } from '../../../shared/types';
 
-// Strip ANSI escape sequences (colors, cursor, etc.)
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?(?:\x07|\x1b\\)|\x1b[^[\]]/g;
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '');
-}
+const TERMINAL_THEME = {
+  background: '#0f0f23',
+  foreground: '#e2e8f0',
+  cursor: '#e2e8f0',
+  cursorAccent: '#0f0f23',
+  selectionBackground: '#6366f140',
+  selectionForeground: '#e2e8f0',
+  black: '#1e1e3a',
+  red: '#ef4444',
+  green: '#22c55e',
+  yellow: '#f59e0b',
+  blue: '#3b82f6',
+  magenta: '#a855f7',
+  cyan: '#06b6d4',
+  white: '#e2e8f0',
+  brightBlack: '#64748b',
+  brightRed: '#f87171',
+  brightGreen: '#4ade80',
+  brightYellow: '#fbbf24',
+  brightBlue: '#60a5fa',
+  brightMagenta: '#c084fc',
+  brightCyan: '#22d3ee',
+  brightWhite: '#f8fafc',
+};
 
 const MIN_HEIGHT = 120;
-const DEFAULT_HEIGHT = 220;
+const DEFAULT_HEIGHT = 260;
 const MAX_HEIGHT = 500;
 
 export function DevServerLogPanel() {
   const activeLog = useDevServerStore((s) => s.activeLog);
-  const logs = useDevServerStore((s) => s.logs);
   const status = useDevServerStore((s) => s.status);
+  const terminalIds = useDevServerStore((s) => s.terminalIds);
   const closeLog = useDevServerStore((s) => s.closeLog);
   const toggleLog = useDevServerStore((s) => s.toggleLog);
-  const clearLog = useDevServerStore((s) => s.clearLog);
-  const terminalFont = useSettingsStore((s) => s.settings.terminalFontFamily);
-  const terminalFontSize = useSettingsStore((s) => s.settings.terminalFontSize);
 
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
-  const [autoScroll, setAutoScroll] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<XTerm | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeRef = useRef<{ startY: number; startH: number } | null>(null);
+  const bufferRef = useRef<string[]>([]);
+  const readyRef = useRef(false);
+  const activeKeyRef = useRef<string | null>(null);
 
   const projectId = activeLog?.projectId ?? '';
   const type = activeLog?.type ?? 'frontend';
   const k = `${projectId}:${type}`;
-  const entries = activeLog ? (logs[k] || []) : [];
+  const terminalId = activeLog ? terminalIds[k] : undefined;
   const serverStatus = activeLog ? (status[projectId]?.[type] || 'stopped') : 'stopped';
 
   const otherType: DevServerType = type === 'frontend' ? 'backend' : 'frontend';
+  const otherKey = `${projectId}:${otherType}`;
   const otherStatus = activeLog ? status[projectId]?.[otherType] : undefined;
+  const otherTerminalId = activeLog ? terminalIds[otherKey] : undefined;
 
-  // Auto-scroll
-  useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  /** Safe write — xterm can throw if renderer isn't fully ready */
+  const safeWrite = useCallback((data: string) => {
+    try {
+      if (xtermRef.current && readyRef.current) {
+        xtermRef.current.write(data);
+      } else {
+        bufferRef.current.push(data);
+      }
+    } catch {
+      bufferRef.current.push(data);
     }
-  }, [entries.length, autoScroll]);
-
-  const handleScroll = useCallback(() => {
-    if (!scrollRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    setAutoScroll(scrollHeight - scrollTop - clientHeight < 40);
   }, []);
+
+  // Create / tear down xterm when panel opens or the active terminal changes
+  useEffect(() => {
+    if (!activeLog || !terminalId || !containerRef.current) return;
+    const currentKey = `${activeLog.projectId}:${activeLog.type}:${terminalId}`;
+
+    // Skip if already showing this terminal
+    if (activeKeyRef.current === currentKey && xtermRef.current) return;
+
+    // Cleanup previous xterm if switching terminals
+    if (xtermRef.current) {
+      if (activeKeyRef.current) {
+        const prevTid = activeKeyRef.current.split(':').slice(2).join(':');
+        unregisterOutputCallback(prevTid);
+      }
+      xtermRef.current.dispose();
+      xtermRef.current = null;
+      fitAddonRef.current = null;
+      readyRef.current = false;
+      bufferRef.current = [];
+    }
+
+    activeKeyRef.current = currentKey;
+    const container = containerRef.current;
+    const tid = terminalId;
+
+    // Register output callback early to buffer data
+    registerOutputCallback(tid, (data) => safeWrite(data));
+
+    const xterm = new XTerm({
+      cursorBlink: true,
+      cursorStyle: 'block',
+      fontSize: 13,
+      fontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
+      lineHeight: 1.2,
+      theme: TERMINAL_THEME,
+      allowProposedApi: true,
+      scrollback: 10000,
+    });
+
+    const fitAddon = new FitAddon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      window.electronAPI?.openExternal?.(uri);
+    });
+
+    xterm.loadAddon(fitAddon);
+    xterm.loadAddon(webLinksAddon);
+
+    xtermRef.current = xterm;
+    fitAddonRef.current = fitAddon;
+
+    requestAnimationFrame(() => {
+      if (!xtermRef.current || !container) return;
+      try {
+        xterm.open(container);
+      } catch {
+        xtermRef.current = null;
+        fitAddonRef.current = null;
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        if (!fitAddonRef.current || !xtermRef.current) return;
+        try { fitAddonRef.current.fit(); } catch { /* not ready */ }
+        readyRef.current = true;
+
+        // Flush buffered output
+        if (bufferRef.current.length > 0) {
+          const pending = bufferRef.current.splice(0);
+          for (const data of pending) {
+            try { xtermRef.current!.write(data); } catch { /* skip */ }
+          }
+          // Re-fit after flushing buffered data to ensure dimensions are correct
+          try { fitAddonRef.current!.fit(); } catch { /* not ready */ }
+        }
+
+        // Resize the PTY to match the panel (read cols/rows after flush + re-fit)
+        const cols = xtermRef.current.cols;
+        const rows = xtermRef.current.rows;
+        if (cols > 0 && rows > 0) {
+          window.electronAPI.resizeTerminal(tid, cols, rows);
+        }
+      });
+    });
+
+    // Forward keyboard input to the PTY
+    xterm.onData((data) => {
+      window.electronAPI.sendTerminalInput(tid, data);
+    });
+
+    return () => {
+      unregisterOutputCallback(tid);
+      if (xtermRef.current) {
+        xtermRef.current.dispose();
+        xtermRef.current = null;
+        fitAddonRef.current = null;
+        readyRef.current = false;
+        bufferRef.current = [];
+      }
+      activeKeyRef.current = null;
+    };
+  }, [activeLog, terminalId, safeWrite]);
+
+  // Re-fit xterm when panel height changes
+  useEffect(() => {
+    if (!fitAddonRef.current || !readyRef.current || !terminalId) return;
+    // Delay to let the DOM settle after resize
+    const timer = setTimeout(() => {
+      try {
+        fitAddonRef.current?.fit();
+        if (xtermRef.current && terminalId) {
+          const cols = xtermRef.current.cols;
+          const rows = xtermRef.current.rows;
+          if (cols > 0 && rows > 0) {
+            window.electronAPI.resizeTerminal(terminalId, cols, rows);
+          }
+        }
+      } catch { /* ignore */ }
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [height, terminalId]);
 
   // Resize drag
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -104,8 +249,8 @@ export function DevServerLogPanel() {
             )} />
           </button>
 
-          {/* Tab for other type if it has status */}
-          {otherStatus && otherStatus !== 'stopped' && (
+          {/* Tab for other type if it has a running terminal */}
+          {otherTerminalId && otherStatus && otherStatus !== 'stopped' && (
             <button
               onClick={() => toggleLog(projectId, otherType)}
               className="flex items-center gap-1 px-2 h-6 rounded text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-all"
@@ -120,32 +265,9 @@ export function DevServerLogPanel() {
               )} />
             </button>
           )}
-
-          <span className="text-[10px] text-[var(--text-muted)] ml-2">
-            {entries.length} lines
-          </span>
         </div>
 
         <div className="flex items-center gap-1">
-          {!autoScroll && (
-            <button
-              onClick={() => {
-                setAutoScroll(true);
-                if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-              }}
-              className="flex items-center gap-1 px-1.5 h-5 rounded text-[10px] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-all"
-              title="Scroll to bottom"
-            >
-              <ArrowDown className="w-3 h-3" />
-            </button>
-          )}
-          <button
-            onClick={() => clearLog(projectId, type)}
-            className="flex items-center gap-1 px-1.5 h-5 rounded text-[10px] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-all"
-            title="Clear logs"
-          >
-            <Trash2 className="w-3 h-3" />
-          </button>
           <button
             onClick={closeLog}
             className="flex items-center gap-1 px-1.5 h-5 rounded text-[10px] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-all"
@@ -156,25 +278,12 @@ export function DevServerLogPanel() {
         </div>
       </div>
 
-      {/* Log content */}
+      {/* Terminal container */}
       <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-auto leading-[1.5] px-3 py-1 select-text"
-        style={{ fontFamily: terminalFont, fontSize: Math.max(terminalFontSize - 2, 10) }}
-      >
-        {entries.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-xs">
-            {serverStatus === 'stopped' ? 'Server is stopped' : 'Waiting for output...'}
-          </div>
-        ) : (
-          entries.map((entry, i) => (
-            <div key={i} className="whitespace-pre-wrap break-all text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)]/50">
-              {stripAnsi(entry.text.endsWith('\n') ? entry.text.slice(0, -1) : entry.text)}
-            </div>
-          ))
-        )}
-      </div>
+        ref={containerRef}
+        className="flex-1 overflow-hidden"
+        style={{ minHeight: 0 }}
+      />
     </div>
   );
 }
