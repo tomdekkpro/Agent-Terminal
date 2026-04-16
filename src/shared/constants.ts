@@ -138,6 +138,7 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_STOP: 'code-review:stop',
   CODE_REVIEW_STOP_ALL: 'code-review:stop-all',
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
+  CODE_REVIEW_FORCE_APPROVE: 'code-review:force-approve',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
   // Dev Server

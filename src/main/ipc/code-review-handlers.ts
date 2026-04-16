@@ -22,8 +22,33 @@ let nextSchedulerRun: string | null = null;
 
 // ─── Active review processes (for cancellation) ──────────────
 import type { ChildProcess } from 'child_process';
+import { v4 as uuidv4 } from 'uuid';
 const activeReviews = new Map<string, ChildProcess>();
 let stopAllRequested = false;
+
+// ─── Session tracking for resumed reviews ────────────────────
+// Key: `${taskId}__pr${prNumber}`, Value: session UUID
+const reviewSessions = new Map<string, string>();
+
+function getSessionKey(taskId: string, prNumber: number): string {
+  return `${taskId}__pr${prNumber}`;
+}
+
+function clearReviewSession(taskId: string, prNumber: number): void {
+  const key = getSessionKey(taskId, prNumber);
+  if (reviewSessions.has(key)) {
+    debugLog(`[CodeReview] Cleared session for ${key}`);
+    reviewSessions.delete(key);
+  }
+}
+
+function clearAllSessionsForTask(taskId: string): void {
+  for (const key of reviewSessions.keys()) {
+    if (key.startsWith(`${taskId}__`)) {
+      reviewSessions.delete(key);
+    }
+  }
+}
 
 function killReviewProcess(taskId: string): boolean {
   const child = activeReviews.get(taskId);
@@ -41,6 +66,34 @@ function killAllReviewProcesses(): void {
     child.kill('SIGTERM');
     activeReviews.delete(taskId);
   }
+}
+
+/** Approval keywords that a developer can post in a ClickUp comment to override a failed review */
+const APPROVAL_KEYWORDS = ['review:approve', 'review:ok', 'review:approved', 'review:lgtm'];
+
+/** Check whether a developer has posted an approval comment on the task (newer than the last review) */
+async function hasApprovalComment(taskId: string): Promise<boolean> {
+  try {
+    const settings = getSettings();
+    const commentsResult = await clickUpProvider.getComments(settings, taskId);
+    if (!commentsResult.success || !commentsResult.data) return false;
+
+    // Check recent comments (last 20) for approval keywords — skip bot messages
+    const recentComments = commentsResult.data
+      .filter((c: any) => c.user?.id !== -1)
+      .slice(-20);
+
+    for (const comment of recentComments) {
+      const text = (comment.comment_text || '').toLowerCase().trim();
+      if (APPROVAL_KEYWORDS.some((kw) => text.includes(kw))) {
+        debugLog(`[CodeReview] Found approval comment on task ${taskId}: "${text.substring(0, 80)}"`);
+        return true;
+      }
+    }
+  } catch (err) {
+    debugError('[CodeReview] Failed to check approval comments:', err);
+  }
+  return false;
 }
 
 function ghExec(command: string, cwd: string): Promise<string> {
@@ -332,53 +385,13 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
   throw new Error('No valid review JSON found in response');
 }
 
-async function runAIReview(
+/** Build the full initial review prompt */
+function buildInitialReviewPrompt(
   prNumber: number,
-  projectPath: string,
-  taskContext?: { taskName?: string; description?: string; comments?: string },
-  taskId?: string,
-): Promise<{ passed: boolean; findings: CodeReviewFinding[] }> {
-  const agentProvider = agentRegistry.get('claude');
-  if (!agentProvider || !agentProvider.isAvailable()) {
-    throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
-  }
-
-  // Build task context section
-  let taskSection = '';
-  if (taskContext) {
-    const parts: string[] = [];
-    if (taskContext.taskName) parts.push(`Task: ${taskContext.taskName}`);
-    if (taskContext.description) {
-      const desc = taskContext.description.length > 3000
-        ? taskContext.description.substring(0, 3000) + '...'
-        : taskContext.description;
-      parts.push(`Task Description / Bug Report:\n${desc}`);
-    }
-    if (taskContext.comments) {
-      const comm = taskContext.comments.length > 2000
-        ? taskContext.comments.substring(0, 2000) + '...'
-        : taskContext.comments;
-      parts.push(`Developer Comments:\n${comm}`);
-    }
-    if (parts.length > 0) {
-      taskSection = `\n--- TASK CONTEXT ---\n${parts.join('\n\n')}\n--- END TASK CONTEXT ---\n`;
-    }
-  }
-
-  // Read REVIEW.md from the project if it exists
-  let reviewGuidelines = '';
-  try {
-    const reviewMdPath = path.join(projectPath, 'REVIEW.md');
-    const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
-    if (content.trim()) {
-      const trimmed = content.length > 3000
-        ? content.substring(0, 3000) + '\n...[truncated]'
-        : content;
-      reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
-    }
-  } catch { /* REVIEW.md not found — that's fine */ }
-
-  const prompt = `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text.
+  taskSection: string,
+  reviewGuidelines: string,
+): string {
+  return `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text.
 
 Analyze Pull Request #${prNumber} for real bugs and issues.
 
@@ -437,10 +450,110 @@ After your analysis, respond with ONLY this JSON object as your final output —
 If no issues found:
 
 {"passed": true, "findings": []}`;
+}
+
+/** Build a follow-up prompt for re-reviewing with session context */
+function buildReReviewPrompt(
+  prNumber: number,
+  taskSection: string,
+): string {
+  return `The developer has updated PR #${prNumber} after your previous review. Please re-review the changes.
+
+1. Run \`gh pr diff ${prNumber}\` to see the current diff
+2. Compare against your previous findings — check which issues have been fixed
+3. If a developer has commented explaining why the code is correct, consider their reasoning carefully
+4. Look for any NEW issues introduced by their changes
+${taskSection}
+## Important
+- If all previous findings are fixed and no new issues exist, PASS the review
+- If the developer's explanation is valid and the code is correct as-is, PASS the review
+- Only report issues that STILL exist or are NEW — do not repeat fixed findings
+- You have full context from the previous review, use it
+
+## Output Format
+Respond with ONLY this JSON object — no text before or after:
+
+{"passed": false, "findings": [{"severity": "critical", "file": "src/example.ts", "line": 42, "description": "What is wrong and why", "suggestion": "How to fix it"}]}
+
+If all issues are resolved:
+
+{"passed": true, "findings": []}`;
+}
+
+async function runAIReview(
+  prNumber: number,
+  projectPath: string,
+  taskContext?: { taskName?: string; description?: string; comments?: string },
+  taskId?: string,
+): Promise<{ passed: boolean; findings: CodeReviewFinding[] }> {
+  const agentProvider = agentRegistry.get('claude');
+  if (!agentProvider || !agentProvider.isAvailable()) {
+    throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
+  }
+
+  // Build task context section
+  let taskSection = '';
+  if (taskContext) {
+    const parts: string[] = [];
+    if (taskContext.taskName) parts.push(`Task: ${taskContext.taskName}`);
+    if (taskContext.description) {
+      const desc = taskContext.description.length > 3000
+        ? taskContext.description.substring(0, 3000) + '...'
+        : taskContext.description;
+      parts.push(`Task Description / Bug Report:\n${desc}`);
+    }
+    if (taskContext.comments) {
+      const comm = taskContext.comments.length > 2000
+        ? taskContext.comments.substring(0, 2000) + '...'
+        : taskContext.comments;
+      parts.push(`Developer Comments:\n${comm}`);
+    }
+    if (parts.length > 0) {
+      taskSection = `\n--- TASK CONTEXT ---\n${parts.join('\n\n')}\n--- END TASK CONTEXT ---\n`;
+    }
+  }
+
+  // Read REVIEW.md from the project if it exists
+  let reviewGuidelines = '';
+  try {
+    const reviewMdPath = path.join(projectPath, 'REVIEW.md');
+    const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
+    if (content.trim()) {
+      const trimmed = content.length > 3000
+        ? content.substring(0, 3000) + '\n...[truncated]'
+        : content;
+      reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
+    }
+  } catch { /* REVIEW.md not found — that's fine */ }
+
+  // Check if we have an existing session for this task/PR (re-review)
+  const sessionKey = taskId ? getSessionKey(taskId, prNumber) : null;
+  const existingSessionId = sessionKey ? reviewSessions.get(sessionKey) : null;
+  const isReReview = !!existingSessionId;
+
+  // Generate or reuse session ID
+  const sessionId = existingSessionId || uuidv4();
+  if (sessionKey && !existingSessionId) {
+    reviewSessions.set(sessionKey, sessionId);
+    debugLog(`[CodeReview] New session ${sessionId} for ${sessionKey}`);
+  } else if (isReReview) {
+    debugLog(`[CodeReview] Resuming session ${sessionId} for ${sessionKey}`);
+  }
+
+  const prompt = isReReview
+    ? buildReReviewPrompt(prNumber, taskSection)
+    : buildInitialReviewPrompt(prNumber, taskSection, reviewGuidelines);
 
   return new Promise((resolve, reject) => {
-    // Claude fetches the diff itself via gh — we just pass the prompt with PR number
-    const args = ['--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '-'];
+    const args: string[] = [];
+
+    if (isReReview) {
+      // Resume the existing session — Claude has full context from previous review
+      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--resume', sessionId);
+    } else {
+      // New session — pass session ID so we can resume later
+      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--session-id', sessionId);
+    }
     args.push('--add-dir', projectPath);
 
     const env = { ...process.env };
@@ -547,7 +660,9 @@ function formatReviewComment(prTitle: string, findings: CodeReviewFinding[], pas
     lines.push('');
   }
 
-  lines.push('---\n_Automated review by Agent Terminal_');
+  lines.push('---');
+  lines.push('💬 If the code is correct and no changes are needed, add a comment with **review:approve** to override this review.');
+  lines.push('\n_Automated review by Agent Terminal_');
   return lines.join('\n');
 }
 
@@ -603,6 +718,21 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       const hasTag = task.tags?.some((t) => t.name.toLowerCase() === tagName.toLowerCase());
       if (hasTag) {
         debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — already has "${tagName}" tag`);
+        continue;
+      }
+
+      // Check if a developer posted an approval comment (e.g. "review:approve")
+      const approved = await hasApprovalComment(task.id);
+      if (approved) {
+        debugLog(`[CodeReview] Scheduler: task ${task.id} has developer approval comment — auto-approving`);
+        await clickUpProvider.addTag(settings, task.id, tagName);
+        await clickUpProvider.postComment(
+          settings,
+          task.id,
+          `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+        );
+        clearAllSessionsForTask(task.id);
+        sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'passed' });
         continue;
       }
 
@@ -714,6 +844,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       // Update task status based on combined results of all PRs
       if (allPassed && prs.length > 0) {
         await clickUpProvider.addTag(settings, task.id, tagName);
+        clearAllSessionsForTask(task.id);
       } else if (anyFailed) {
         try {
           await clickUpProvider.updateStatus(settings, task.id, 'review failed');
@@ -934,6 +1065,8 @@ export function registerCodeReviewHandlers(
             debugError('[CodeReview] Failed to add tag:', tagResult.error);
           }
           await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+          // Clear the review session — no longer needed
+          clearReviewSession(taskId, prNumber);
           debugLog('[CodeReview] Review passed, tag added for task:', taskId);
         } else {
           // Post detailed comment on ClickUp
@@ -964,6 +1097,53 @@ export function registerCodeReviewHandlers(
       } catch (error) {
         debugError('[CodeReview] submitReview error:', error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to submit review' };
+      }
+    },
+  );
+
+  // ─── Force approve (manual override) ────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE,
+    async (_event, projectPath: string, taskId: string, prNumber: number, prTitle: string) => {
+      try {
+        const settings = getSettings();
+        const tagName = settings.codeReviewTagName || 'reviewpass';
+
+        // Add reviewpass tag
+        const tagResult = await clickUpProvider.addTag(settings, taskId, tagName);
+        if (!tagResult.success) {
+          debugError('[CodeReview] Force approve — failed to add tag:', tagResult.error);
+        }
+
+        // Post approval comment on ClickUp
+        await clickUpProvider.postComment(
+          settings,
+          taskId,
+          `✅ Code Review Manually Approved — PR #${prNumber} (${prTitle}) was approved by the reviewer. Previous findings were reviewed and accepted as correct.\n\n_Approved via Agent Terminal_`,
+        );
+
+        // Post approval comment on GitHub PR
+        try {
+          const comment = `## ✅ Code Review — Manually Approved\n\n**PR:** ${prTitle}\n\nPrevious findings were reviewed and accepted as correct. No changes required.\n\n---\n_Approved via Agent Terminal_`;
+          const tmpFile = path.join(os.tmpdir(), `cr-approve-${Date.now()}.md`);
+          fs.writeFileSync(tmpFile, comment, 'utf-8');
+          try {
+            await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+          } finally {
+            fs.unlinkSync(tmpFile);
+          }
+        } catch (ghErr) {
+          debugError('[CodeReview] Force approve — failed to post GitHub comment:', ghErr);
+        }
+
+        // Clear the review session — no longer needed
+        clearReviewSession(taskId, prNumber);
+        sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
+        debugLog(`[CodeReview] Force approved task ${taskId} PR #${prNumber}`);
+        return { success: true };
+      } catch (error) {
+        debugError('[CodeReview] Force approve error:', error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to approve' };
       }
     },
   );

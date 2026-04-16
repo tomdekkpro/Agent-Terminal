@@ -13,6 +13,7 @@ interface CodeReviewState {
   stopReview: (taskId: string, prNumber?: number) => Promise<void>;
   stopAllReviews: () => Promise<void>;
   submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
+  forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) => Promise<void>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
   updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
@@ -119,6 +120,18 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     } catch (err) {
       // Non-critical — review result is already shown in UI
       console.error('[CodeReview] Failed to submit result:', err);
+    }
+  },
+
+  forceApprove: async (projectPath, taskId, prNumber, prTitle) => {
+    // Optimistically update UI
+    get().updatePR(taskId, prNumber, { status: 'passed', findings: [] });
+    try {
+      await window.electronAPI.codeReviewForceApprove(projectPath, taskId, prNumber, prTitle);
+    } catch (err) {
+      // Revert on failure
+      get().updatePR(taskId, prNumber, { status: 'failed' });
+      console.error('[CodeReview] Failed to force approve:', err);
     }
   },
 

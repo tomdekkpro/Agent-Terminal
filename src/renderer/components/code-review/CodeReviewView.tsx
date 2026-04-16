@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
-  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List,
+  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -118,11 +118,13 @@ function PRRow({
   taskId,
   onReview,
   onStop,
+  onApprove,
 }: {
   pr: CodeReviewPR;
   taskId: string;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
+  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
 }) {
   const [expanded, setExpanded] = useState(pr.status === 'failed');
   const status = STATUS_CONFIG[pr.status] || STATUS_CONFIG.pending;
@@ -165,6 +167,17 @@ function PRRow({
               >
                 <Square className="w-3 h-3" />
                 Stop
+              </button>
+            )}
+
+            {pr.status === 'failed' && (
+              <button
+                onClick={() => onApprove(taskId, pr.prNumber, pr.prTitle || `PR #${pr.prNumber}`)}
+                title="Override review — mark as approved"
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors"
+              >
+                <ThumbsUp className="w-3 h-3" />
+                Approve
               </button>
             )}
 
@@ -221,11 +234,13 @@ function ReviewItemCard({
   item,
   onReview,
   onStop,
+  onApprove,
 }: {
   item: CodeReviewItem;
   projectPath: string;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
+  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
@@ -283,6 +298,7 @@ function ReviewItemCard({
                 taskId={item.taskId}
                 onReview={onReview}
                 onStop={onStop}
+                onApprove={onApprove}
               />
             ))}
           </div>
@@ -505,7 +521,7 @@ function SchedulerPanel({ projectPath }: { projectPath: string }) {
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
@@ -602,6 +618,11 @@ export function CodeReviewView() {
   const handleStopAll = useCallback(() => {
     stopAllReviews();
   }, [stopAllReviews]);
+
+  const handleApprove = useCallback((taskId: string, prNumber: number, prTitle: string) => {
+    if (!selectedProjectPath) return;
+    forceApprove(selectedProjectPath, taskId, prNumber, prTitle);
+  }, [selectedProjectPath, forceApprove]);
 
   const projectPath = selectedProjectPath || '';
   const allPRs = items.flatMap((i) => i.prs || []);
@@ -819,6 +840,7 @@ export function CodeReviewView() {
               projectPath={projectPath}
               onReview={handleReview}
               onStop={handleStop}
+              onApprove={handleApprove}
             />
           ))}
         </div>
