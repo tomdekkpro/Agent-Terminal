@@ -71,6 +71,20 @@ function killAllReviewProcesses(): void {
 /** Approval keywords that a developer can post in a ClickUp comment to override a failed review */
 const APPROVAL_KEYWORDS = ['review:approve', 'review:ok', 'review:approved', 'review:lgtm'];
 
+/** Extract plain text from a ClickUp comment (handles both comment_text and rich text comment array) */
+function extractCommentText(comment: any): string {
+  // Try comment_text first (plain text field)
+  if (comment.comment_text) return comment.comment_text;
+  // Fallback: extract from rich text comment array
+  if (Array.isArray(comment.comment)) {
+    return comment.comment
+      .map((block: any) => block.text || '')
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
 /** Check whether a developer has posted an approval comment on the task (newer than the last review) */
 async function hasApprovalComment(taskId: string): Promise<boolean> {
   try {
@@ -84,12 +98,14 @@ async function hasApprovalComment(taskId: string): Promise<boolean> {
       .slice(-20);
 
     for (const comment of recentComments) {
-      const text = (comment.comment_text || '').toLowerCase().trim();
+      const text = extractCommentText(comment).toLowerCase().trim();
+      debugLog(`[CodeReview] Checking comment from ${comment.user?.username || 'unknown'}: "${text.substring(0, 100)}"`);
       if (APPROVAL_KEYWORDS.some((kw) => text.includes(kw))) {
         debugLog(`[CodeReview] Found approval comment on task ${taskId}: "${text.substring(0, 80)}"`);
         return true;
       }
     }
+    debugLog(`[CodeReview] No approval comment found among ${recentComments.length} comments for task ${taskId}`);
   } catch (err) {
     debugError('[CodeReview] Failed to check approval comments:', err);
   }
@@ -989,6 +1005,24 @@ export function registerCodeReviewHandlers(
     async (_event, projectPath: string, taskId: string, prNumber: number) => {
       try {
         sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Checking PR #${prNumber}...` });
+
+        // Check if developer posted an approval comment — auto-pass if so
+        const approved = await hasApprovalComment(taskId);
+        if (approved) {
+          debugLog(`[CodeReview] Task ${taskId} has developer approval — auto-passing`);
+          sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
+          // Submit the approval
+          const settings = getSettings();
+          const tagName = settings.codeReviewTagName || 'reviewpass';
+          await clickUpProvider.addTag(settings, taskId, tagName);
+          await clickUpProvider.postComment(
+            settings,
+            taskId,
+            `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+          );
+          clearReviewSession(taskId, prNumber);
+          return { success: true, data: { passed: true, findings: [], prTitle: '', prUrl: '', prBranch: '', approved: true } };
+        }
 
         const prInfo = await fetchPRInfo(projectPath, prNumber);
 
