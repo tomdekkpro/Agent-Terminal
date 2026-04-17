@@ -71,6 +71,13 @@ function killAllReviewProcesses(): void {
 /** Approval keywords that a developer can post in a ClickUp comment to override a failed review */
 const APPROVAL_KEYWORDS = ['review:approve', 'review:ok', 'review:approved', 'review:lgtm'];
 
+/** Signature markers that identify comments posted by this bot (must be excluded from approval detection) */
+const BOT_COMMENT_MARKERS = [
+  '_automated review by agent terminal_',
+  '_automated by agent terminal_',
+  '_approved via agent terminal_',
+];
+
 /** Extract plain text from a ClickUp comment (handles both comment_text and rich text comment array) */
 function extractCommentText(comment: any): string {
   // Try comment_text first (plain text field)
@@ -83,6 +90,12 @@ function extractCommentText(comment: any): string {
       .trim();
   }
   return '';
+}
+
+/** True if the comment was posted by this bot (identified by footer signature) */
+function isBotComment(text: string): boolean {
+  const lower = text.toLowerCase();
+  return BOT_COMMENT_MARKERS.some((marker) => lower.includes(marker));
 }
 
 /** Check whether a developer has posted an approval comment on the task (newer than the last review) */
@@ -98,10 +111,16 @@ async function hasApprovalComment(taskId: string): Promise<boolean> {
       .slice(-20);
 
     for (const comment of recentComments) {
-      const text = extractCommentText(comment).toLowerCase().trim();
-      debugLog(`[CodeReview] Checking comment from ${comment.user?.username || 'unknown'}: "${text.substring(0, 100)}"`);
-      if (APPROVAL_KEYWORDS.some((kw) => text.includes(kw))) {
-        debugLog(`[CodeReview] Found approval comment on task ${taskId}: "${text.substring(0, 80)}"`);
+      const text = extractCommentText(comment).trim();
+      // Skip bot's own comments (they contain instructional text mentioning "review:approve")
+      if (isBotComment(text)) {
+        debugLog(`[CodeReview] Skipping bot comment on task ${taskId}`);
+        continue;
+      }
+      const lower = text.toLowerCase();
+      debugLog(`[CodeReview] Checking comment from ${comment.user?.username || 'unknown'}: "${lower.substring(0, 100)}"`);
+      if (APPROVAL_KEYWORDS.some((kw) => lower.includes(kw))) {
+        debugLog(`[CodeReview] Found approval comment on task ${taskId}: "${lower.substring(0, 80)}"`);
         return true;
       }
     }
@@ -818,7 +837,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
           const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
 
           if (result.passed) {
-            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} PASSED`);
           } else {
             allPassed = false;
@@ -1098,7 +1117,7 @@ export function registerCodeReviewHandlers(
           if (!tagResult.success) {
             debugError('[CodeReview] Failed to add tag:', tagResult.error);
           }
-          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
           // Clear the review session — no longer needed
           clearReviewSession(taskId, prNumber);
           debugLog('[CodeReview] Review passed, tag added for task:', taskId);
