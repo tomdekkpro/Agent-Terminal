@@ -342,7 +342,7 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
 }
 
 /** Run AI code review on a PR diff using Claude CLI */
-/** Fetch task context (description + developer comments) for informed review */
+/** Fetch task context (description + all developer comments) for informed review */
 async function fetchTaskContext(taskId: string): Promise<{ description: string; comments: string }> {
   const settings = getSettings();
   let description = '';
@@ -351,20 +351,26 @@ async function fetchTaskContext(taskId: string): Promise<{ description: string; 
   try {
     const taskResult = await clickUpProvider.getTask(settings, taskId);
     if (taskResult.success && taskResult.data) {
-      description = taskResult.data.description || '';
+      // ClickUp sometimes returns description in text_content (plain text) or description (markdown)
+      description = taskResult.data.text_content || taskResult.data.description || '';
     }
   } catch { /* non-critical */ }
 
   try {
     const commentsResult = await clickUpProvider.getComments(settings, taskId);
     if (commentsResult.success && commentsResult.data) {
-      // Collect developer comments (skip automated bot messages, keep last 10)
+      // Include ALL developer comments — filter out only bot-posted messages by signature
       const devComments = commentsResult.data
-        .filter((c: any) => c.user?.id !== -1) // skip ClickBot
-        .slice(-10)
-        .map((c: any) => `[${c.user?.username || 'Unknown'}]: ${c.comment_text || ''}`.trim())
+        .map((c: any) => {
+          const text = extractCommentText(c).trim();
+          if (!text || isBotComment(text)) return null;
+          const user = c.user?.username || 'Unknown';
+          const date = c.date ? new Date(Number(c.date)).toISOString().split('T')[0] : '';
+          return `[${user}${date ? ` · ${date}` : ''}]: ${text}`;
+        })
         .filter(Boolean);
       comments = devComments.join('\n\n');
+      debugLog(`[CodeReview] Task ${taskId} context: ${devComments.length} developer comments, ${description.length} char description`);
     }
   } catch { /* non-critical */ }
 
@@ -526,22 +532,22 @@ async function runAIReview(
     throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
   }
 
-  // Build task context section
+  // Build task context section — give Claude the full picture (generous limits since context is critical)
   let taskSection = '';
   if (taskContext) {
     const parts: string[] = [];
     if (taskContext.taskName) parts.push(`Task: ${taskContext.taskName}`);
     if (taskContext.description) {
-      const desc = taskContext.description.length > 3000
-        ? taskContext.description.substring(0, 3000) + '...'
+      const desc = taskContext.description.length > 10000
+        ? taskContext.description.substring(0, 10000) + '\n...[description truncated]'
         : taskContext.description;
       parts.push(`Task Description / Bug Report:\n${desc}`);
     }
     if (taskContext.comments) {
-      const comm = taskContext.comments.length > 2000
-        ? taskContext.comments.substring(0, 2000) + '...'
+      const comm = taskContext.comments.length > 8000
+        ? taskContext.comments.substring(0, 8000) + '\n...[older comments truncated]'
         : taskContext.comments;
-      parts.push(`Developer Comments:\n${comm}`);
+      parts.push(`Developer Comments (all, chronological):\n${comm}`);
     }
     if (parts.length > 0) {
       taskSection = `\n--- TASK CONTEXT ---\n${parts.join('\n\n')}\n--- END TASK CONTEXT ---\n`;
