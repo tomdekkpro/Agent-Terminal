@@ -71,6 +71,13 @@ function killAllReviewProcesses(): void {
 /** Approval keywords that a developer can post in a ClickUp comment to override a failed review */
 const APPROVAL_KEYWORDS = ['review:approve', 'review:ok', 'review:approved', 'review:lgtm'];
 
+/** Tag that marks a task for manual review — AI auto-review must skip these */
+const MANUAL_REVIEW_TAG = 'manual-review';
+
+function hasManualReviewTag(task: { tags?: Array<{ name: string }> }): boolean {
+  return !!task.tags?.some((t) => t.name.toLowerCase() === MANUAL_REVIEW_TAG);
+}
+
 /** Signature markers that identify comments posted by this bot (must be excluded from approval detection) */
 const BOT_COMMENT_MARKERS = [
   '_automated review by agent terminal_',
@@ -762,6 +769,12 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
         continue;
       }
 
+      // Skip tasks flagged for manual review — the reviewer will handle them by hand
+      if (hasManualReviewTag(task)) {
+        debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — tagged "${MANUAL_REVIEW_TAG}"`);
+        continue;
+      }
+
       // Check if a developer posted an approval comment (e.g. "review:approve")
       const approved = await hasApprovalComment(task.id);
       if (approved) {
@@ -970,12 +983,19 @@ export function registerCodeReviewHandlers(
 
         if (!result.success) return result;
 
-        // Filter out tasks that already have the reviewpass tag
+        // Filter out tasks that already have the reviewpass tag, or are flagged for manual review
         const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();
         const filteredTasks = (result.data || []).filter((task) => {
           const hasTag = task.tags?.some((t) => t.name.toLowerCase() === tagName);
-          if (hasTag) debugLog(`[CodeReview] Skipping task ${task.id} — already has "${tagName}" tag`);
-          return !hasTag;
+          if (hasTag) {
+            debugLog(`[CodeReview] Skipping task ${task.id} — already has "${tagName}" tag`);
+            return false;
+          }
+          if (hasManualReviewTag(task)) {
+            debugLog(`[CodeReview] Skipping task ${task.id} — tagged "${MANUAL_REVIEW_TAG}"`);
+            return false;
+          }
+          return true;
         });
 
         // Resolve PR info for each task (checks description, comments, and branch matching)
