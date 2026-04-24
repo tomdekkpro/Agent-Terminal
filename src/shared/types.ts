@@ -78,7 +78,8 @@ export interface TaskManagerTask {
   name: string;
   description?: string;
   status: { name: string; color: string };
-  priority?: { name: string; color: string };
+  /** ClickUp priority — id: "1" (Urgent) | "2" (High) | "3" (Normal) | "4" (Low). Lower = more important. */
+  priority?: { id?: string; name: string; color: string };
   assignees: Array<{ id: string; username: string; email?: string; initials?: string }>;
   tags: Array<{ name: string; bgColor: string; fgColor: string }>;
   url: string;
@@ -152,6 +153,30 @@ export interface AppSettings {
   codeReviewStatuses: string;
   codeReviewProjectPath: string;
   codeReviewTagName: string;
+  // Kanban filter — persisted assignee id; empty = show all tasks; also gates the auto-fix loop
+  kanbanFilterAssigneeId: string;
+  /** ClickUp status names (comma-separated) that count as backlog candidates — shown in the leftmost column when not yet imported */
+  kanbanBacklogStatuses: string;
+  /** ClickUp list id used to populate the backlog (falls back to clickupListId) */
+  kanbanBacklogListId: string;
+  /** ClickUp status names (comma-separated) that map to the "In Progress" Kanban column */
+  kanbanInProgressStatuses: string;
+  /** How often (in minutes) to auto-refresh ClickUp snapshots for imported tasks. Set to 0 to disable. */
+  kanbanSnapshotIntervalMinutes: number;
+  // Auto-Fix Loop — watches Failed tasks, dispatches fix prompts, pushes, re-requests QC
+  autoFixEnabled: boolean;
+  autoFixMaxIterations: number;
+  autoFixPollIntervalMinutes: number;
+  /** ClickUp status name that triggers the fix loop */
+  autoFixFailedStatus: string;
+  /** ClickUp status to flip the task back to after pushing a fix (so QC re-tests) */
+  autoFixRetestStatus: string;
+  /** Project path used for git worktrees + gh CLI */
+  autoFixProjectPath: string;
+  /** Auto-merge PR when the QC→Done transition happens */
+  autoFixAutoMerge: boolean;
+  /** ClickUp status that signals QC passed and the PR should be merged */
+  autoFixDoneStatus: string;
   /** @deprecated Use defaultAgentProvider */
   defaultCopilotProvider?: AgentProviderId;
   /** @deprecated Use agentModels.copilot */
@@ -473,6 +498,67 @@ export const DEFAULT_PERSONAS: Persona[] = [
   },
 ];
 
+// ─── Kanban Tasks ─────────────────────────────────────────────
+
+/** Local Kanban workflow status — separate from (but influenced by) ClickUp status */
+export type KanbanTaskStatus = 'todo' | 'in-progress' | 'review' | 'failed' | 'done';
+
+export type AutoFixTaskState =
+  | 'idle'
+  | 'fixing'
+  | 'awaiting-qc'
+  | 'escalated'
+  | 'merging'
+  | 'done';
+
+/** Snapshot + working state for a task the user has imported to the Kanban board.
+ *  Source of truth for per-task metadata (session, worktree, auto-fix state).
+ *  The `clickup*` fields are a snapshot refreshed on poll. */
+export interface KanbanTask {
+  id: string;                       // local uuid
+  clickupTaskId: string;            // ClickUp task id
+  clickupCustomId?: string;
+  clickupName: string;
+  clickupStatus: string;            // current ClickUp status name (snapshot)
+  clickupStatusColor?: string;
+  clickupUrl: string;
+  clickupAssignees?: Array<{ id: string; username: string; initials?: string; color?: string }>;
+  clickupPriority?: { name: string; color: string };
+  clickupTags?: Array<{ name: string; bgColor: string; fgColor: string }>;
+  clickupUpdatedAt?: string;
+
+  /** Local project path for worktree + gh CLI */
+  projectPath: string;
+  projectId?: string;               // optional link to project store
+
+  /** Our workflow status */
+  kanbanStatus: KanbanTaskStatus;
+
+  /** Agent session data — persisted across terminal recreation */
+  agentSessionId?: string;
+  agentProvider?: AgentProviderId;
+
+  worktreePath?: string;
+  worktreeBranch?: string;
+  baseBranch?: string;
+
+  /** Auto-fix loop state */
+  autoFixState: AutoFixTaskState;
+  iterationCount: number;
+  lastSeenFailureCommentId: string | null;
+  lastFixActionAt?: string;
+  lastError?: string | null;
+  autoMergeOverride?: boolean | null;
+  autoMergeQueuedAt?: string;
+  /** Per-task override for the auto-fix loop — true = always process, false = skip, null/undefined = follow global toggle */
+  autoFixOverride?: boolean | null;
+
+  prUrl?: string;
+
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Code Review ──────────────────────────────────────────────
 
 export type CodeReviewSeverity = 'critical' | 'major' | 'minor' | 'suggestion';
@@ -675,4 +761,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewStatuses: 'ready for review, in review, review',
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
+  kanbanFilterAssigneeId: '',
+  kanbanBacklogStatuses: 'to do, open, backlog, planning, ready',
+  kanbanBacklogListId: '',
+  kanbanInProgressStatuses: 'in progress, in development, developing, working',
+  kanbanSnapshotIntervalMinutes: 5,
+  autoFixEnabled: false,
+  autoFixMaxIterations: 3,
+  autoFixPollIntervalMinutes: 30,
+  autoFixFailedStatus: 'failed',
+  autoFixRetestStatus: 'qc',
+  autoFixProjectPath: '',
+  autoFixAutoMerge: false,
+  autoFixDoneStatus: 'done',
 };

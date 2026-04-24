@@ -60,11 +60,34 @@ export function useGlobalTerminalListeners() {
       );
     }
 
+    // When an agent session id is captured, also write it back to the matching
+    // KanbanTask (if any) so sessions survive terminal removal, AND bump the
+    // kanbanStatus from "todo" to "in-progress" on first agent run.
+    const syncKanbanSession = (terminalId: string, sessionId: string) => {
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === terminalId);
+      const clickupTaskId = terminal?.task?.id;
+      if (!clickupTaskId) return;
+      window.electronAPI.kanbanList?.().then((result: any) => {
+        if (!result?.success || !Array.isArray(result.data)) return;
+        const match = result.data.find((k: any) => k.clickupTaskId === clickupTaskId);
+        if (!match) return;
+        const patch: Record<string, unknown> = { agentSessionId: sessionId };
+        if (terminal?.agentProvider) patch.agentProvider = terminal.agentProvider;
+        if (terminal?.worktreePath) patch.worktreePath = terminal.worktreePath;
+        if (terminal?.worktreeBranch) patch.worktreeBranch = terminal.worktreeBranch;
+        // Agent is running → the task is in active work. Only advance from
+        // "todo" so we don't drag cards back from review/failed/done.
+        if (match.kanbanStatus === 'todo') patch.kanbanStatus = 'in-progress';
+        window.electronAPI.kanbanUpdate?.(match.id, patch);
+      }).catch(() => { /* non-critical */ });
+    };
+
     // Listen for agent session ID detection (generic)
     if (window.electronAPI.onTerminalAgentSession) {
       cleanups.push(
         window.electronAPI.onTerminalAgentSession((id, sessionId) => {
           updateTerminal(id, { agentSessionId: sessionId });
+          syncKanbanSession(id, sessionId);
         })
       );
     }
@@ -79,6 +102,7 @@ export function useGlobalTerminalListeners() {
     cleanups.push(
       window.electronAPI.onTerminalClaudeSession((id, sessionId) => {
         updateTerminal(id, { agentSessionId: sessionId });
+        syncKanbanSession(id, sessionId);
       })
     );
 

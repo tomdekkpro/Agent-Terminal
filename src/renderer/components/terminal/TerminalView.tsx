@@ -7,6 +7,7 @@ import {
   Filter, Loader2, GripVertical, MessageSquare, CheckCircle2, Zap, GitBranchPlus, FolderOpen,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
+import { useKanbanStore } from '../../stores/kanban-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
@@ -1372,6 +1373,19 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         rows: 24,
       });
 
+      // Ensure a KanbanTask exists for this ClickUp task — idempotent on the
+      // main side, so repeated calls just refresh the snapshot. Means every
+      // terminal with a task shows up on the Kanban board.
+      if (task && activeProject?.path) {
+        try {
+          await useKanbanStore.getState().importTask({
+            clickupTask: task,
+            projectPath: activeProject.path,
+            projectId: activeProject.id,
+          });
+        } catch { /* non-critical */ }
+      }
+
       // Task context is available but not auto-sent — user inputs manually
     },
     [activeProject]
@@ -1423,6 +1437,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           }
         }
       } catch { /* non-critical */ }
+
+      // Mirror the link into the Kanban board — idempotent on the main side
+      if (activeProject?.path) {
+        try {
+          await useKanbanStore.getState().importTask({
+            clickupTask: task,
+            projectPath: activeProject.path,
+            projectId: activeProject.id,
+          });
+        } catch { /* non-critical */ }
+      }
     },
     [activeProject]
   );
@@ -1469,6 +1494,79 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     window.addEventListener('agent-terminal:new-terminal', handler);
     return () => window.removeEventListener('agent-terminal:new-terminal', handler);
   }, [handleNewTerminal]);
+
+  // Listen for Kanban card clicks — create (or reuse) a terminal with the task
+  useEffect(() => {
+    const handler = async (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+
+      // Already have a terminal for this ClickUp task? Focus it.
+      const existing = useTerminalStore
+        .getState()
+        .terminals.find((t) => t.task?.id === detail.clickupTaskId);
+      if (existing) {
+        useTerminalStore.getState().setActiveTerminal(existing.id);
+        return;
+      }
+
+      if (!canAddTerminal()) return;
+      const kanbanProjectId = detail.projectId || projectId;
+      const kanbanProjectPath = detail.projectPath || activeProject?.path;
+      const terminal = addTerminal(kanbanProjectPath, kanbanProjectId);
+      if (!terminal) return;
+
+      // Build a TaskManagerTask-shaped payload from the KanbanTask snapshot
+      const taskForSetup: TaskManagerTask = {
+        id: detail.clickupTaskId,
+        customId: detail.clickupCustomId,
+        name: detail.clickupName,
+        status: { name: detail.clickupStatus, color: detail.clickupStatusColor || '#888' },
+        priority: detail.clickupPriority,
+        assignees: (detail.clickupAssignees || []).map((a: any) => ({
+          id: a.id,
+          username: a.username,
+          initials: a.initials,
+        })),
+        tags: detail.clickupTags || [],
+        url: detail.clickupUrl,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+        providerTaskId: detail.clickupTaskId,
+        provider: 'clickup',
+      };
+
+      await setupTerminalWithTask(terminal, taskForSetup, true);
+
+      // Carry over session + agent provider from the KanbanTask if we have them
+      const patch: Partial<typeof terminal> = {};
+      if (detail.agentSessionId) patch.agentSessionId = detail.agentSessionId;
+      if (detail.agentProvider) patch.agentProvider = detail.agentProvider;
+      if (Object.keys(patch).length > 0) {
+        useTerminalStore.getState().updateTerminal(terminal.id, patch);
+      }
+
+      // If there's a stored session, resume the agent right away
+      if (detail.agentSessionId) {
+        const agentId = detail.agentProvider || 'claude';
+        const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
+        try {
+          await window.electronAPI.resumeAgent(terminal.id, agentId, {
+            sessionId: detail.agentSessionId,
+            cwd,
+          });
+          useTerminalStore.getState().updateTerminal(terminal.id, {
+            isClaudeMode: true,
+            status: 'claude-active',
+          });
+        } catch {
+          /* Resume failed — terminal stays in idle shell mode, user can start manually */
+        }
+      }
+    };
+    window.addEventListener('agent-terminal:open-kanban-task', handler as EventListener);
+    return () => window.removeEventListener('agent-terminal:open-kanban-task', handler as EventListener);
+  }, [canAddTerminal, addTerminal, setupTerminalWithTask, activeProject, projectId]);
 
   const handleNewSplit = useCallback(() => {
     if (!canAddTerminal()) return;

@@ -74,6 +74,8 @@ const electronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_TIME_ENTRY, taskId, startMs, durationMs, description),
   getTaskTimeEntries: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TIME_ENTRIES, taskId),
   getTaskStatuses: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK_STATUSES, taskId),
+  getListStatuses: (listId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_LIST_STATUSES, listId),
+  getTaskManagerMembers: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_MEMBERS),
 
   // Usage Monitor
   requestUsageUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.USAGE_REQUEST),
@@ -266,6 +268,33 @@ const electronAPI = {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on(IPC_CHANNELS.CODE_REVIEW_EVENT, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.CODE_REVIEW_EVENT, handler);
+  },
+
+  // Kanban Tasks
+  kanbanList: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_LIST),
+  kanbanGet: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_GET, id),
+  kanbanImport: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_IMPORT, input),
+  kanbanUpdate: (id: string, patch: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_UPDATE, id, patch),
+  kanbanDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DELETE, id),
+  kanbanRefreshClickup: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP),
+  onKanbanEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.KANBAN_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.KANBAN_EVENT, handler);
+  },
+
+  // Auto-Fix Loop
+  autoFixStatus: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_STATUS),
+  autoFixStart: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_START),
+  autoFixStop: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_STOP),
+  autoFixRunNow: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_RUN_NOW),
+  autoFixRequeue: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_REQUEUE, taskId),
+  autoFixSetTaskAutoMerge: (taskId: string, override: boolean | null) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_SET_TASK_AUTOMERGE, taskId, override),
+  onAutoFixEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.AUTO_FIX_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.AUTO_FIX_EVENT, handler);
   },
 
   // Claude Sessions Browser

@@ -44,4 +44,17 @@ export interface ITaskManagerProvider {
   getComments?(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>>;
 
   getTaskStatuses?(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
+
+  getListStatuses?(settings: AppSettings, listId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
+
+  getWorkspaceMembers?(settings: AppSettings): Promise<ProviderResult<WorkspaceMember[]>>;
+}
+
+export interface WorkspaceMember {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
 }

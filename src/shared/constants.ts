@@ -39,6 +39,8 @@ export const IPC_CHANNELS = {
   TASK_MANAGER_ADD_TAG: 'task-manager:add-tag',
   TASK_MANAGER_REMOVE_TAG: 'task-manager:remove-tag',
   TASK_MANAGER_GET_TASK_STATUSES: 'task-manager:get-task-statuses',
+  TASK_MANAGER_GET_LIST_STATUSES: 'task-manager:get-list-statuses',
+  TASK_MANAGER_GET_MEMBERS: 'task-manager:get-members',
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
@@ -139,6 +141,22 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_STOP_ALL: 'code-review:stop-all',
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
   CODE_REVIEW_FORCE_APPROVE: 'code-review:force-approve',
+  // Kanban Tasks (local task records)
+  KANBAN_LIST: 'kanban:list',
+  KANBAN_GET: 'kanban:get',
+  KANBAN_IMPORT: 'kanban:import',
+  KANBAN_UPDATE: 'kanban:update',
+  KANBAN_DELETE: 'kanban:delete',
+  KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',
+  KANBAN_EVENT: 'kanban:event',
+  // Auto-Fix Loop
+  AUTO_FIX_STATUS: 'auto-fix:status',
+  AUTO_FIX_START: 'auto-fix:start',
+  AUTO_FIX_STOP: 'auto-fix:stop',
+  AUTO_FIX_RUN_NOW: 'auto-fix:run-now',
+  AUTO_FIX_REQUEUE: 'auto-fix:requeue',
+  AUTO_FIX_SET_TASK_AUTOMERGE: 'auto-fix:set-task-automerge',
+  AUTO_FIX_EVENT: 'auto-fix:event',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
   // Dev Server

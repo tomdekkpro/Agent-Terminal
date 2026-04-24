@@ -8,14 +8,16 @@ import { useGlobalTerminalListeners } from './hooks/useGlobalTerminalListeners';
 import { useProjectStore } from './stores/project-store';
 import { useSettingsStore } from './stores/settings-store';
 import { useTerminalStore } from './stores/terminal-store';
+import { useKanbanStore } from './stores/kanban-store';
 import { InsightsView } from './components/insights';
 import { QCView } from './components/qc';
 import { CodeReviewView } from './components/code-review';
+import { KanbanView } from './components/kanban';
 import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
 
-export type ViewType = 'terminals' | 'tasks' | 'qc' | 'insights' | 'code-review' | 'settings';
+export type ViewType = 'terminals' | 'tasks' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewType>('terminals');
@@ -46,6 +48,7 @@ export default function App() {
     const viewKeys: Record<string, ViewType> = {
       t: 'terminals',
       k: 'tasks',
+      b: 'kanban',
       q: 'qc',
       i: 'insights',
       r: 'code-review',
@@ -88,11 +91,74 @@ export default function App() {
   }, [openProjectIds, tabOrder, setActiveProject]);
 
   useEffect(() => {
-    loadProjects();
-    loadSettings();
-    // Load saved terminals into store with needsRestore flag
-    // (PTYs are NOT created yet — each terminal shows a restore banner)
-    restoreState();
+    let cancelled = false;
+    let snapshotTimer: ReturnType<typeof setInterval> | null = null;
+
+    (async () => {
+      await Promise.all([
+        loadProjects(),
+        loadSettings(),
+        // Load saved terminals into store with needsRestore flag
+        // (PTYs are NOT created yet — each terminal shows a restore banner)
+        restoreState(),
+        useKanbanStore.getState().loadTasks(),
+      ]);
+      if (cancelled) return;
+
+      // One-shot migration: any task-linked terminal without a KanbanTask gets
+      // imported to the board so the Kanban and Terminals views stay in sync.
+      try {
+        const migrated = await useKanbanStore.getState().migrateOrphanTerminals();
+        if (migrated > 0) {
+          // eslint-disable-next-line no-console
+          console.log(`[Kanban] Migrated ${migrated} orphan task-linked terminal(s) to the Kanban board`);
+        }
+      } catch { /* non-critical */ }
+
+      // Boot-time ClickUp snapshot refresh so statuses are current when the
+      // user first opens the Kanban view.
+      try {
+        await useKanbanStore.getState().refreshClickupSnapshots();
+      } catch { /* non-critical */ }
+
+      if (cancelled) return;
+
+      // Start the periodic snapshot refresh. Runs independent of the auto-fix
+      // orchestrator so the board stays fresh even when auto-fix is disabled.
+      const scheduleRefresh = () => {
+        const intervalMinutes = useSettingsStore.getState().settings.kanbanSnapshotIntervalMinutes ?? 5;
+        if (snapshotTimer) {
+          clearInterval(snapshotTimer);
+          snapshotTimer = null;
+        }
+        if (!intervalMinutes || intervalMinutes <= 0) return;
+        const ms = intervalMinutes * 60_000;
+        snapshotTimer = setInterval(() => {
+          const settings = useSettingsStore.getState().settings;
+          if (settings.taskManagerProvider !== 'clickup') return;
+          if (useKanbanStore.getState().tasks.length === 0) return; // nothing to refresh
+          void useKanbanStore.getState().refreshClickupSnapshots();
+        }, ms);
+      };
+      scheduleRefresh();
+
+      // Re-schedule if the interval setting changes
+      const unsub = useSettingsStore.subscribe((s, prev) => {
+        if (s.settings.kanbanSnapshotIntervalMinutes !== prev.settings.kanbanSnapshotIntervalMinutes) {
+          scheduleRefresh();
+        }
+      });
+
+      if (cancelled) {
+        unsub();
+        if (snapshotTimer) clearInterval(snapshotTimer);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (snapshotTimer) clearInterval(snapshotTimer);
+    };
   }, [loadProjects, loadSettings, restoreState]);
 
   return (
@@ -107,6 +173,7 @@ export default function App() {
           </>
         )}
         {activeView === 'tasks' && <TasksView onNavigateToTerminal={() => setActiveView('terminals')} />}
+        {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
         {activeView === 'qc' && <QCView />}
         {activeView === 'insights' && <InsightsView />}
         {activeView === 'code-review' && <CodeReviewView />}
