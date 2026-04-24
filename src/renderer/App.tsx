@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { Sidebar } from './components/layout/Sidebar';
 import { ProjectTabBar } from './components/layout/ProjectTabBar';
 import { TerminalView } from './components/terminal/TerminalView';
-import { TasksView } from './components/tasks';
 import { SettingsView } from './components/settings/SettingsView';
 import { useGlobalTerminalListeners } from './hooks/useGlobalTerminalListeners';
 import { useProjectStore } from './stores/project-store';
@@ -17,7 +16,7 @@ import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
 
-export type ViewType = 'terminals' | 'tasks' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
+export type ViewType = 'terminals' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewType>('terminals');
@@ -47,8 +46,7 @@ export default function App() {
   useEffect(() => {
     const viewKeys: Record<string, ViewType> = {
       t: 'terminals',
-      k: 'tasks',
-      b: 'kanban',
+      k: 'kanban',
       q: 'qc',
       i: 'insights',
       r: 'code-review',
@@ -172,7 +170,6 @@ export default function App() {
             <DevServerLogPanel />
           </>
         )}
-        {activeView === 'tasks' && <TasksView onNavigateToTerminal={() => setActiveView('terminals')} />}
         {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
         {activeView === 'qc' && <QCView />}
         {activeView === 'insights' && <InsightsView />}
