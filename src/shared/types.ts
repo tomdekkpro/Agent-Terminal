@@ -25,6 +25,12 @@ export interface AgentInvokeOptions {
   sessionId?: string;
   task?: string;
   env?: Record<string, string>;
+  /** Pass-through to Claude's `-w/--worktree <name>` flag.
+   *  Claude creates / reuses a worktree at `<repo>/.claude/worktrees/<name>`
+   *  with branch `worktree-<name>`. When set, the CLI is run from the
+   *  project root (not the worktree path) — Claude handles the cd internally
+   *  and resume works across worktrees of the same repo. */
+  worktreeName?: string;
 }
 
 export interface AgentSettingsField {

@@ -31,7 +31,13 @@ function copyClaudeConfig(projectPath: string, worktreeDir: string): void {
 
     const destDir = join(worktreeDir, '.claude');
     mkdirSync(destDir, { recursive: true });
-    cpSync(srcDir, destDir, { recursive: true });
+    // Exclude .claude/worktrees/ — the new worktree convention places
+    // the worktree dir INSIDE this path, so a recursive copy would
+    // nest it inside itself.
+    cpSync(srcDir, destDir, {
+      recursive: true,
+      filter: (s) => !s.replace(/\\/g, '/').includes('/.claude/worktrees'),
+    });
     debugLog('[Git] Copied .claude/ config to worktree');
   } catch (err) {
     debugError('[Git] Failed to copy .claude/ config:', err);
@@ -79,8 +85,11 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         }
 
         const safeName = sanitize(taskId);
-        const worktreeDir = join(projectPath, '.task-worktrees', safeName);
-        const branch = `task/${safeName}`;
+        // Use Claude's native worktree convention so `claude --worktree <name>`
+        // reuses the same dir + branch we create. See:
+        //   <repo>/.claude/worktrees/<name>  with branch  worktree-<name>
+        const worktreeDir = join(projectPath, '.claude', 'worktrees', safeName);
+        const branch = `worktree-${safeName}`;
 
         // Already exists — reuse
         if (existsSync(worktreeDir)) {
@@ -93,8 +102,8 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           await gitExec('git worktree prune', projectPath, 5000);
         } catch { /* non-critical */ }
 
-        // Add .task-worktrees/ to .gitignore
-        ensureGitignore(projectPath, '.task-worktrees/');
+        // .claude/ is already gitignored in most projects, but ensure it
+        ensureGitignore(projectPath, '.claude/');
 
         // Try creating with new branch
         try {

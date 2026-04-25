@@ -135,61 +135,58 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           return;
         }
 
-        let cwd = project.path;
         const title = `${task.clickupCustomId || task.clickupTaskId} · ${task.clickupName.slice(0, 40)}`;
-        const sanitized = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+        const worktreeName = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
         const sep = project.path.includes('\\') ? '\\' : '/';
-        const computedWorktreePath = `${project.path}${sep}.task-worktrees${sep}${sanitized}`;
 
-        // Probe candidate cwds in priority order to find where Claude actually
-        // stored this session. agentCwd (set in v1.13.1+) is most accurate;
-        // worktreePath / projectPath cover legacy tasks. Whichever location
-        // holds the conversation file wins — that's where we resume from.
-        const resolved = await resolveSessionCwd(
+        // Native --worktree convention: Claude creates / reuses a worktree at
+        // <repo>/.claude/worktrees/<name> with branch worktree-<name>. We run
+        // the CLI from the project root and pass --worktree <name>; Claude
+        // handles the cd internally and resume works across worktrees.
+        const expectedWorktreePath = `${project.path}${sep}.claude${sep}worktrees${sep}${worktreeName}`;
+        const expectedBranch = `worktree-${worktreeName}`;
+
+        // Pre-create the worktree so we can do git ops (status, push, PR)
+        // against it before / between Claude runs. createTaskWorktree is
+        // idempotent — reuses if path + branch already match.
+        let worktreePath = expectedWorktreePath;
+        let worktreeBranch = expectedBranch;
+        try {
+          const wt = await window.electronAPI.createTaskWorktree(project.path, worktreeName);
+          if (wt?.success && wt.data) {
+            worktreePath = wt.data;
+            if (wt.branch) worktreeBranch = wt.branch;
+          }
+        } catch { /* non-critical — claude --worktree will create it */ }
+
+        // Legacy probe — for tasks whose session was stored under the OLD
+        // `.task-worktrees/<id>` layout (pre-v1.14.0). Resume those in their
+        // original cwd via `cd && claude --resume` (no --worktree flag).
+        const legacyWorktreePath = `${project.path}${sep}.task-worktrees${sep}${worktreeName}`;
+        const legacyResolved = await resolveSessionCwd(
           task.agentSessionId,
           buildSessionCandidates({
             agentCwd: task.agentCwd,
             worktreePath: task.worktreePath,
-            computedWorktreePath,
+            computedWorktreePath: legacyWorktreePath,
             projectPath: project.path,
           }),
         );
+        const useLegacyResume = !!legacyResolved
+          && legacyResolved.cwd !== worktreePath
+          && legacyResolved.cwd !== expectedWorktreePath;
 
-        if (resolved) {
-          cwd = resolved.cwd;
-          const patch: Partial<Terminal> = {
-            task: toTerminalTask(task),
-            cwd,
-            title,
-          };
-          if (resolved.isWorktree) {
-            patch.worktreePath = resolved.cwd;
-            if (task.worktreeBranch) patch.worktreeBranch = task.worktreeBranch;
-          }
-          updateTerminal(terminal.id, patch);
-        } else {
-          // No findable session — fall back to creating/reusing a worktree
-          try {
-            const wt = await window.electronAPI.createTaskWorktree(project.path, sanitized);
-            if (wt?.success && wt.data) {
-              cwd = wt.data;
-              updateTerminal(terminal.id, {
-                task: toTerminalTask(task),
-                cwd,
-                worktreePath: wt.data,
-                worktreeBranch: wt.branch,
-                title,
-              });
-            } else {
-              updateTerminal(terminal.id, {
-                task: toTerminalTask(task),
-                title,
-              });
-            }
-          } catch {
-            updateTerminal(terminal.id, { task: toTerminalTask(task) });
-          }
-        }
+        const cwd = useLegacyResume ? legacyResolved!.cwd : project.path;
+
+        updateTerminal(terminal.id, {
+          task: toTerminalTask(task),
+          cwd,
+          worktreePath: useLegacyResume && legacyResolved!.isWorktree ? legacyResolved!.cwd : worktreePath,
+          worktreeBranch: useLegacyResume && legacyResolved!.isWorktree && task.worktreeBranch
+            ? task.worktreeBranch
+            : worktreeBranch,
+          title,
+        } as Partial<Terminal>);
 
         // Base branch
         try {
@@ -199,7 +196,9 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
         } catch { /* non-critical */ }
 
-        // Create PTY
+        // Create PTY at project root (Claude itself cds into the worktree
+        // when --worktree is passed). For legacy resume, PTY opens at the
+        // legacy worktree path so `cd && claude --resume` finds the session.
         await window.electronAPI.createTerminal({
           id: terminal.id,
           cwd,
@@ -207,11 +206,10 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           rows: 24,
         });
 
-        // Resume the stored agent session — only if the conversation file is
-        // actually findable from the cwd we're about to run from. Otherwise
-        // leave the terminal idle so the user can start a fresh session
-        // instead of seeing "No conversation found with session id".
-        if (task.agentSessionId && resolved) {
+        // Resume the stored agent session if we have one. Native --worktree
+        // path: claude finds the session itself. Legacy path: rely on cd
+        // matching the old encoded project dir.
+        if (task.agentSessionId) {
           const agentId: AgentProviderId = task.agentProvider || 'claude';
           updateTerminal(terminal.id, {
             agentSessionId: task.agentSessionId,
@@ -223,9 +221,9 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             await window.electronAPI.resumeAgent(terminal.id, agentId, {
               sessionId: task.agentSessionId,
               cwd,
+              worktreeName: useLegacyResume ? undefined : worktreeName,
             });
           } catch {
-            // Resume failed — drop back to idle shell so user can try starting manually
             updateTerminal(terminal.id, { isClaudeMode: false, status: 'idle' });
           }
         }
@@ -257,10 +255,17 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     const agentId = terminal.agentProvider;
     const project = projects.find((p) => p.id === terminal.projectId);
     const model = project?.agentModel || settings.agentModels?.[agentId] || undefined;
+    // Pass --worktree <id> when this terminal is bound to a task so Claude
+    // creates / reuses <repo>/.claude/worktrees/<id>. Skip for non-Claude
+    // providers since the flag is Claude-specific.
+    const worktreeName = terminal.task && agentId === 'claude'
+      ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+      : undefined;
     const result = await window.electronAPI.invokeAgent(terminal.id, agentId, {
       cwd: project?.path || terminal.cwd,
       skipPermissions,
       model,
+      worktreeName,
     });
     if (result.success) {
       useTerminalStore.getState().setClaudeMode(terminal.id, true);

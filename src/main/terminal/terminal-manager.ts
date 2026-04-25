@@ -221,10 +221,16 @@ export class TerminalManager {
     terminal.agentCwd = dir;
     terminal.claudeCwd = dir;
 
-    // Claude-specific: snapshot sessions for detection
+    // Claude --worktree: the session file lands in the worktree's encoded
+    // dir, not the cwd's. Compute the storage dir accordingly so detection
+    // polls the right location.
+    const sessionStorageDir = agentId === 'claude' && options.worktreeName
+      ? join(dir, '.claude', 'worktrees', options.worktreeName)
+      : dir;
+
     let preSnapshot: Map<string, number> | undefined;
     if (agentId === 'claude') {
-      const claudeDir = getClaudeProjectDir(dir);
+      const claudeDir = getClaudeProjectDir(sessionStorageDir);
       preSnapshot = getSessionSnapshot(claudeDir);
     }
 
@@ -245,7 +251,7 @@ export class TerminalManager {
 
     // Claude session detection (filesystem-based)
     if (agentId === 'claude' && preSnapshot) {
-      const claudeDir = getClaudeProjectDir(dir);
+      const claudeDir = getClaudeProjectDir(sessionStorageDir);
       this.detectAgentSession(terminal, claudeDir, preSnapshot);
     }
 

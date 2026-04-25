@@ -49,6 +49,7 @@ export class ClaudeAgentProvider implements IAgentProvider {
 
   buildInvokeCommand(options: AgentInvokeOptions): string {
     let cmd = this.command;
+    if (options.worktreeName) cmd += ` --worktree "${options.worktreeName}"`;
     if (options.skipPermissions) cmd += ' --dangerously-skip-permissions';
     if (options.model) cmd += ` --model ${options.model}`;
     return cmd;
@@ -56,6 +57,7 @@ export class ClaudeAgentProvider implements IAgentProvider {
 
   buildResumeCommand(options: AgentInvokeOptions): string {
     let cmd = this.command;
+    if (options.worktreeName) cmd += ` --worktree "${options.worktreeName}"`;
     if (options.sessionId) {
       cmd += ` --resume "${options.sessionId}"`;
     } else {

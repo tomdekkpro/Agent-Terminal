@@ -1334,15 +1334,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             worktreeBranch: cwdOverride.worktreeBranch,
           });
         } else if (useWorktree && activeProject?.path) {
-          // Create git worktree for task isolation
+          // Pre-create the worktree using Claude's native convention so
+          // <repo>/.claude/worktrees/<id> exists for git ops (status, push,
+          // PR). The terminal stays at the project root and `claude
+          // --worktree <id>` will reuse this worktree on launch.
           const taskSlug = task.customId || task.id;
           const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug);
           if (result.success && result.data) {
-            cwd = result.data;
             useTerminalStore.getState().updateTerminal(terminal.id, {
               title,
               task: terminalTask,
-              cwd,
+              cwd, // project path — Claude handles cd into the worktree
               worktreePath: result.data,
               worktreeBranch: result.branch,
             });
@@ -1553,28 +1555,32 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         provider: 'clickup',
       };
 
-      // Probe candidate cwds in priority order to find where Claude actually
-      // stored the session. Handles both v1.13.1+ tasks (with agentCwd) and
-      // legacy ones (worktreePath / projectPath only).
       const projectPath = detail.projectPath || activeProject?.path || '';
-      const sanitizedTaskId = (detail.clickupCustomId || detail.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+      const worktreeName = (detail.clickupCustomId || detail.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
       const sep = projectPath.includes('\\') ? '\\' : '/';
-      const computedWorktreePath = projectPath ? `${projectPath}${sep}.task-worktrees${sep}${sanitizedTaskId}` : '';
-      const resolved = await resolveSessionCwd(
+      // Legacy probe — for sessions stored under the OLD `.task-worktrees/<id>`
+      // layout (pre-v1.14.0). If we find one, resume in its original cwd
+      // without --worktree (cd handles the encoded-path lookup).
+      const legacyWorktreePath = projectPath ? `${projectPath}${sep}.task-worktrees${sep}${worktreeName}` : '';
+      const newWorktreePath = projectPath ? `${projectPath}${sep}.claude${sep}worktrees${sep}${worktreeName}` : '';
+      const legacyResolved = await resolveSessionCwd(
         detail.agentSessionId,
         buildSessionCandidates({
           agentCwd: detail.agentCwd,
           worktreePath: detail.worktreePath,
-          computedWorktreePath: computedWorktreePath || undefined,
+          computedWorktreePath: legacyWorktreePath || undefined,
           projectPath: projectPath || undefined,
         }),
       );
+      const useLegacyResume = !!legacyResolved
+        && legacyResolved.cwd !== newWorktreePath
+        && legacyResolved.cwd !== projectPath;
 
-      if (resolved) {
+      if (useLegacyResume) {
         await setupTerminalWithTask(terminal, taskForSetup, false, {
-          cwd: resolved.cwd,
-          worktreePath: resolved.isWorktree ? resolved.cwd : undefined,
-          worktreeBranch: resolved.isWorktree ? detail.worktreeBranch : undefined,
+          cwd: legacyResolved!.cwd,
+          worktreePath: legacyResolved!.isWorktree ? legacyResolved!.cwd : undefined,
+          worktreeBranch: legacyResolved!.isWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
         await setupTerminalWithTask(terminal, taskForSetup, true);
@@ -1588,16 +1594,16 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         useTerminalStore.getState().updateTerminal(terminal.id, patch);
       }
 
-      // Resume the agent only if the session is actually findable from the cwd
-      // we're about to run from. Otherwise leave the terminal idle so the user
-      // can start a fresh session instead of seeing the not-found error.
-      if (detail.agentSessionId && resolved) {
+      // Resume the agent. With --worktree, claude finds the session itself;
+      // legacy path relies on cd-into-old-worktree.
+      if (detail.agentSessionId) {
         const agentId = detail.agentProvider || 'claude';
         const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
         try {
           await window.electronAPI.resumeAgent(terminal.id, agentId, {
             sessionId: detail.agentSessionId,
             cwd,
+            worktreeName: useLegacyResume ? undefined : worktreeName,
           });
           useTerminalStore.getState().updateTerminal(terminal.id, {
             isClaudeMode: true,
@@ -1670,10 +1676,16 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     const settings = useSettingsStore.getState().settings;
     // Project model override > app-wide model
     const model = activeProject?.agentModel || settings.agentModels?.[agentId] || undefined;
+    // Pass --worktree <id> for task terminals so Claude isolates the work
+    // in its own worktree (Claude-specific flag).
+    const worktreeName = terminal.task && agentId === 'claude'
+      ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+      : undefined;
     const result = await window.electronAPI.invokeAgent(id, agentId, {
       cwd: activeProject?.path,
       skipPermissions,
       model,
+      worktreeName,
     });
     if (result.success) {
       useTerminalStore.getState().setClaudeMode(id, true);

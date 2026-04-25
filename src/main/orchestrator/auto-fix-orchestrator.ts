@@ -437,8 +437,10 @@ class AutoFixOrchestrator {
     // 2. Begin fixing
     const iteration = (task.iterationCount || 0) + 1;
     const safeId = sanitizeTaskId(task.clickupCustomId || task.clickupTaskId);
-    const worktreeDir = join(projectPath, '.task-worktrees', safeId);
-    const branch = `task/${safeId}`;
+    // Use Claude's native worktree convention so a `claude --worktree <id>`
+    // run anywhere reuses this same dir + branch.
+    const worktreeDir = join(projectPath, '.claude', 'worktrees', safeId);
+    const branch = `worktree-${safeId}`;
 
     this.patch(task.id, {
       autoFixState: 'fixing',
@@ -595,7 +597,7 @@ ${priorSection}
 
     try { await runCmd('git worktree prune', projectPath, 5_000); } catch { /* noop */ }
 
-    mkdirSync(join(projectPath, '.task-worktrees'), { recursive: true });
+    mkdirSync(join(projectPath, '.claude', 'worktrees'), { recursive: true });
 
     try {
       await runCmd(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
@@ -609,7 +611,13 @@ ${priorSection}
       if (existsSync(src)) {
         const dest = join(worktreeDir, '.claude');
         mkdirSync(dest, { recursive: true });
-        cpSync(src, dest, { recursive: true });
+        // Exclude .claude/worktrees/ from the copy — the worktree dir IS
+        // inside that path and copying recursively would nest it inside
+        // itself. We only need the config (settings, skills, plugins, etc).
+        cpSync(src, dest, {
+          recursive: true,
+          filter: (s) => !s.replace(/\\/g, '/').includes('/.claude/worktrees'),
+        });
       }
     } catch { /* non-critical */ }
   }

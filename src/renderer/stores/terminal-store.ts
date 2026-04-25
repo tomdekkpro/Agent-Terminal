@@ -685,42 +685,57 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // Auto-resume agent session if it was an agent terminal
       if (isAgentTerminal) {
         const agentId = terminal.agentProvider || 'claude';
-        // Probe candidate cwds for the actual session location. The persisted
-        // cwd may be a worktree path while the original Claude conversation
-        // lives at the project root (or vice versa) — resume from whichever
-        // location actually holds the session file.
         const project = terminal.projectId
           ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
           : undefined;
-        const resolved = await resolveSessionCwd(
-          terminal.agentSessionId,
-          buildSessionCandidates({
-            agentCwd: terminal.claudeCwd,
-            currentCwd: terminal.cwd,
-            worktreePath: terminal.worktreePath,
-            projectPath: project?.path,
-          }),
-        );
-        // If we found the session somewhere other than the persisted cwd,
-        // update the terminal record so future restores find it directly.
-        if (resolved && resolved.cwd !== terminal.cwd) {
+
+        // Native worktree path — Claude finds the session itself when given
+        // --worktree <name>. Skip the cwd probe in that case.
+        const taskWorktreeName = terminal.task && agentId === 'claude'
+          ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+          : undefined;
+
+        // Legacy probe — for sessions still living under .task-worktrees/<id>
+        // or some other historical cwd. If the session file is locatable
+        // from a candidate cwd, resume there with `cd && claude --resume`.
+        const legacyResolved = taskWorktreeName
+          ? null
+          : await resolveSessionCwd(
+              terminal.agentSessionId,
+              buildSessionCandidates({
+                agentCwd: terminal.claudeCwd,
+                currentCwd: terminal.cwd,
+                worktreePath: terminal.worktreePath,
+                projectPath: project?.path,
+              }),
+            );
+
+        if (legacyResolved && legacyResolved.cwd !== terminal.cwd) {
           set((state) => ({
             terminals: state.terminals.map((t) =>
-              t.id === id ? { ...t, cwd: resolved.cwd, claudeCwd: resolved.cwd } : t
+              t.id === id ? { ...t, cwd: legacyResolved.cwd, claudeCwd: legacyResolved.cwd } : t
             ),
           }));
         }
-        const resumeCwd = resolved?.cwd || terminal.claudeCwd || terminal.cwd;
-        // If we have a session id but couldn't locate the conversation file,
-        // skip --resume so the user lands in idle shell instead of the
-        // "No conversation found" error from the CLI.
-        const resumeOptions = resolved || !terminal.agentSessionId
+
+        // Compose resume options:
+        // - Native: project root cwd + worktreeName (Claude resolves session)
+        // - Legacy resolved: cd into the resolved path, no --worktree
+        // - Legacy unresolved: skip --resume so user lands in idle shell
+        const resumeOptions = taskWorktreeName
           ? {
               sessionId: terminal.agentSessionId,
-              cwd: resumeCwd,
+              cwd: project?.path || terminal.cwd,
               skipPermissions: terminal.skipPermissions,
+              worktreeName: taskWorktreeName,
             }
-          : null;
+          : legacyResolved || !terminal.agentSessionId
+            ? {
+                sessionId: terminal.agentSessionId,
+                cwd: legacyResolved?.cwd || terminal.claudeCwd || terminal.cwd,
+                skipPermissions: terminal.skipPermissions,
+              }
+            : null;
         try {
           if (!resumeOptions) {
             // No session findable — drop back to idle so the user can start fresh
@@ -765,24 +780,29 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
 
     try {
       const agentId = terminal.agentProvider || 'claude';
-      // Probe candidate cwds so we resume from where Claude actually stored
-      // the conversation, not just the persisted terminal cwd.
       const project = terminal.projectId
         ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
         : undefined;
-      const resolved = await resolveSessionCwd(
-        terminal.agentSessionId,
-        buildSessionCandidates({
-          agentCwd: terminal.claudeCwd,
-          currentCwd: terminal.cwd,
-          worktreePath: terminal.worktreePath,
-          projectPath: project?.path,
-        }),
-      );
 
-      // If the session can't be located, clear needsResume and drop back to
-      // idle — better than running --resume against a stale id.
-      if (terminal.agentSessionId && !resolved) {
+      const taskWorktreeName = terminal.task && agentId === 'claude'
+        ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+        : undefined;
+
+      // Native --worktree path: Claude finds the session itself.
+      // Legacy: probe candidate cwds; if no match, drop back to idle.
+      const legacyResolved = taskWorktreeName
+        ? null
+        : await resolveSessionCwd(
+            terminal.agentSessionId,
+            buildSessionCandidates({
+              agentCwd: terminal.claudeCwd,
+              currentCwd: terminal.cwd,
+              worktreePath: terminal.worktreePath,
+              projectPath: project?.path,
+            }),
+          );
+
+      if (!taskWorktreeName && terminal.agentSessionId && !legacyResolved) {
         set((state) => ({
           terminals: state.terminals.map((t) =>
             t.id === id ? { ...t, needsResume: false, isClaudeMode: false, status: 'idle' as TerminalStatus } : t
@@ -791,7 +811,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         return;
       }
 
-      const resumeCwd = resolved?.cwd || terminal.claudeCwd || terminal.cwd;
+      const resumeCwd = taskWorktreeName
+        ? project?.path || terminal.cwd
+        : legacyResolved?.cwd || terminal.claudeCwd || terminal.cwd;
 
       set((state) => ({
         terminals: state.terminals.map((t) =>
@@ -799,7 +821,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             ...t,
             needsResume: false,
             status: 'claude-active' as TerminalStatus,
-            ...(resolved && resolved.cwd !== t.cwd ? { cwd: resolved.cwd, claudeCwd: resolved.cwd } : {}),
+            ...(legacyResolved && legacyResolved.cwd !== t.cwd
+              ? { cwd: legacyResolved.cwd, claudeCwd: legacyResolved.cwd }
+              : {}),
           } : t
         ),
       }));
@@ -808,6 +832,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         sessionId: terminal.agentSessionId,
         cwd: resumeCwd,
         skipPermissions: terminal.skipPermissions,
+        worktreeName: taskWorktreeName,
       });
     } catch {
       set((state) => ({
