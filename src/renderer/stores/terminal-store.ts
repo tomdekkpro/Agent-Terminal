@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { AgentProviderId, TerminalTask } from '../../shared/types';
 import { useSettingsStore } from './settings-store';
 import { useProjectStore } from './project-store';
+import { resolveSessionCwd, buildSessionCandidates } from '../lib/resolve-session-cwd';
 
 export type TerminalStatus = 'idle' | 'running' | 'claude-active' | 'exited';
 
@@ -684,13 +685,53 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // Auto-resume agent session if it was an agent terminal
       if (isAgentTerminal) {
         const agentId = terminal.agentProvider || 'claude';
-        const resumeCwd = terminal.claudeCwd || terminal.cwd;
+        // Probe candidate cwds for the actual session location. The persisted
+        // cwd may be a worktree path while the original Claude conversation
+        // lives at the project root (or vice versa) — resume from whichever
+        // location actually holds the session file.
+        const project = terminal.projectId
+          ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+          : undefined;
+        const resolved = await resolveSessionCwd(
+          terminal.agentSessionId,
+          buildSessionCandidates({
+            agentCwd: terminal.claudeCwd,
+            currentCwd: terminal.cwd,
+            worktreePath: terminal.worktreePath,
+            projectPath: project?.path,
+          }),
+        );
+        // If we found the session somewhere other than the persisted cwd,
+        // update the terminal record so future restores find it directly.
+        if (resolved && resolved.cwd !== terminal.cwd) {
+          set((state) => ({
+            terminals: state.terminals.map((t) =>
+              t.id === id ? { ...t, cwd: resolved.cwd, claudeCwd: resolved.cwd } : t
+            ),
+          }));
+        }
+        const resumeCwd = resolved?.cwd || terminal.claudeCwd || terminal.cwd;
+        // If we have a session id but couldn't locate the conversation file,
+        // skip --resume so the user lands in idle shell instead of the
+        // "No conversation found" error from the CLI.
+        const resumeOptions = resolved || !terminal.agentSessionId
+          ? {
+              sessionId: terminal.agentSessionId,
+              cwd: resumeCwd,
+              skipPermissions: terminal.skipPermissions,
+            }
+          : null;
         try {
-          await window.electronAPI.resumeAgent(terminal.id, agentId, {
-            sessionId: terminal.agentSessionId,
-            cwd: resumeCwd,
-            skipPermissions: terminal.skipPermissions,
-          });
+          if (!resumeOptions) {
+            // No session findable — drop back to idle so the user can start fresh
+            set((state) => ({
+              terminals: state.terminals.map((t) =>
+                t.id === id ? { ...t, isClaudeMode: false, isResuming: false, status: 'idle' as TerminalStatus } : t
+              ),
+            }));
+            return;
+          }
+          await window.electronAPI.resumeAgent(terminal.id, agentId, resumeOptions);
           // Clear resuming overlay after delay (agent needs time to start + execute /resume)
           const delay = terminal.agentSessionId ? 5000 : 3000;
           setTimeout(() => {
@@ -723,14 +764,45 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     if (!terminal || !terminal.needsResume) return;
 
     try {
+      const agentId = terminal.agentProvider || 'claude';
+      // Probe candidate cwds so we resume from where Claude actually stored
+      // the conversation, not just the persisted terminal cwd.
+      const project = terminal.projectId
+        ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+        : undefined;
+      const resolved = await resolveSessionCwd(
+        terminal.agentSessionId,
+        buildSessionCandidates({
+          agentCwd: terminal.claudeCwd,
+          currentCwd: terminal.cwd,
+          worktreePath: terminal.worktreePath,
+          projectPath: project?.path,
+        }),
+      );
+
+      // If the session can't be located, clear needsResume and drop back to
+      // idle — better than running --resume against a stale id.
+      if (terminal.agentSessionId && !resolved) {
+        set((state) => ({
+          terminals: state.terminals.map((t) =>
+            t.id === id ? { ...t, needsResume: false, isClaudeMode: false, status: 'idle' as TerminalStatus } : t
+          ),
+        }));
+        return;
+      }
+
+      const resumeCwd = resolved?.cwd || terminal.claudeCwd || terminal.cwd;
+
       set((state) => ({
         terminals: state.terminals.map((t) =>
-          t.id === id ? { ...t, needsResume: false, status: 'claude-active' as TerminalStatus } : t
+          t.id === id ? {
+            ...t,
+            needsResume: false,
+            status: 'claude-active' as TerminalStatus,
+            ...(resolved && resolved.cwd !== t.cwd ? { cwd: resolved.cwd, claudeCwd: resolved.cwd } : {}),
+          } : t
         ),
       }));
-
-      const agentId = terminal.agentProvider || 'claude';
-      const resumeCwd = terminal.claudeCwd || terminal.cwd;
 
       await window.electronAPI.resumeAgent(terminal.id, agentId, {
         sessionId: terminal.agentSessionId,

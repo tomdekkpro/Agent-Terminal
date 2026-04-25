@@ -20,6 +20,7 @@ import { SystemMonitor } from '../status/SystemMonitor';
 import { cn } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
+import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 
 const PICKER_PAGE_SIZE = 100;
 
@@ -1559,42 +1560,21 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       const sanitizedTaskId = (detail.clickupCustomId || detail.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
       const sep = projectPath.includes('\\') ? '\\' : '/';
       const computedWorktreePath = projectPath ? `${projectPath}${sep}.task-worktrees${sep}${sanitizedTaskId}` : '';
-      const normalize = (p: string) => p.replace(/[/\\]+/g, '/').replace(/\/$/, '').toLowerCase();
-      let sessionCwd: string | null = null;
-      let sessionMatchedWorktree = false;
-      if (detail.agentSessionId) {
-        const seen = new Set<string>();
-        type Candidate = { cwd: string; isWorktree: boolean };
-        const raw: Candidate[] = [
-          detail.agentCwd ? { cwd: detail.agentCwd, isWorktree: !!detail.worktreePath && normalize(detail.agentCwd) === normalize(detail.worktreePath) } : null,
-          detail.worktreePath ? { cwd: detail.worktreePath, isWorktree: true } : null,
-          computedWorktreePath ? { cwd: computedWorktreePath, isWorktree: true } : null,
-          projectPath ? { cwd: projectPath, isWorktree: false } : null,
-        ].filter((c): c is Candidate => !!c);
-        const candidates = raw.filter((c) => {
-          const key = normalize(c.cwd);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
+      const resolved = await resolveSessionCwd(
+        detail.agentSessionId,
+        buildSessionCandidates({
+          agentCwd: detail.agentCwd,
+          worktreePath: detail.worktreePath,
+          computedWorktreePath: computedWorktreePath || undefined,
+          projectPath: projectPath || undefined,
+        }),
+      );
 
-        for (const candidate of candidates) {
-          try {
-            const exists = await window.electronAPI.claudeSessionExists(candidate.cwd, detail.agentSessionId);
-            if (exists?.data) {
-              sessionCwd = candidate.cwd;
-              sessionMatchedWorktree = candidate.isWorktree;
-              break;
-            }
-          } catch { /* try next */ }
-        }
-      }
-
-      if (sessionCwd) {
+      if (resolved) {
         await setupTerminalWithTask(terminal, taskForSetup, false, {
-          cwd: sessionCwd,
-          worktreePath: sessionMatchedWorktree ? sessionCwd : undefined,
-          worktreeBranch: sessionMatchedWorktree ? detail.worktreeBranch : undefined,
+          cwd: resolved.cwd,
+          worktreePath: resolved.isWorktree ? resolved.cwd : undefined,
+          worktreeBranch: resolved.isWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
         await setupTerminalWithTask(terminal, taskForSetup, true);
@@ -1611,7 +1591,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Resume the agent only if the session is actually findable from the cwd
       // we're about to run from. Otherwise leave the terminal idle so the user
       // can start a fresh session instead of seeing the not-found error.
-      if (detail.agentSessionId && sessionCwd) {
+      if (detail.agentSessionId && resolved) {
         const agentId = detail.agentProvider || 'claude';
         const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
         try {
