@@ -267,6 +267,21 @@ export function KanbanView(_props: KanbanViewProps) {
   const fixingCount = tasks.filter((t) => t.autoFixState === 'fixing').length;
   const awaitingQCCount = tasks.filter((t) => t.autoFixState === 'awaiting-qc').length;
 
+  // Aggregate per-task usage across the visible board
+  const usageTotals = visibleTasks.reduce(
+    (acc, t) => {
+      if (!t.usage) return acc;
+      acc.cost += t.usage.cost || 0;
+      acc.input += t.usage.inputTokens || 0;
+      acc.output += t.usage.outputTokens || 0;
+      acc.cacheCreate += t.usage.cacheCreationTokens || 0;
+      acc.cacheRead += t.usage.cacheReadTokens || 0;
+      acc.tasks += 1;
+      return acc;
+    },
+    { cost: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, tasks: 0 },
+  );
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
@@ -279,6 +294,21 @@ export function KanbanView(_props: KanbanViewProps) {
               <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">
                 {visibleTasks.length}
                 {assigneeFilter && tasks.length !== visibleTasks.length ? ` of ${tasks.length}` : ''}
+              </span>
+            )}
+            {usageTotals.cost > 0 && (
+              <span
+                className="text-xs font-mono font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full"
+                title={
+                  `Total Claude API spend across ${usageTotals.tasks} task${usageTotals.tasks === 1 ? '' : 's'}\n` +
+                  `Input:        ${usageTotals.input.toLocaleString()} tokens\n` +
+                  `Output:       ${usageTotals.output.toLocaleString()} tokens\n` +
+                  `Cache write:  ${usageTotals.cacheCreate.toLocaleString()} tokens\n` +
+                  `Cache read:   ${usageTotals.cacheRead.toLocaleString()} tokens\n` +
+                  `Total cost:   $${usageTotals.cost.toFixed(4)}`
+                }
+              >
+                ${usageTotals.cost.toFixed(2)}
               </span>
             )}
           </div>

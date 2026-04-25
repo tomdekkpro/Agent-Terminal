@@ -563,6 +563,22 @@ export interface KanbanTask {
    *  freshly-created worktree, which would be a different Claude project dir). */
   agentCwd?: string;
 
+  /** Latest cumulative usage for this task's active agent session.
+   *  Sourced from the session JSONL by the main-side usage tracker and
+   *  written here so the Kanban board can show cost even when the terminal
+   *  for this task is closed. Reflects ONLY the current `agentSessionId` —
+   *  if the user starts a fresh session, this resets. */
+  usage?: {
+    model?: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+    /** ISO timestamp of the last update. */
+    updatedAt: string;
+  };
+
   worktreePath?: string;
   worktreeBranch?: string;
   baseBranch?: string;

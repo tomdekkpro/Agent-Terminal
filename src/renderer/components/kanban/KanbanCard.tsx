@@ -387,6 +387,21 @@ export function KanbanCard({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {task.usage && (task.usage.cost > 0 || task.usage.outputTokens > 0) && (
+            <span
+              className="text-[10px] font-mono font-semibold text-emerald-400 shrink-0 mr-1"
+              title={
+                `Session usage${task.usage.model ? ` (${task.usage.model})` : ''}\n` +
+                `Input:        ${task.usage.inputTokens.toLocaleString()} tokens\n` +
+                `Output:       ${task.usage.outputTokens.toLocaleString()} tokens\n` +
+                `Cache write:  ${task.usage.cacheCreationTokens.toLocaleString()} tokens\n` +
+                `Cache read:   ${task.usage.cacheReadTokens.toLocaleString()} tokens\n` +
+                `Cost:         $${task.usage.cost.toFixed(4)}`
+              }
+            >
+              ${task.usage.cost.toFixed(2)}
+            </span>
+          )}
           {(task.clickupAssignees || []).slice(0, 3).map((a, i) => (
             <span
               key={a.id}

@@ -32,14 +32,28 @@ export function useGlobalTerminalListeners() {
       })
     );
 
-    // Listen for terminal exit — clear agent busy state, and if a CompleteTask
-    // action queued worktree cleanup for this terminal, run it now (the PTY
-    // has released the worktree so `git worktree remove` will succeed).
+    // Listen for terminal exit — clear agent busy state, flush the final
+    // usage to the KanbanTask, and run worktree cleanup if it was queued
+    // by a CompleteTask action.
     cleanups.push(
       window.electronAPI.onTerminalExit((id, _exitCode) => {
         setTerminalStatus(id, 'exited');
         updateTerminal(id, { isClaudeBusy: false, isClaudeMode: false });
         const terminal = useTerminalStore.getState().terminals.find((t) => t.id === id);
+        // Persist final usage (skip the throttle so we always capture the
+        // last value before the watcher stops).
+        if (terminal?.usage && terminal.task?.id) {
+          const clickupTaskId = terminal.task.id;
+          const usage = terminal.usage;
+          window.electronAPI.kanbanList?.().then((result: any) => {
+            if (!result?.success || !Array.isArray(result.data)) return;
+            const match = result.data.find((k: any) => k.clickupTaskId === clickupTaskId);
+            if (!match) return;
+            window.electronAPI.kanbanUpdate?.(match.id, {
+              usage: { ...usage, updatedAt: new Date().toISOString() },
+            });
+          }).catch(() => { /* non-critical */ });
+        }
         if (terminal?.pendingWorktreeCleanup && terminal.worktreePath) {
           void useTerminalStore.getState().cleanupWorktree(id);
         }
@@ -67,6 +81,11 @@ export function useGlobalTerminalListeners() {
     }
 
     // Per-terminal usage updates from the session-JSONL watcher (cumulative).
+    // Track the last KanbanTask write per terminal so we don't hammer the
+    // store with redundant kanbanUpdate IPC calls every poll.
+    const lastKanbanUsageWrite = new Map<string, number>();
+    const KANBAN_USAGE_PERSIST_INTERVAL_MS = 15_000;
+
     if (window.electronAPI.onTerminalUsage) {
       cleanups.push(
         window.electronAPI.onTerminalUsage((data: {
@@ -78,16 +97,34 @@ export function useGlobalTerminalListeners() {
           cacheReadTokens: number;
           cost: number;
         }) => {
-          updateTerminal(data.terminalId, {
-            usage: {
-              model: data.model,
-              inputTokens: data.inputTokens,
-              outputTokens: data.outputTokens,
-              cacheCreationTokens: data.cacheCreationTokens,
-              cacheReadTokens: data.cacheReadTokens,
-              cost: data.cost,
-            },
-          });
+          const usage = {
+            model: data.model,
+            inputTokens: data.inputTokens,
+            outputTokens: data.outputTokens,
+            cacheCreationTokens: data.cacheCreationTokens,
+            cacheReadTokens: data.cacheReadTokens,
+            cost: data.cost,
+          };
+          updateTerminal(data.terminalId, { usage });
+
+          // Persist to the matching KanbanTask so the cost shows on the
+          // board even after the terminal closes. Throttled — every 15s
+          // is plenty for a UI badge and avoids a write per 3s poll.
+          const terminal = useTerminalStore.getState().terminals.find((t) => t.id === data.terminalId);
+          const clickupTaskId = terminal?.task?.id;
+          if (!clickupTaskId) return;
+          const last = lastKanbanUsageWrite.get(data.terminalId) || 0;
+          const now = Date.now();
+          if (now - last < KANBAN_USAGE_PERSIST_INTERVAL_MS) return;
+          lastKanbanUsageWrite.set(data.terminalId, now);
+          window.electronAPI.kanbanList?.().then((result: any) => {
+            if (!result?.success || !Array.isArray(result.data)) return;
+            const match = result.data.find((k: any) => k.clickupTaskId === clickupTaskId);
+            if (!match) return;
+            window.electronAPI.kanbanUpdate?.(match.id, {
+              usage: { ...usage, updatedAt: new Date().toISOString() },
+            });
+          }).catch(() => { /* non-critical */ });
         })
       );
     }
