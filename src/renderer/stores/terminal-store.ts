@@ -43,6 +43,11 @@ export interface Terminal {
   worktreeBranch?: string;
   /** Target branch for merging/PR when completing task */
   baseBranch?: string;
+  /** True when CompleteTask delegated to the agent (Create PR / Branch & PR).
+   *  We can't `git worktree remove` while Claude holds the worktree open, so
+   *  cleanup is deferred until the PTY exits — at which point the global
+   *  exit listener fires `cleanupWorktree`. */
+  pendingWorktreeCleanup?: boolean;
   timeTracking?: TimeTracking;
   pendingTaskPrompt?: string;
   /** True when restored from saved state but PTY not yet created */
@@ -207,6 +212,12 @@ interface TerminalState {
   togglePreview: (id: string) => void;
   /** Set the preview URL for a terminal */
   setPreviewUrl: (id: string, url: string) => void;
+  /** Mark a terminal so the global exit listener will run cleanupWorktree. */
+  markPendingWorktreeCleanup: (id: string) => void;
+  /** Remove the worktree on disk and clear worktree fields on the terminal.
+   *  Caller must ensure the agent has stopped — git refuses to remove a
+   *  worktree that has a process holding it open. */
+  cleanupWorktree: (id: string) => Promise<void>;
 }
 
 
@@ -891,6 +902,39 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, previewUrl: url } : t
+      ),
+    }));
+  },
+
+  markPendingWorktreeCleanup: (id: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, pendingWorktreeCleanup: true } : t
+      ),
+    }));
+  },
+
+  cleanupWorktree: async (id: string) => {
+    const terminal = get().terminals.find((t) => t.id === id);
+    if (!terminal?.worktreePath) return;
+    const project = terminal.projectId
+      ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+      : undefined;
+    if (!project?.path) return;
+    try {
+      await window.electronAPI.removeTaskWorktree(project.path, terminal.worktreePath);
+    } catch { /* non-critical — worktree may already be gone */ }
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              worktreePath: undefined,
+              worktreeBranch: undefined,
+              cwd: project.path,
+              pendingWorktreeCleanup: false,
+            }
+          : t
       ),
     }));
   },

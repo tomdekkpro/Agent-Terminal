@@ -69,8 +69,22 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
 
   const isAgent = terminal.isClaudeMode;
   const taskLabel = terminal.task?.customId || terminal.task?.id || '';
+  const isWorktree = !!terminal.worktreePath;
 
-  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean }[] = [
+  const cleanupWorktreeAction = async () => {
+    setOpen(false);
+    const msg = isAgent
+      ? 'Close this terminal (the agent will be terminated) and remove the worktree directory?'
+      : 'Close this terminal and remove the worktree directory?';
+    if (!window.confirm(msg)) return;
+    useTerminalStore.getState().markPendingWorktreeCleanup(terminal.id);
+    try {
+      await window.electronAPI.destroyTerminal(terminal.id);
+    } catch { /* non-critical */ }
+    useTerminalStore.getState().removeTerminal(terminal.id);
+  };
+
+  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean; worktreeOnly?: boolean }[] = [
     {
       icon: <GitMerge className="w-3.5 h-3.5" />,
       label: 'Complete Task',
@@ -109,9 +123,20 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
       action: () => sendPrompt(`Please summarize all the work done in this session: what was changed, which files were modified, and any remaining items.`),
       agentOnly: true,
     },
+    {
+      icon: <Trash2 className="w-3.5 h-3.5" />,
+      label: 'Cleanup Worktree',
+      description: 'Close terminal and remove the worktree dir',
+      action: cleanupWorktreeAction,
+      worktreeOnly: true,
+    },
   ];
 
-  const visibleActions = isAgent ? actions : actions.filter((a) => !a.agentOnly);
+  const visibleActions = actions.filter((a) => {
+    if (a.agentOnly && !isAgent) return false;
+    if (a.worktreeOnly && !isWorktree) return false;
+    return true;
+  });
 
   return (
     <div className="relative" ref={ref}>
@@ -740,13 +765,27 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
           {terminal.worktreePath && (
             <span
-              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] bg-violet-500/15 text-violet-300 border border-violet-500/20 shrink-0"
-              title={`Worktree: ${terminal.worktreePath}${terminal.worktreeBranch ? `\nBranch: ${terminal.worktreeBranch}` : ''}`}
+              className={cn(
+                'flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] border shrink-0',
+                terminal.pendingWorktreeCleanup
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-violet-500/15 text-violet-300 border-violet-500/20',
+              )}
+              title={
+                `Worktree: ${terminal.worktreePath}` +
+                (terminal.worktreeBranch ? `\nBranch: ${terminal.worktreeBranch}` : '') +
+                (terminal.pendingWorktreeCleanup
+                  ? '\n\nCleanup queued — will run when this terminal closes.'
+                  : '')
+              }
             >
               <GitBranch className="w-2.5 h-2.5" />
               <span className="uppercase tracking-wide font-medium text-[9px]">Worktree</span>
               {terminal.worktreeBranch && (
                 <span className="font-mono opacity-80">{terminal.worktreeBranch}</span>
+              )}
+              {terminal.pendingWorktreeCleanup && (
+                <span className="text-[9px] uppercase tracking-wide font-medium opacity-80">· cleanup pending</span>
               )}
             </span>
           )}

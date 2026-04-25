@@ -32,11 +32,17 @@ export function useGlobalTerminalListeners() {
       })
     );
 
-    // Listen for terminal exit — also clear agent busy state
+    // Listen for terminal exit — clear agent busy state, and if a CompleteTask
+    // action queued worktree cleanup for this terminal, run it now (the PTY
+    // has released the worktree so `git worktree remove` will succeed).
     cleanups.push(
       window.electronAPI.onTerminalExit((id, _exitCode) => {
         setTerminalStatus(id, 'exited');
         updateTerminal(id, { isClaudeBusy: false, isClaudeMode: false });
+        const terminal = useTerminalStore.getState().terminals.find((t) => t.id === id);
+        if (terminal?.pendingWorktreeCleanup && terminal.worktreePath) {
+          void useTerminalStore.getState().cleanupWorktree(id);
+        }
       })
     );
 

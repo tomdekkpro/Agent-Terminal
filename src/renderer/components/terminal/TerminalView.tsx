@@ -1934,7 +1934,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
       await stopAndSyncTimer(saved.id, saved.task?.id);
-      setMergeStatus({ message: 'PR creation prompt sent to agent', type: 'success' });
+      // Cleanup will fire on terminal exit — Claude is still inside the
+      // worktree right now so we can't `git worktree remove` yet.
+      if (saved.isWorktree) {
+        useTerminalStore.getState().markPendingWorktreeCleanup(saved.id);
+      }
+      setMergeStatus({ message: 'PR creation prompt sent to agent — worktree will clean up when terminal closes', type: 'success' });
       setTimeout(() => setMergeStatus(null), 5000);
       return;
     }
@@ -2036,7 +2041,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
       await stopAndSyncTimer(saved.id, saved.task?.id);
-      setMergeStatus({ message: 'Branch & PR prompt sent to agent', type: 'success' });
+      if (saved.isWorktree) {
+        useTerminalStore.getState().markPendingWorktreeCleanup(saved.id);
+      }
+      setMergeStatus({ message: 'Branch & PR prompt sent to agent — worktree will clean up when terminal closes', type: 'success' });
       setTimeout(() => setMergeStatus(null), 5000);
       return;
     }
@@ -2056,12 +2064,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       // Stop timer and sync tracked time
       await stopAndSyncTimer(saved.id, saved.task?.id);
+      // Code is on remote — clean up the worktree immediately (no agent to wait on)
+      await cleanupWorktree(saved);
     } else {
       setMergeStatus({ message: result.error || 'Failed to create branch & PR', type: 'error' });
     }
 
     setTimeout(() => setMergeStatus(null), 8000);
-  }, [mergeTarget, activeProject, stopAndSyncTimer]);
+  }, [mergeTarget, activeProject, cleanupWorktree, stopAndSyncTimer]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
