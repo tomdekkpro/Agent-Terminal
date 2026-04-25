@@ -1552,24 +1552,49 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         provider: 'clickup',
       };
 
-      // If we have a stored session and the conversation file lives under the
-      // original cwd, resume there directly instead of creating a fresh worktree
-      // (which would put Claude into a different project dir where the session
-      // file doesn't exist → "No conversation found with session id").
-      let resumeFromOriginalCwd = false;
-      if (detail.agentSessionId && detail.agentCwd) {
-        try {
-          const exists = await window.electronAPI.claudeSessionExists(detail.agentCwd, detail.agentSessionId);
-          resumeFromOriginalCwd = !!exists?.data;
-        } catch { /* fall through to worktree path */ }
+      // Probe candidate cwds in priority order to find where Claude actually
+      // stored the session. Handles both v1.13.1+ tasks (with agentCwd) and
+      // legacy ones (worktreePath / projectPath only).
+      const projectPath = detail.projectPath || activeProject?.path || '';
+      const sanitizedTaskId = (detail.clickupCustomId || detail.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+      const sep = projectPath.includes('\\') ? '\\' : '/';
+      const computedWorktreePath = projectPath ? `${projectPath}${sep}.task-worktrees${sep}${sanitizedTaskId}` : '';
+      const normalize = (p: string) => p.replace(/[/\\]+/g, '/').replace(/\/$/, '').toLowerCase();
+      let sessionCwd: string | null = null;
+      let sessionMatchedWorktree = false;
+      if (detail.agentSessionId) {
+        const seen = new Set<string>();
+        type Candidate = { cwd: string; isWorktree: boolean };
+        const raw: Candidate[] = [
+          detail.agentCwd ? { cwd: detail.agentCwd, isWorktree: !!detail.worktreePath && normalize(detail.agentCwd) === normalize(detail.worktreePath) } : null,
+          detail.worktreePath ? { cwd: detail.worktreePath, isWorktree: true } : null,
+          computedWorktreePath ? { cwd: computedWorktreePath, isWorktree: true } : null,
+          projectPath ? { cwd: projectPath, isWorktree: false } : null,
+        ].filter((c): c is Candidate => !!c);
+        const candidates = raw.filter((c) => {
+          const key = normalize(c.cwd);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        for (const candidate of candidates) {
+          try {
+            const exists = await window.electronAPI.claudeSessionExists(candidate.cwd, detail.agentSessionId);
+            if (exists?.data) {
+              sessionCwd = candidate.cwd;
+              sessionMatchedWorktree = candidate.isWorktree;
+              break;
+            }
+          } catch { /* try next */ }
+        }
       }
 
-      if (resumeFromOriginalCwd) {
-        const isWorktreeCwd = !!(detail.worktreePath && detail.worktreePath === detail.agentCwd);
+      if (sessionCwd) {
         await setupTerminalWithTask(terminal, taskForSetup, false, {
-          cwd: detail.agentCwd,
-          worktreePath: isWorktreeCwd ? detail.worktreePath : undefined,
-          worktreeBranch: isWorktreeCwd ? detail.worktreeBranch : undefined,
+          cwd: sessionCwd,
+          worktreePath: sessionMatchedWorktree ? sessionCwd : undefined,
+          worktreeBranch: sessionMatchedWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
         await setupTerminalWithTask(terminal, taskForSetup, true);
@@ -1586,7 +1611,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Resume the agent only if the session is actually findable from the cwd
       // we're about to run from. Otherwise leave the terminal idle so the user
       // can start a fresh session instead of seeing the not-found error.
-      if (detail.agentSessionId && resumeFromOriginalCwd) {
+      if (detail.agentSessionId && sessionCwd) {
         const agentId = detail.agentProvider || 'claude';
         const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
         try {

@@ -136,36 +136,59 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
         let cwd = project.path;
         const title = `${task.clickupCustomId || task.clickupTaskId} · ${task.clickupName.slice(0, 40)}`;
+        const sanitized = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+        const sep = project.path.includes('\\') ? '\\' : '/';
+        const computedWorktreePath = `${project.path}${sep}.task-worktrees${sep}${sanitized}`;
+        const normalize = (p: string) => p.replace(/[/\\]+/g, '/').replace(/\/$/, '').toLowerCase();
 
-        // If we have a stored session and the conversation file lives under
-        // the original cwd, resume there directly — don't create a worktree
-        // that would land us in a different Claude project dir.
-        let resumeFromOriginalCwd = false;
-        if (task.agentSessionId && task.agentCwd) {
-          try {
-            const exists = await window.electronAPI.claudeSessionExists(task.agentCwd, task.agentSessionId);
-            resumeFromOriginalCwd = !!exists?.data;
-          } catch { /* fall through to worktree path */ }
+        // Probe candidate cwds in priority order to find where Claude actually
+        // stored this session. agentCwd (set in v1.13.1+) is most accurate;
+        // worktreePath / projectPath cover legacy tasks. Whichever location
+        // holds the conversation file wins — that's where we resume from.
+        let sessionCwd: string | null = null;
+        let sessionMatchedWorktree = false;
+        if (task.agentSessionId) {
+          const seen = new Set<string>();
+          type Candidate = { cwd: string; isWorktree: boolean };
+          const raw: Candidate[] = [
+            task.agentCwd ? { cwd: task.agentCwd, isWorktree: !!task.worktreePath && normalize(task.agentCwd) === normalize(task.worktreePath) } : null,
+            task.worktreePath ? { cwd: task.worktreePath, isWorktree: true } : null,
+            { cwd: computedWorktreePath, isWorktree: true },
+            { cwd: project.path, isWorktree: false },
+          ].filter((c): c is Candidate => !!c);
+          const candidates = raw.filter((c) => {
+            const key = normalize(c.cwd);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+
+          for (const candidate of candidates) {
+            try {
+              const exists = await window.electronAPI.claudeSessionExists(candidate.cwd, task.agentSessionId);
+              if (exists?.data) {
+                sessionCwd = candidate.cwd;
+                sessionMatchedWorktree = candidate.isWorktree;
+                break;
+              }
+            } catch { /* try next */ }
+          }
         }
 
-        if (resumeFromOriginalCwd && task.agentCwd) {
-          cwd = task.agentCwd;
+        if (sessionCwd) {
+          cwd = sessionCwd;
           const patch: Partial<Terminal> = {
             task: toTerminalTask(task),
             cwd,
             title,
           };
-          // Only mark this terminal as a worktree if the stored cwd actually IS
-          // the worktree path — otherwise the original session was started in
-          // the project folder and worktree fields should stay clear.
-          if (task.worktreePath && task.worktreePath === task.agentCwd) {
-            patch.worktreePath = task.worktreePath;
+          if (sessionMatchedWorktree) {
+            patch.worktreePath = sessionCwd;
             if (task.worktreeBranch) patch.worktreeBranch = task.worktreeBranch;
           }
           updateTerminal(terminal.id, patch);
         } else {
-          // Worktree — reuse existing if present, else create
-          const sanitized = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+          // No findable session — fall back to creating/reusing a worktree
           try {
             const wt = await window.electronAPI.createTaskWorktree(project.path, sanitized);
             if (wt?.success && wt.data) {
@@ -208,7 +231,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         // actually findable from the cwd we're about to run from. Otherwise
         // leave the terminal idle so the user can start a fresh session
         // instead of seeing "No conversation found with session id".
-        if (task.agentSessionId && resumeFromOriginalCwd) {
+        if (task.agentSessionId && sessionCwd) {
           const agentId: AgentProviderId = task.agentProvider || 'claude';
           updateTerminal(terminal.id, {
             agentSessionId: task.agentSessionId,

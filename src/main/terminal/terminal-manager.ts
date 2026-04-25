@@ -9,9 +9,13 @@ import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from '../ipc/providers/agent-registry';
 import { track } from '../analytics/analytics-service';
 
-/** Encode a project path to match Claude Code's project directory naming */
+/** Encode a project path to match Claude Code's project directory naming.
+ *  Claude maps `:`, `/`, `\`, AND `.` all to `-` — so e.g.
+ *  `D:\proj\.task-worktrees\T-1` becomes `D--proj--task-worktrees-T-1`
+ *  (not `D--proj-.task-worktrees-T-1`). Missing the dot mapping previously
+ *  caused worktree session lookups to point at a non-existent project dir. */
 function encodeProjectPath(cwd: string): string {
-  return cwd.replace(/[:/\\]/g, '-');
+  return cwd.replace(/[:/\\.]/g, '-');
 }
 
 /** Get Claude Code's project data directory for a given cwd */
