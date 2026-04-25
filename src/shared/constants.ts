@@ -49,6 +49,7 @@ export const IPC_CHANNELS = {
   USAGE_REQUEST: 'usage:request',
   USAGE_UPDATED: 'usage:updated',
   USAGE_COST_UPDATE: 'usage:cost-update',
+  TERMINAL_USAGE: 'terminal:usage',
   COPILOT_USAGE_REQUEST: 'copilot-usage:request',
   COPILOT_USAGE_UPDATED: 'copilot-usage:updated',
   // Projects

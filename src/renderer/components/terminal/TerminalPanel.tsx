@@ -12,6 +12,13 @@ import { cn } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 
+/** Compact token formatter — 12345 → "12.3K", 1500000 → "1.5M" */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
+}
+
 /** Format milliseconds to HH:MM:SS */
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -787,6 +794,25 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               {terminal.pendingWorktreeCleanup && (
                 <span className="text-[9px] uppercase tracking-wide font-medium opacity-80">· cleanup pending</span>
               )}
+            </span>
+          )}
+          {/* Per-terminal usage pill */}
+          {terminal.usage && (terminal.usage.cost > 0 || terminal.usage.outputTokens > 0) && (
+            <span
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 shrink-0"
+              title={
+                `Session usage${terminal.usage.model ? ` (${terminal.usage.model})` : ''}\n` +
+                `Input:        ${terminal.usage.inputTokens.toLocaleString()} tokens\n` +
+                `Output:       ${terminal.usage.outputTokens.toLocaleString()} tokens\n` +
+                `Cache write:  ${terminal.usage.cacheCreationTokens.toLocaleString()} tokens\n` +
+                `Cache read:   ${terminal.usage.cacheReadTokens.toLocaleString()} tokens\n` +
+                `Cost:         $${terminal.usage.cost.toFixed(4)}`
+              }
+            >
+              <span className="font-mono font-semibold">${terminal.usage.cost.toFixed(2)}</span>
+              <span className="opacity-60">·</span>
+              <span className="font-mono opacity-90">↑{formatTokens(terminal.usage.inputTokens + terminal.usage.cacheCreationTokens + terminal.usage.cacheReadTokens)}</span>
+              <span className="font-mono opacity-90">↓{formatTokens(terminal.usage.outputTokens)}</span>
             </span>
           )}
           {/* Base branch indicator */}

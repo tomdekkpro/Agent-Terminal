@@ -212,6 +212,20 @@ export interface UsageCostData {
   timestamp: Date;
 }
 
+/** Cumulative per-terminal usage accumulated from the session JSONL.
+ *  Sent on every poll cycle as absolute totals (not deltas). */
+export interface TerminalUsageData {
+  terminalId: string;
+  /** Latest model seen in the session (e.g. "claude-sonnet-4-6"). */
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  /** USD — sum of (tokens × per-1M-rate) for every assistant turn. */
+  cost: number;
+}
+
 export interface CopilotUsageData {
   premiumRequests?: number;
   totalTurns: number;

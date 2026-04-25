@@ -6,6 +6,7 @@ import { registerTerminalHandlers } from './ipc/terminal-handlers';
 import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
+import { sessionUsageTracker } from './usage/session-usage-tracker';
 import { registerServiceStatusHandlers, stopServiceStatusPolling } from './ipc/service-status-handlers';
 import { registerSystemMonitorHandlers, stopSystemMonitorPolling } from './ipc/system-monitor-handlers';
 import { registerProjectHandlers } from './ipc/project-handlers';
@@ -112,6 +113,7 @@ app.whenReady().then(() => {
   trackAppStarted();
 
   terminalManager = new TerminalManager(getWindow);
+  sessionUsageTracker.setWindowGetter(getWindow);
 
   registerTerminalHandlers(ipcMain, terminalManager, getWindow);
   registerTaskManagerHandlers(ipcMain);

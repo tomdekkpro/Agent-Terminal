@@ -66,6 +66,32 @@ export function useGlobalTerminalListeners() {
       );
     }
 
+    // Per-terminal usage updates from the session-JSONL watcher (cumulative).
+    if (window.electronAPI.onTerminalUsage) {
+      cleanups.push(
+        window.electronAPI.onTerminalUsage((data: {
+          terminalId: string;
+          model?: string;
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationTokens: number;
+          cacheReadTokens: number;
+          cost: number;
+        }) => {
+          updateTerminal(data.terminalId, {
+            usage: {
+              model: data.model,
+              inputTokens: data.inputTokens,
+              outputTokens: data.outputTokens,
+              cacheCreationTokens: data.cacheCreationTokens,
+              cacheReadTokens: data.cacheReadTokens,
+              cost: data.cost,
+            },
+          });
+        })
+      );
+    }
+
     // When an agent session id is captured, also write it back to the matching
     // KanbanTask (if any) so sessions survive terminal removal, AND bump the
     // kanbanStatus from "todo" to "in-progress" on first agent run.

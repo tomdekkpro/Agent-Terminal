@@ -48,6 +48,16 @@ export interface Terminal {
    *  cleanup is deferred until the PTY exits — at which point the global
    *  exit listener fires `cleanupWorktree`. */
   pendingWorktreeCleanup?: boolean;
+  /** Live cumulative usage for this terminal's Claude session, parsed from
+   *  the session JSONL. Populated by the global TERMINAL_USAGE listener. */
+  usage?: {
+    model?: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+  };
   timeTracking?: TimeTracking;
   pendingTaskPrompt?: string;
   /** True when restored from saved state but PTY not yet created */

@@ -89,6 +89,11 @@ const electronAPI = {
     ipcRenderer.on(IPC_CHANNELS.USAGE_COST_UPDATE, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.USAGE_COST_UPDATE, handler);
   },
+  onTerminalUsage: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_USAGE, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_USAGE, handler);
+  },
   requestCopilotUsageUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.COPILOT_USAGE_REQUEST),
   onCopilotUsageUpdated: (callback: (data: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);

@@ -8,6 +8,7 @@ import { IPC_CHANNELS } from '../../shared/constants';
 import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from '../ipc/providers/agent-registry';
 import { track } from '../analytics/analytics-service';
+import { sessionUsageTracker } from '../usage/session-usage-tracker';
 
 /** Encode a project path to match Claude Code's project directory naming.
  *  Claude maps `:`, `/`, `\`, AND `.` all to `-` — so e.g.
@@ -125,6 +126,7 @@ export class TerminalManager {
 
     try {
       this.terminals.delete(id);
+      sessionUsageTracker.stop(id);
 
       // If an agent (Claude CLI, etc.) is active, send graceful exit before killing
       if (terminal.isAgentMode && !terminal.hasExited) {
@@ -157,6 +159,7 @@ export class TerminalManager {
 
   async killAll(): Promise<void> {
     PtyManager.setShuttingDown(true);
+    sessionUsageTracker.stopAll();
 
     // Send graceful exit to all active agents first
     this.terminals.forEach((terminal) => {
@@ -296,6 +299,16 @@ export class TerminalManager {
     if (options.sessionId) {
       terminal.agentSessionId = options.sessionId;
       terminal.claudeSessionId = options.sessionId;
+      // Start usage tracking for the resumed session. The session JSONL lives
+      // under the worktree's encoded dir when --worktree was used, otherwise
+      // under the cwd's encoded dir.
+      if (agentId === 'claude') {
+        const sessionStorageDir = options.worktreeName
+          ? join(dir, '.claude', 'worktrees', options.worktreeName)
+          : dir;
+        const sessionFile = join(getClaudeProjectDir(sessionStorageDir), `${options.sessionId}.jsonl`);
+        sessionUsageTracker.start(terminal.id, sessionFile);
+      }
     }
 
     const { cdCmd, separator } = buildShellCommand(terminal.shellType, dir);
@@ -385,6 +398,7 @@ export class TerminalManager {
             terminal.agentSessionId = sessionId;
             terminal.claudeSessionId = sessionId; // deprecated alias
             debugLog('[TerminalManager] Detected agent session:', sessionId, 'for terminal:', terminal.id);
+            sessionUsageTracker.start(terminal.id, join(claudeDir, f));
             const win = this.getWindow();
             if (win && !win.isDestroyed()) {
               win.webContents.send(IPC_CHANNELS.TERMINAL_AGENT_SESSION, terminal.id, sessionId);
