@@ -738,10 +738,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
             </button>
           )}
-          {terminal.worktreeBranch && (
-            <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] shrink-0">
+          {terminal.worktreePath && (
+            <span
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] bg-violet-500/15 text-violet-300 border border-violet-500/20 shrink-0"
+              title={`Worktree: ${terminal.worktreePath}${terminal.worktreeBranch ? `\nBranch: ${terminal.worktreeBranch}` : ''}`}
+            >
               <GitBranch className="w-2.5 h-2.5" />
-              <span className="font-mono">{terminal.worktreeBranch}</span>
+              <span className="uppercase tracking-wide font-medium text-[9px]">Worktree</span>
+              {terminal.worktreeBranch && (
+                <span className="font-mono opacity-80">{terminal.worktreeBranch}</span>
+              )}
             </span>
           )}
           {/* Base branch indicator */}
@@ -781,7 +787,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               )}
             </div>
           )}
-          {!terminal.task && !terminal.worktreeBranch && isSplit && (
+          {!terminal.task && !terminal.worktreePath && isSplit && (
             <span className="text-[10px] text-[var(--text-muted)] truncate">{terminal.cwd || '~'}</span>
           )}
         </div>
