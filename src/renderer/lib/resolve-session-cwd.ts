@@ -53,7 +53,9 @@ export function buildSessionCandidates(opts: {
   agentCwd?: string;
   worktreePath?: string;
   projectPath?: string;
-  /** Computed worktree path (project + .task-worktrees + sanitized id) — optional */
+  /** Native Claude worktree path: <project>/.claude/worktrees/<id> (v1.14.0+). */
+  nativeWorktreePath?: string;
+  /** Legacy worktree path: <project>/.task-worktrees/<id> (pre-v1.14.0). */
   computedWorktreePath?: string;
   /** Current terminal cwd — included for app-restart restore where we don't know
    *  whether the saved cwd is project root or worktree. */
@@ -68,6 +70,7 @@ export function buildSessionCandidates(opts: {
     opts.agentCwd ? { cwd: opts.agentCwd, isWorktree: isWtMatch(opts.agentCwd) } : null,
     opts.currentCwd ? { cwd: opts.currentCwd, isWorktree: isWtMatch(opts.currentCwd) } : null,
     opts.worktreePath ? { cwd: opts.worktreePath, isWorktree: true } : null,
+    opts.nativeWorktreePath ? { cwd: opts.nativeWorktreePath, isWorktree: true } : null,
     opts.computedWorktreePath ? { cwd: opts.computedWorktreePath, isWorktree: true } : null,
     opts.projectPath ? { cwd: opts.projectPath, isWorktree: false } : null,
   ];

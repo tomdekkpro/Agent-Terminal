@@ -139,18 +139,14 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         const worktreeName = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
         const sep = project.path.includes('\\') ? '\\' : '/';
 
-        // Native --worktree convention: Claude creates / reuses a worktree at
-        // <repo>/.claude/worktrees/<name> with branch worktree-<name>. We run
-        // the CLI from the project root and pass --worktree <name>; Claude
-        // handles the cd internally and resume works across worktrees.
-        const expectedWorktreePath = `${project.path}${sep}.claude${sep}worktrees${sep}${worktreeName}`;
-        const expectedBranch = `worktree-${worktreeName}`;
+        const nativeWorktreePath = `${project.path}${sep}.claude${sep}worktrees${sep}${worktreeName}`;
+        const nativeBranch = `worktree-${worktreeName}`;
+        const legacyWorktreePath = `${project.path}${sep}.task-worktrees${sep}${worktreeName}`;
 
-        // Pre-create the worktree so we can do git ops (status, push, PR)
-        // against it before / between Claude runs. createTaskWorktree is
-        // idempotent — reuses if path + branch already match.
-        let worktreePath = expectedWorktreePath;
-        let worktreeBranch = expectedBranch;
+        // Pre-create the native worktree so git ops (status, push, PR) work
+        // before / between Claude runs. createTaskWorktree is idempotent.
+        let worktreePath = nativeWorktreePath;
+        let worktreeBranch = nativeBranch;
         try {
           const wt = await window.electronAPI.createTaskWorktree(project.path, worktreeName);
           if (wt?.success && wt.data) {
@@ -159,30 +155,30 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
         } catch { /* non-critical — claude --worktree will create it */ }
 
-        // Legacy probe — for tasks whose session was stored under the OLD
-        // `.task-worktrees/<id>` layout (pre-v1.14.0). Resume those in their
-        // original cwd via `cd && claude --resume` (no --worktree flag).
-        const legacyWorktreePath = `${project.path}${sep}.task-worktrees${sep}${worktreeName}`;
-        const legacyResolved = await resolveSessionCwd(
+        // Probe candidate cwds to find where the conversation file actually
+        // lives. `claude --worktree X --resume <id>` only finds sessions in
+        // that worktree's encoded path, so on resume we cd to the matched
+        // location and skip the --worktree flag.
+        const resolved = await resolveSessionCwd(
           task.agentSessionId,
           buildSessionCandidates({
             agentCwd: task.agentCwd,
             worktreePath: task.worktreePath,
+            nativeWorktreePath,
             computedWorktreePath: legacyWorktreePath,
             projectPath: project.path,
           }),
         );
-        const useLegacyResume = !!legacyResolved
-          && legacyResolved.cwd !== worktreePath
-          && legacyResolved.cwd !== expectedWorktreePath;
 
-        const cwd = useLegacyResume ? legacyResolved!.cwd : project.path;
+        // cwd for the PTY: if we found the session somewhere, cd there;
+        // otherwise stay at project root (fresh sessions launch via --worktree).
+        const cwd = resolved?.cwd || project.path;
 
         updateTerminal(terminal.id, {
           task: toTerminalTask(task),
           cwd,
-          worktreePath: useLegacyResume && legacyResolved!.isWorktree ? legacyResolved!.cwd : worktreePath,
-          worktreeBranch: useLegacyResume && legacyResolved!.isWorktree && task.worktreeBranch
+          worktreePath: resolved?.isWorktree ? resolved.cwd : worktreePath,
+          worktreeBranch: resolved?.isWorktree && task.worktreeBranch
             ? task.worktreeBranch
             : worktreeBranch,
           title,
@@ -196,9 +192,6 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
         } catch { /* non-critical */ }
 
-        // Create PTY at project root (Claude itself cds into the worktree
-        // when --worktree is passed). For legacy resume, PTY opens at the
-        // legacy worktree path so `cd && claude --resume` finds the session.
         await window.electronAPI.createTerminal({
           id: terminal.id,
           cwd,
@@ -206,10 +199,10 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           rows: 24,
         });
 
-        // Resume the stored agent session if we have one. Native --worktree
-        // path: claude finds the session itself. Legacy path: rely on cd
-        // matching the old encoded project dir.
-        if (task.agentSessionId) {
+        // Resume the stored agent session if we located it. Always cd to the
+        // matched cwd (no --worktree on resume — Claude only finds sessions
+        // within --worktree's own encoded scope).
+        if (task.agentSessionId && resolved) {
           const agentId: AgentProviderId = task.agentProvider || 'claude';
           updateTerminal(terminal.id, {
             agentSessionId: task.agentSessionId,
@@ -221,7 +214,6 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             await window.electronAPI.resumeAgent(terminal.id, agentId, {
               sessionId: task.agentSessionId,
               cwd,
-              worktreeName: useLegacyResume ? undefined : worktreeName,
             });
           } catch {
             updateTerminal(terminal.id, { isClaudeMode: false, status: 'idle' });

@@ -1558,29 +1558,28 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       const projectPath = detail.projectPath || activeProject?.path || '';
       const worktreeName = (detail.clickupCustomId || detail.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
       const sep = projectPath.includes('\\') ? '\\' : '/';
-      // Legacy probe — for sessions stored under the OLD `.task-worktrees/<id>`
-      // layout (pre-v1.14.0). If we find one, resume in its original cwd
-      // without --worktree (cd handles the encoded-path lookup).
       const legacyWorktreePath = projectPath ? `${projectPath}${sep}.task-worktrees${sep}${worktreeName}` : '';
-      const newWorktreePath = projectPath ? `${projectPath}${sep}.claude${sep}worktrees${sep}${worktreeName}` : '';
-      const legacyResolved = await resolveSessionCwd(
+      const nativeWorktreePath = projectPath ? `${projectPath}${sep}.claude${sep}worktrees${sep}${worktreeName}` : '';
+
+      // Probe candidate cwds — sessions live wherever they were originally
+      // started. On resume we cd into the matched location (no --worktree
+      // since that flag only finds sessions inside its own scope).
+      const resolved = await resolveSessionCwd(
         detail.agentSessionId,
         buildSessionCandidates({
           agentCwd: detail.agentCwd,
           worktreePath: detail.worktreePath,
+          nativeWorktreePath: nativeWorktreePath || undefined,
           computedWorktreePath: legacyWorktreePath || undefined,
           projectPath: projectPath || undefined,
         }),
       );
-      const useLegacyResume = !!legacyResolved
-        && legacyResolved.cwd !== newWorktreePath
-        && legacyResolved.cwd !== projectPath;
 
-      if (useLegacyResume) {
+      if (resolved) {
         await setupTerminalWithTask(terminal, taskForSetup, false, {
-          cwd: legacyResolved!.cwd,
-          worktreePath: legacyResolved!.isWorktree ? legacyResolved!.cwd : undefined,
-          worktreeBranch: legacyResolved!.isWorktree ? detail.worktreeBranch : undefined,
+          cwd: resolved.cwd,
+          worktreePath: resolved.isWorktree ? resolved.cwd : undefined,
+          worktreeBranch: resolved.isWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
         await setupTerminalWithTask(terminal, taskForSetup, true);
@@ -1594,16 +1593,13 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         useTerminalStore.getState().updateTerminal(terminal.id, patch);
       }
 
-      // Resume the agent. With --worktree, claude finds the session itself;
-      // legacy path relies on cd-into-old-worktree.
-      if (detail.agentSessionId) {
+      if (detail.agentSessionId && resolved) {
         const agentId = detail.agentProvider || 'claude';
         const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
         try {
           await window.electronAPI.resumeAgent(terminal.id, agentId, {
             sessionId: detail.agentSessionId,
             cwd,
-            worktreeName: useLegacyResume ? undefined : worktreeName,
           });
           useTerminalStore.getState().updateTerminal(terminal.id, {
             isClaudeMode: true,
