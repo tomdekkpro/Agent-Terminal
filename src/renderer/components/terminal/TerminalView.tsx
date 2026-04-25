@@ -1296,10 +1296,18 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     setTimeout(() => setPullMessage(null), 5000);
   }, [activeProject?.path, pullStatus, refreshBranch]);
 
-  /** Setup a terminal with task info, optionally create worktree, create PTY, and optionally start Claude */
+  /** Setup a terminal with task info, optionally create worktree, create PTY, and optionally start Claude.
+   *  When `cwdOverride` is set, uses that directory as-is and skips worktree creation —
+   *  used by the Kanban restore path so we resume the agent from the same cwd the
+   *  session was created in (otherwise Claude can't find the conversation file). */
   const setupTerminalWithTask = useCallback(
-    async (terminal: { id: string }, task?: TaskManagerTask, useWorktree = true) => {
-      let cwd = activeProject?.path || '';
+    async (
+      terminal: { id: string },
+      task?: TaskManagerTask,
+      useWorktree = true,
+      cwdOverride?: { cwd: string; worktreePath?: string; worktreeBranch?: string },
+    ) => {
+      let cwd = cwdOverride?.cwd || activeProject?.path || '';
 
       if (task) {
         const taskLabel = task.customId || task.id;
@@ -1316,7 +1324,15 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           provider: task.provider,
         };
 
-        if (useWorktree && activeProject?.path) {
+        if (cwdOverride) {
+          useTerminalStore.getState().updateTerminal(terminal.id, {
+            title,
+            task: terminalTask,
+            cwd,
+            worktreePath: cwdOverride.worktreePath,
+            worktreeBranch: cwdOverride.worktreeBranch,
+          });
+        } else if (useWorktree && activeProject?.path) {
           // Create git worktree for task isolation
           const taskSlug = task.customId || task.id;
           const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug);
@@ -1536,7 +1552,28 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         provider: 'clickup',
       };
 
-      await setupTerminalWithTask(terminal, taskForSetup, true);
+      // If we have a stored session and the conversation file lives under the
+      // original cwd, resume there directly instead of creating a fresh worktree
+      // (which would put Claude into a different project dir where the session
+      // file doesn't exist → "No conversation found with session id").
+      let resumeFromOriginalCwd = false;
+      if (detail.agentSessionId && detail.agentCwd) {
+        try {
+          const exists = await window.electronAPI.claudeSessionExists(detail.agentCwd, detail.agentSessionId);
+          resumeFromOriginalCwd = !!exists?.data;
+        } catch { /* fall through to worktree path */ }
+      }
+
+      if (resumeFromOriginalCwd) {
+        const isWorktreeCwd = !!(detail.worktreePath && detail.worktreePath === detail.agentCwd);
+        await setupTerminalWithTask(terminal, taskForSetup, false, {
+          cwd: detail.agentCwd,
+          worktreePath: isWorktreeCwd ? detail.worktreePath : undefined,
+          worktreeBranch: isWorktreeCwd ? detail.worktreeBranch : undefined,
+        });
+      } else {
+        await setupTerminalWithTask(terminal, taskForSetup, true);
+      }
 
       // Carry over session + agent provider from the KanbanTask if we have them
       const patch: Partial<typeof terminal> = {};
@@ -1546,8 +1583,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         useTerminalStore.getState().updateTerminal(terminal.id, patch);
       }
 
-      // If there's a stored session, resume the agent right away
-      if (detail.agentSessionId) {
+      // Resume the agent only if the session is actually findable from the cwd
+      // we're about to run from. Otherwise leave the terminal idle so the user
+      // can start a fresh session instead of seeing the not-found error.
+      if (detail.agentSessionId && resumeFromOriginalCwd) {
         const agentId = detail.agentProvider || 'claude';
         const cwd = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id)?.cwd || '';
         try {

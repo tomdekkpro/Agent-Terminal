@@ -159,6 +159,7 @@ export const IPC_CHANNELS = {
   AUTO_FIX_EVENT: 'auto-fix:event',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
+  CLAUDE_SESSION_EXISTS: 'claude-sessions:exists',
   // Dev Server
   DEV_SERVER_START: 'dev-server:start',
   DEV_SERVER_STOP: 'dev-server:stop',

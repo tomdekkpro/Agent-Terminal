@@ -537,6 +537,11 @@ export interface KanbanTask {
   /** Agent session data — persisted across terminal recreation */
   agentSessionId?: string;
   agentProvider?: AgentProviderId;
+  /** The cwd where the agent session was actually started.
+   *  Claude CLI scopes `--resume <id>` lookups by encoded cwd, so we must
+   *  resume from the same directory the session was created in (not a
+   *  freshly-created worktree, which would be a different Claude project dir). */
+  agentCwd?: string;
 
   worktreePath?: string;
   worktreeBranch?: string;

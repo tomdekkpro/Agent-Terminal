@@ -135,28 +135,57 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         }
 
         let cwd = project.path;
+        const title = `${task.clickupCustomId || task.clickupTaskId} · ${task.clickupName.slice(0, 40)}`;
 
-        // Worktree — reuse existing if present, else create
-        const sanitized = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
-        try {
-          const wt = await window.electronAPI.createTaskWorktree(project.path, sanitized);
-          if (wt?.success && wt.data) {
-            cwd = wt.data;
-            updateTerminal(terminal.id, {
-              task: toTerminalTask(task),
-              cwd,
-              worktreePath: wt.data,
-              worktreeBranch: wt.branch,
-              title: `${task.clickupCustomId || task.clickupTaskId} · ${task.clickupName.slice(0, 40)}`,
-            });
-          } else {
-            updateTerminal(terminal.id, {
-              task: toTerminalTask(task),
-              title: `${task.clickupCustomId || task.clickupTaskId} · ${task.clickupName.slice(0, 40)}`,
-            });
+        // If we have a stored session and the conversation file lives under
+        // the original cwd, resume there directly — don't create a worktree
+        // that would land us in a different Claude project dir.
+        let resumeFromOriginalCwd = false;
+        if (task.agentSessionId && task.agentCwd) {
+          try {
+            const exists = await window.electronAPI.claudeSessionExists(task.agentCwd, task.agentSessionId);
+            resumeFromOriginalCwd = !!exists?.data;
+          } catch { /* fall through to worktree path */ }
+        }
+
+        if (resumeFromOriginalCwd && task.agentCwd) {
+          cwd = task.agentCwd;
+          const patch: Partial<Terminal> = {
+            task: toTerminalTask(task),
+            cwd,
+            title,
+          };
+          // Only mark this terminal as a worktree if the stored cwd actually IS
+          // the worktree path — otherwise the original session was started in
+          // the project folder and worktree fields should stay clear.
+          if (task.worktreePath && task.worktreePath === task.agentCwd) {
+            patch.worktreePath = task.worktreePath;
+            if (task.worktreeBranch) patch.worktreeBranch = task.worktreeBranch;
           }
-        } catch {
-          updateTerminal(terminal.id, { task: toTerminalTask(task) });
+          updateTerminal(terminal.id, patch);
+        } else {
+          // Worktree — reuse existing if present, else create
+          const sanitized = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
+          try {
+            const wt = await window.electronAPI.createTaskWorktree(project.path, sanitized);
+            if (wt?.success && wt.data) {
+              cwd = wt.data;
+              updateTerminal(terminal.id, {
+                task: toTerminalTask(task),
+                cwd,
+                worktreePath: wt.data,
+                worktreeBranch: wt.branch,
+                title,
+              });
+            } else {
+              updateTerminal(terminal.id, {
+                task: toTerminalTask(task),
+                title,
+              });
+            }
+          } catch {
+            updateTerminal(terminal.id, { task: toTerminalTask(task) });
+          }
         }
 
         // Base branch
@@ -175,8 +204,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           rows: 24,
         });
 
-        // Resume the stored agent session if we have one
-        if (task.agentSessionId) {
+        // Resume the stored agent session — only if the conversation file is
+        // actually findable from the cwd we're about to run from. Otherwise
+        // leave the terminal idle so the user can start a fresh session
+        // instead of seeing "No conversation found with session id".
+        if (task.agentSessionId && resumeFromOriginalCwd) {
           const agentId: AgentProviderId = task.agentProvider || 'claude';
           updateTerminal(terminal.id, {
             agentSessionId: task.agentSessionId,

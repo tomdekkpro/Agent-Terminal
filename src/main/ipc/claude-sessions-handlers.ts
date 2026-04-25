@@ -37,4 +37,24 @@ export function registerClaudeSessionsHandlers(ipcMain: IpcMain): void {
       };
     }
   });
+
+  // Check if a specific session file exists for a given cwd. Used by the
+  // Kanban restore path to verify the stored agentCwd is still the right
+  // place to resume from before invoking `claude --resume`.
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_SESSION_EXISTS,
+    async (_event, cwd: string, sessionId: string) => {
+      try {
+        if (!cwd || !sessionId) return { success: true, data: false };
+        const encoded = encodeProjectPath(cwd);
+        const sessionPath = join(os.homedir(), '.claude', 'projects', encoded, `${sessionId}.jsonl`);
+        return { success: true, data: existsSync(sessionPath) };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to check session file',
+        };
+      }
+    },
+  );
 }

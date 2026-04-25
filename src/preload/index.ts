@@ -299,6 +299,7 @@ const electronAPI = {
 
   // Claude Sessions Browser
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSIONS_LIST, cwd),
+  claudeSessionExists: (cwd: string, sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSION_EXISTS, cwd, sessionId),
 
   // File utilities
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

@@ -73,6 +73,10 @@ export function useGlobalTerminalListeners() {
         if (!match) return;
         const patch: Record<string, unknown> = { agentSessionId: sessionId };
         if (terminal?.agentProvider) patch.agentProvider = terminal.agentProvider;
+        // Capture the cwd the session was actually started in. Claude scopes
+        // `--resume <id>` lookups by encoded cwd, so on restore we must come
+        // back to this exact directory or the session won't be found.
+        if (terminal?.cwd) patch.agentCwd = terminal.cwd;
         if (terminal?.worktreePath) patch.worktreePath = terminal.worktreePath;
         if (terminal?.worktreeBranch) patch.worktreeBranch = terminal.worktreeBranch;
         // Agent is running → the task is in active work. Only advance from
