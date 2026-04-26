@@ -143,10 +143,15 @@ export function KanbanView(_props: KanbanViewProps) {
     return map;
   }, [terminals]);
 
-  // Apply assignee filter client-side — all tasks fetched; filter just for display
+  // Apply assignee filter client-side — all tasks fetched; filter just for display.
+  // Local tasks have no ClickUp assignees by definition; they're user-created on
+  // this machine so they always belong to the current user — show them through
+  // any assignee filter.
   const visibleTasks = useMemo(() => {
     if (!assigneeFilter) return tasks;
-    return tasks.filter((t) => t.clickupAssignees?.some((a) => a.id === assigneeFilter));
+    return tasks.filter(
+      (t) => t.provider === 'local' || t.clickupAssignees?.some((a) => a.id === assigneeFilter),
+    );
   }, [tasks, assigneeFilter]);
 
   // Filter out already-imported tasks and sort by priority (Urgent → Low → no priority)
