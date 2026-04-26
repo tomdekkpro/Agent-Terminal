@@ -72,6 +72,14 @@ interface KanbanState {
     projectPath: string;
     projectId?: string;
   }) => Promise<KanbanTask | null>;
+  /** Create a local-only task (no ClickUp link). */
+  createLocalTask: (input: {
+    name: string;
+    description?: string;
+    projectPath: string;
+    projectId?: string;
+    kanbanStatus?: KanbanTaskStatus;
+  }) => Promise<KanbanTask | null>;
   moveTask: (taskId: string, to: KanbanTaskStatus) => Promise<void>;
   updateTask: (taskId: string, patch: Partial<KanbanTask>) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
@@ -273,6 +281,27 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
       return null;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : 'Failed to import task' });
+      return null;
+    }
+  },
+
+  createLocalTask: async ({ name, description, projectPath, projectId, kanbanStatus }) => {
+    try {
+      const result = await window.electronAPI.kanbanCreateLocal({
+        name,
+        description,
+        projectPath,
+        projectId,
+        kanbanStatus,
+      });
+      if (result.success && result.data) {
+        set((state) => ({ tasks: upsertTask(state.tasks, result.data) }));
+        return result.data;
+      }
+      set({ error: result.error || 'Failed to create local task' });
+      return null;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to create local task' });
       return null;
     }
   },

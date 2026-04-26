@@ -245,20 +245,25 @@ export function KanbanCard({
           >
             {effectiveAutoMerge ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
           </button>
+          {task.clickupUrl && task.provider !== 'local' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                window.electronAPI.openExternal(task.clickupUrl);
+              }}
+              title="Open in ClickUp"
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
+            >
+              <ExternalLink className="w-3 h-3" />
+            </button>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
-              window.electronAPI.openExternal(task.clickupUrl);
-            }}
-            title="Open in ClickUp"
-            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
-          >
-            <ExternalLink className="w-3 h-3" />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              if (confirm(`Remove "${task.clickupName}" from your Kanban? The ClickUp task is not deleted.`)) {
+              const msg = task.provider === 'local'
+                ? `Delete "${task.clickupName}"? This local task cannot be recovered.`
+                : `Remove "${task.clickupName}" from your Kanban? The ClickUp task is not deleted.`;
+              if (confirm(msg)) {
                 onDelete(task.id);
               }
             }}

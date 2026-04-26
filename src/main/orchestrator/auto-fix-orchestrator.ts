@@ -208,6 +208,8 @@ class AutoFixOrchestrator {
     const settings = getSettings();
     await Promise.all(
       tasks.map(async (task) => {
+        // Local tasks aren't backed by ClickUp.
+        if (task.provider === 'local') return;
         try {
           const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
           if (!result.success) return;
@@ -255,6 +257,8 @@ class AutoFixOrchestrator {
     const eligible: KanbanTask[] = [];
 
     for (const task of all) {
+      // Local tasks have no ClickUp QC signal — skip the auto-fix loop.
+      if (task.provider === 'local') continue;
       if (task.clickupStatus?.toLowerCase() !== failedStatus) continue;
 
       // Mirror Kanban status to Failed column whenever ClickUp reports Failed
@@ -320,7 +324,9 @@ class AutoFixOrchestrator {
     const doneStatus = (settings.autoFixDoneStatus || 'done').toLowerCase();
 
     const tracked = listKanbanTasks().filter(
-      (t) => t.autoFixState === 'awaiting-qc' || t.autoFixState === 'merging',
+      (t) =>
+        t.provider !== 'local' &&
+        (t.autoFixState === 'awaiting-qc' || t.autoFixState === 'merging'),
     );
 
     for (const task of tracked) {

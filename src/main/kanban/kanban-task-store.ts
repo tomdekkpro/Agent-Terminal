@@ -26,7 +26,13 @@ function load(): StoreData {
   try {
     if (existsSync(STORE_FILE)) {
       const raw = JSON.parse(readFileSync(STORE_FILE, 'utf-8'));
-      cached = { tasks: Array.isArray(raw.tasks) ? raw.tasks : [] };
+      const tasks: KanbanTask[] = Array.isArray(raw.tasks) ? raw.tasks : [];
+      // Backfill provider on records saved before v1.17.0 — every persisted
+      // task pre-dates local creation, so they're all clickup-sourced.
+      for (const t of tasks) {
+        if (!t.provider) t.provider = 'clickup';
+      }
+      cached = { tasks };
       debugLog('[KanbanStore] Loaded', cached.tasks.length, 'kanban task(s)');
       return cached;
     }
@@ -103,6 +109,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
   const now = new Date().toISOString();
   const task: KanbanTask = {
     id: randomUUID(),
+    provider: 'clickup',
     clickupTaskId: input.clickupTaskId,
     clickupCustomId: input.clickupCustomId,
     clickupName: input.clickupName,
@@ -113,6 +120,48 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     clickupPriority: input.clickupPriority,
     clickupTags: input.clickupTags,
     clickupUpdatedAt: input.clickupUpdatedAt,
+    projectPath: input.projectPath,
+    projectId: input.projectId,
+    kanbanStatus: input.kanbanStatus || 'todo',
+    autoFixState: 'idle',
+    iterationCount: 0,
+    lastSeenFailureCommentId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const data = load();
+  data.tasks.push(task);
+  scheduleSave();
+  return task;
+}
+
+export interface CreateLocalTaskInput {
+  name: string;
+  description?: string;
+  projectPath: string;
+  projectId?: string;
+  kanbanStatus?: KanbanTaskStatus;
+}
+
+/** Create a local-only Kanban task (no ClickUp link). The orchestrator
+ *  ignores `provider==='local'` records, and ClickUp-sync flows skip them. */
+export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  const task: KanbanTask = {
+    id,
+    provider: 'local',
+    // Synthesize a stable id so kanbanList -> task lookups still work. The
+    // `local:` prefix prevents collision with real ClickUp ids.
+    clickupTaskId: `local:${id}`,
+    clickupCustomId: undefined,
+    clickupName: input.name,
+    clickupStatus: 'Local',
+    clickupStatusColor: '#94a3b8',
+    clickupUrl: '',
+    clickupAssignees: [],
+    description: input.description,
     projectPath: input.projectPath,
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',

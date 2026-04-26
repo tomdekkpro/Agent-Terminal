@@ -264,27 +264,45 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
       if (skipPermissions) {
         useTerminalStore.getState().updateTerminal(terminal.id, { skipPermissions: true });
       }
-      // Send the task context as the first prompt
-      if (terminal.task) {
-        const taskId = terminal.task.id;
-        window.electronAPI.getTaskManagerTask(taskId).then((res: any) => {
-          if (!res?.success || !res.data) return;
-          const t = res.data as TaskManagerTask;
+      // Send the task context as the first prompt. Local tasks have no
+      // ClickUp source — use the description stored on the KanbanTask.
+      const kanbanTask = task; // narrow for closure
+      if (terminal.task && kanbanTask) {
+        if (kanbanTask.provider === 'local') {
           const parts: string[] = [
-            `I'm working on task ${t.customId || t.id}: ${t.name}`,
-            `Status: ${t.status.name}`,
+            `I'm working on task: ${kanbanTask.clickupName}`,
           ];
-          if (t.priority) parts.push(`Priority: ${t.priority.name}`);
-          if (t.description) {
-            const desc = t.description.length > 1000 ? t.description.slice(0, 1000) + '...' : t.description;
+          if (kanbanTask.description) {
+            const desc = kanbanTask.description.length > 4000
+              ? kanbanTask.description.slice(0, 4000) + '\n…(truncated)'
+              : kanbanTask.description;
             parts.push(`Description:\n${desc}`);
           }
-          if (t.url) parts.push(`URL: ${t.url}`);
           const prompt = parts.join('\n');
           setTimeout(() => {
             window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
           }, 3000);
-        }).catch(() => { /* non-critical */ });
+        } else {
+          const taskId = terminal.task.id;
+          window.electronAPI.getTaskManagerTask(taskId).then((res: any) => {
+            if (!res?.success || !res.data) return;
+            const t = res.data as TaskManagerTask;
+            const parts: string[] = [
+              `I'm working on task ${t.customId || t.id}: ${t.name}`,
+              `Status: ${t.status.name}`,
+            ];
+            if (t.priority) parts.push(`Priority: ${t.priority.name}`);
+            if (t.description) {
+              const desc = t.description.length > 1000 ? t.description.slice(0, 1000) + '...' : t.description;
+              parts.push(`Description:\n${desc}`);
+            }
+            if (t.url) parts.push(`URL: ${t.url}`);
+            const prompt = parts.join('\n');
+            setTimeout(() => {
+              window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+            }, 3000);
+          }).catch(() => { /* non-critical */ });
+        }
       }
     }
   }, [terminal, projects, settings.agentModels]);

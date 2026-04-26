@@ -6,9 +6,11 @@ import {
   listKanbanTasks,
   getKanbanTask,
   importKanbanTask,
+  createLocalKanbanTask,
   updateKanbanTask,
   deleteKanbanTask,
   type ImportTaskInput,
+  type CreateLocalTaskInput,
 } from '../kanban/kanban-task-store';
 import { ClickUpProvider } from './providers/clickup';
 import { getSettings } from './settings-handlers';
@@ -42,6 +44,11 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
   const updated: KanbanTask[] = [];
   await Promise.all(
     tasks.map(async (task) => {
+      // Local tasks aren't backed by ClickUp — leave them untouched.
+      if (task.provider === 'local') {
+        updated.push(task);
+        return;
+      }
       try {
         const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
         if (!result.success) {
@@ -117,6 +124,26 @@ export function registerKanbanHandlers(
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to import task',
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.KANBAN_CREATE_LOCAL, async (_event, input: CreateLocalTaskInput) => {
+    try {
+      if (!input?.name?.trim()) {
+        return { success: false, error: 'Task name is required' };
+      }
+      if (!input?.projectPath) {
+        return { success: false, error: 'Project path is required' };
+      }
+      const task = createLocalKanbanTask(input);
+      emitKanbanEvent({ type: 'task-created', task });
+      debugLog('[Kanban] Created local task', task.id);
+      return { success: true, data: task };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to create local task',
       };
     }
   });

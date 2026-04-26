@@ -279,6 +279,7 @@ const electronAPI = {
   kanbanList: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_LIST),
   kanbanGet: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_GET, id),
   kanbanImport: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_IMPORT, input),
+  kanbanCreateLocal: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_CREATE_LOCAL, input),
   kanbanUpdate: (id: string, patch: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_UPDATE, id, patch),
   kanbanDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DELETE, id),
   kanbanRefreshClickup: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP),

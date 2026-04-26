@@ -28,6 +28,7 @@ import { cn } from '../../../shared/utils';
 import { KanbanColumn } from './KanbanColumn';
 import { BacklogColumn } from './BacklogColumn';
 import { ImportTaskModal } from './ImportTaskModal';
+import { CreateLocalTaskModal } from './CreateLocalTaskModal';
 import { TaskTerminalModal } from './TaskTerminalModal';
 import { useProjectStore } from '../../stores/project-store';
 import type { TaskManagerTask } from '../../../shared/types';
@@ -78,6 +79,7 @@ export function KanbanView(_props: KanbanViewProps) {
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showCreateLocal, setShowCreateLocal] = useState(false);
   const [importingBacklogIds, setImportingBacklogIds] = useState<Set<string>>(new Set());
   const [activeTaskModalId, setActiveTaskModalId] = useState<string | null>(null);
   const [autoFixFilter, setAutoFixFilter] = useState<'fixing' | 'awaiting-qc' | 'escalated' | null>(null);
@@ -314,8 +316,17 @@ export function KanbanView(_props: KanbanViewProps) {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowImport(true)}
+              onClick={() => setShowCreateLocal(true)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
+              title="Create a local task that doesn't sync with ClickUp"
+            >
+              <Plus className="w-4 h-4" />
+              New Task
+            </button>
+            <button
+              onClick={() => setShowImport(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-[var(--bg-tertiary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/80 transition-colors"
+              title="Import an existing task from ClickUp"
             >
               <Plus className="w-4 h-4" />
               Import from ClickUp
@@ -584,6 +595,7 @@ export function KanbanView(_props: KanbanViewProps) {
       </div>
 
       <ImportTaskModal open={showImport} onClose={() => setShowImport(false)} />
+      <CreateLocalTaskModal open={showCreateLocal} onClose={() => setShowCreateLocal(false)} />
       <TaskTerminalModal task={activeModalTask} onClose={() => setActiveTaskModalId(null)} />
     </div>
   );

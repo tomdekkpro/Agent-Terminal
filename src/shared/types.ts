@@ -536,12 +536,21 @@ export type AutoFixTaskState =
  *  The `clickup*` fields are a snapshot refreshed on poll. */
 export interface KanbanTask {
   id: string;                       // local uuid
-  clickupTaskId: string;            // ClickUp task id
+  /** 'clickup' = imported from ClickUp; the auto-fix orchestrator and
+   *  ClickUp-sync flows process these. 'local' = user-created on this
+   *  machine; clickupUrl is empty and orchestrator skips the task. */
+  provider?: 'clickup' | 'local';
+  /** For local tasks: `local:<uuid>` (= the local id). For clickup: real id. */
+  clickupTaskId: string;
   clickupCustomId?: string;
   clickupName: string;
   clickupStatus: string;            // current ClickUp status name (snapshot)
   clickupStatusColor?: string;
+  /** Empty string for local tasks. */
   clickupUrl: string;
+  /** Free-text body for local tasks, used as the first prompt to the agent.
+   *  ClickUp tasks fetch description live from the API. */
+  description?: string;
   clickupAssignees?: Array<{ id: string; username: string; initials?: string; color?: string }>;
   clickupPriority?: { name: string; color: string };
   clickupTags?: Array<{ name: string; bgColor: string; fgColor: string }>;
