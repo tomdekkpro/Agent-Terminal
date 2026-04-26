@@ -1,12 +1,64 @@
 import { type IpcMain } from 'electron';
 import { exec, execSync } from 'child_process';
-import { existsSync, readFileSync, appendFileSync, cpSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, statSync, appendFileSync, cpSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { debugLog, debugError } from '../../shared/utils';
 
 const GIT_TIMEOUT = 30000; // 30 seconds for most git operations
 const NETWORK_TIMEOUT = 60000; // 60 seconds for network operations (push, pull, fetch)
+
+/** Cap for untracked-file preview to keep the renderer responsive. */
+const UNTRACKED_MAX_BYTES = 1_000_000;
+const UNTRACKED_MAX_LINES = 10_000;
+
+/** Build a unified-diff representation of a new (untracked) file by showing
+ *  every line as an addition. Mirrors the format `git diff` produces for a
+ *  fresh add so the renderer's existing diff parser/highlighter just works. */
+function buildUntrackedDiff(cwd: string, relPath: string): string {
+  const fullPath = join(cwd, relPath);
+  const header = `diff --git a/${relPath} b/${relPath}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/${relPath}\n`;
+  let stat;
+  try {
+    stat = statSync(fullPath);
+  } catch {
+    return '';
+  }
+  if (stat.size === 0) {
+    return header + '@@ -0,0 +0,0 @@\n';
+  }
+  if (stat.size > UNTRACKED_MAX_BYTES) {
+    return (
+      header +
+      `@@ -0,0 +1,1 @@\n+(file too large to preview — ${(stat.size / 1024).toFixed(1)} KB)\n`
+    );
+  }
+  let buf: Buffer;
+  try {
+    buf = readFileSync(fullPath);
+  } catch {
+    return '';
+  }
+  // Binary heuristic: any null byte in the first 8KB → treat as binary.
+  const probe = buf.subarray(0, Math.min(buf.length, 8192));
+  if (probe.includes(0)) {
+    return (
+      header +
+      `@@ -0,0 +1,1 @@\n+(binary file — ${(stat.size / 1024).toFixed(1)} KB)\n`
+    );
+  }
+  const text = buf.toString('utf-8');
+  // split('\n') leaves a trailing '' when the file ends with '\n' — drop it.
+  const lines = text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const truncated = lines.length > UNTRACKED_MAX_LINES;
+  const shown = truncated ? lines.slice(0, UNTRACKED_MAX_LINES) : lines;
+  const body = shown.map((l) => '+' + l).join('\n');
+  const trailer = truncated
+    ? `\n+(...truncated — ${lines.length - UNTRACKED_MAX_LINES} more lines)`
+    : '';
+  return `${header}@@ -0,0 +1,${shown.length} @@\n${body}${trailer}\n`;
+}
 
 /** Run a git command asynchronously with timeout (non-blocking) */
 function gitExec(command: string, cwd: string, timeout = GIT_TIMEOUT): Promise<string> {
@@ -653,13 +705,14 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           }
         } catch { /* ignore */ }
 
-        // Untracked new files
+        // Untracked new files — synthesize an "all added" diff so the panel
+        // can preview the content (capped at 1MB / 10k lines, binary detected).
         try {
           const untracked = await gitExec('git ls-files --others --exclude-standard', cwd);
           if (untracked) {
             for (const filePath of untracked.split('\n').filter(Boolean)) {
-              // Don't include diff content for untracked (too large), just mark as new
-              files.push({ path: filePath, status: 'untracked', diff: '' });
+              const diff = buildUntrackedDiff(cwd, filePath);
+              files.push({ path: filePath, status: 'untracked', diff });
             }
           }
         } catch { /* ignore */ }
