@@ -983,7 +983,7 @@ function CompleteTaskModal({
 /** Grid column class based on terminal count */
 // ─── Preview Split Layout ───────────────────────────────────────
 
-function ChangesSplitLayout({
+export function ChangesSplitLayout({
   terminal,
   children,
 }: {

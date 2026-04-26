@@ -16,6 +16,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { ChangesSplitLayout } from '../terminal/TerminalView';
 import { cn } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 
@@ -448,17 +449,33 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
           {terminal && (
             <div className={cn('flex-1 min-h-0 flex flex-col')}>
-              <TerminalPanel
-                key={terminal.id}
-                terminal={terminal}
-                isActive={true}
-                agentProviders={agentProviders}
-                skills={projects.find((p) => p.id === terminal.projectId)?.skills}
-                onInvokeAgent={handleInvokeAgent}
-                onProviderChange={handleProviderChange}
-                onClose={handleCloseTerminal}
-                onFocus={() => useTerminalStore.getState().setActiveTerminal(terminal.id)}
-              />
+              {terminal.previewOpen ? (
+                <ChangesSplitLayout terminal={terminal}>
+                  <TerminalPanel
+                    key={terminal.id}
+                    terminal={terminal}
+                    isActive={true}
+                    agentProviders={agentProviders}
+                    skills={projects.find((p) => p.id === terminal.projectId)?.skills}
+                    onInvokeAgent={handleInvokeAgent}
+                    onProviderChange={handleProviderChange}
+                    onClose={handleCloseTerminal}
+                    onFocus={() => useTerminalStore.getState().setActiveTerminal(terminal.id)}
+                  />
+                </ChangesSplitLayout>
+              ) : (
+                <TerminalPanel
+                  key={terminal.id}
+                  terminal={terminal}
+                  isActive={true}
+                  agentProviders={agentProviders}
+                  skills={projects.find((p) => p.id === terminal.projectId)?.skills}
+                  onInvokeAgent={handleInvokeAgent}
+                  onProviderChange={handleProviderChange}
+                  onClose={handleCloseTerminal}
+                  onFocus={() => useTerminalStore.getState().setActiveTerminal(terminal.id)}
+                />
+              )}
             </div>
           )}
         </div>
