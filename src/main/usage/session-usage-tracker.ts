@@ -1,19 +1,24 @@
 /**
- * Watches a Claude Code session JSONL file and emits per-terminal cumulative
- * usage (tokens + cost) to the renderer.
+ * Watches a Claude Code session and its sub-agent JSONLs, emitting per-terminal
+ * cumulative usage (tokens + cost) to the renderer.
  *
- * Why polling instead of fs.watch: Claude appends lines while we're reading
- * and Windows fs.watch is unreliable for append-only logs. A 3-second poll is
- * cheap (only reads bytes appended since last poll) and good enough for a
- * cost-tracking UI.
+ * Layout on disk:
+ *   ~/.claude/projects/<encoded>/<sessionId>.jsonl              ← parent session
+ *   ~/.claude/projects/<encoded>/<sessionId>/subagents/*.jsonl  ← Task / Agent
+ *                                                                   tool spawns
+ * Sub-agents (Explore, Task tool, etc.) have their own conversation files —
+ * if we only read the parent JSONL, sub-agent token usage is invisible. So
+ * we discover all `.jsonl` files under `<sessionId>/` recursively and track
+ * each one's byte offset independently. New sub-agent files appearing
+ * mid-session are picked up on the next poll.
  *
- * Usage source: every assistant message in the session JSONL has a `usage`
- * block with input/output tokens plus cache-creation/read counts (and the
- * 5m/1h ephemeral split). We sum across the file and price each turn at the
- * model's published rate.
+ * Polling instead of fs.watch: Claude appends while we read and Windows
+ * fs.watch is unreliable for append-only logs. 3s poll is cheap — we only
+ * read bytes appended since last poll — and good enough for a cost UI.
  */
 
-import { existsSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
+import { join, dirname, basename } from 'path';
 import type { BrowserWindow } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { computeCost, type RawUsage } from './session-cost';
@@ -30,13 +35,22 @@ interface UsageAccumulator {
   model?: string;
 }
 
+interface FileWatch {
+  path: string;
+  byteOffset: number;
+  partialLine: string;
+}
+
 interface Watcher {
   terminalId: string;
+  /** Parent session JSONL — used both as a file to read and to derive the
+   *  sibling directory (`<dirname>/<sessionId>/`) where sub-agent files live. */
   sessionFilePath: string;
-  /** Bytes already consumed from the file. We re-read only the tail. */
-  byteOffset: number;
-  /** Carry-over for a partial last line between polls. */
-  partialLine: string;
+  /** `<projectDir>/<sessionId>` — root of recursive sub-agent discovery. */
+  subagentRoot: string;
+  /** Tracked file paths → per-file watch state. New files (e.g. spawned
+   *  sub-agents) get added on each poll. */
+  files: Map<string, FileWatch>;
   accumulated: UsageAccumulator;
   timer: NodeJS.Timeout;
 }
@@ -51,6 +65,28 @@ function emptyAccumulator(): UsageAccumulator {
   };
 }
 
+/** Recursively list all .jsonl files under a directory. Returns [] if the
+ *  directory doesn't exist (no sub-agents have spawned yet). */
+function listJsonlRecursive(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      out.push(...listJsonlRecursive(full));
+    } else if (e.isFile() && e.name.endsWith('.jsonl')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
 class SessionUsageTracker {
   private watchers = new Map<string, Watcher>();
   private getWindow: () => BrowserWindow | null = () => null;
@@ -59,27 +95,30 @@ class SessionUsageTracker {
     this.getWindow = getter;
   }
 
-  /**
-   * Start watching a session JSONL for a terminal. If already watching the
-   * same file, no-op. If the file path changed (e.g. session forked), the
-   * previous watcher is reset.
-   */
   start(terminalId: string, sessionFilePath: string): void {
     const existing = this.watchers.get(terminalId);
     if (existing && existing.sessionFilePath === sessionFilePath) return;
     if (existing) this.stop(terminalId);
 
+    // Sub-agent JSONLs live in `<projectDir>/<sessionId>/`, sibling to the
+    // parent file. Strip `.jsonl` from the filename to get the dir name.
+    const projectDir = dirname(sessionFilePath);
+    const sessionId = basename(sessionFilePath).replace(/\.jsonl$/, '');
+    const subagentRoot = join(projectDir, sessionId);
+
+    const files = new Map<string, FileWatch>();
+    files.set(sessionFilePath, { path: sessionFilePath, byteOffset: 0, partialLine: '' });
+
     const watcher: Watcher = {
       terminalId,
       sessionFilePath,
-      byteOffset: 0,
-      partialLine: '',
+      subagentRoot,
+      files,
       accumulated: emptyAccumulator(),
       timer: setInterval(() => this.poll(terminalId), POLL_INTERVAL_MS),
     };
     this.watchers.set(terminalId, watcher);
     debugLog('[SessionUsage] Watching:', terminalId, sessionFilePath);
-    // Immediate first poll so the UI populates without a 3s delay
     this.poll(terminalId);
   }
 
@@ -98,42 +137,66 @@ class SessionUsageTracker {
   private poll(terminalId: string): void {
     const w = this.watchers.get(terminalId);
     if (!w) return;
-    if (!existsSync(w.sessionFilePath)) return;
 
+    // Discover new sub-agent JSONLs that appeared since the last poll. They
+    // get added at offset 0 so the next read consumes them from the start.
+    for (const path of listJsonlRecursive(w.subagentRoot)) {
+      if (!w.files.has(path)) {
+        w.files.set(path, { path, byteOffset: 0, partialLine: '' });
+      }
+    }
+
+    let truncated = false;
+    for (const fw of w.files.values()) {
+      if (this.processFile(w, fw)) truncated = true;
+    }
+
+    if (truncated) {
+      // Some file shrank — accumulator is now wrong (it was summed over
+      // bytes that no longer exist). Reset everything and re-scan from 0
+      // on the next tick. Re-process synchronously here.
+      w.accumulated = emptyAccumulator();
+      for (const fw of w.files.values()) {
+        fw.byteOffset = 0;
+        fw.partialLine = '';
+      }
+      for (const fw of w.files.values()) {
+        this.processFile(w, fw);
+      }
+    }
+
+    this.emit(w);
+  }
+
+  /** Read the tail of one file, append usage to the accumulator. Returns
+   *  true if the file was truncated (caller does a full reset). */
+  private processFile(w: Watcher, fw: FileWatch): boolean {
+    if (!existsSync(fw.path)) return false;
     let stat;
     try {
-      stat = statSync(w.sessionFilePath);
+      stat = statSync(fw.path);
     } catch {
-      return;
+      return false;
     }
 
-    if (stat.size === w.byteOffset) return; // unchanged
-
-    if (stat.size < w.byteOffset) {
-      // File was truncated or replaced — restart from zero.
-      w.byteOffset = 0;
-      w.partialLine = '';
-      w.accumulated = emptyAccumulator();
-    }
+    if (stat.size === fw.byteOffset) return false;
+    if (stat.size < fw.byteOffset) return true; // truncation flag
 
     let buf: Buffer;
     try {
-      const fd = openSync(w.sessionFilePath, 'r');
-      const length = stat.size - w.byteOffset;
+      const fd = openSync(fw.path, 'r');
+      const length = stat.size - fw.byteOffset;
       buf = Buffer.alloc(length);
-      readSync(fd, buf, 0, length, w.byteOffset);
+      readSync(fd, buf, 0, length, fw.byteOffset);
       closeSync(fd);
     } catch {
-      return;
+      return false;
     }
 
-    w.byteOffset = stat.size;
-    const text = w.partialLine + buf.toString('utf-8');
-
-    // Split on newline; the last element may be a partial line that the
-    // file is still being written to. Hold it for the next poll.
+    fw.byteOffset = stat.size;
+    const text = fw.partialLine + buf.toString('utf-8');
     const lines = text.split('\n');
-    w.partialLine = lines.pop() ?? '';
+    fw.partialLine = lines.pop() ?? '';
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -145,8 +208,7 @@ class SessionUsageTracker {
         /* malformed JSON line — likely a torn write, skip */
       }
     }
-
-    this.emit(w);
+    return false;
   }
 
   private processEntry(w: Watcher, entry: any): void {
