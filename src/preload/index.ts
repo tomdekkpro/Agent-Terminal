@@ -283,6 +283,7 @@ const electronAPI = {
   kanbanUpdate: (id: string, patch: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_UPDATE, id, patch),
   kanbanDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DELETE, id),
   kanbanRefreshClickup: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP),
+  kanbanDailyCost: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DAILY_COST),
   onKanbanEvent: (callback: (event: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on(IPC_CHANNELS.KANBAN_EVENT, handler);

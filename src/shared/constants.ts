@@ -151,6 +151,7 @@ export const IPC_CHANNELS = {
   KANBAN_DELETE: 'kanban:delete',
   KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',
   KANBAN_EVENT: 'kanban:event',
+  KANBAN_DAILY_COST: 'kanban:daily-cost',
   // Auto-Fix Loop
   AUTO_FIX_STATUS: 'auto-fix:status',
   AUTO_FIX_START: 'auto-fix:start',

@@ -161,6 +161,8 @@ export interface AppSettings {
   codeReviewTagName: string;
   // Kanban filter — persisted assignee id; empty = show all tasks; also gates the auto-fix loop
   kanbanFilterAssigneeId: string;
+  /** Persisted project filter for the Kanban board. Empty = show all projects. */
+  kanbanFilterProjectId: string;
   /** ClickUp status names (comma-separated) that count as backlog candidates — shown in the leftmost column when not yet imported */
   kanbanBacklogStatuses: string;
   /** ClickUp list id used to populate the backlog (falls back to clickupListId) */
@@ -210,6 +212,21 @@ export interface UsageCostData {
   linesAdded?: number;
   linesRemoved?: number;
   timestamp: Date;
+}
+
+/** Per-day cost breakdown across all imported Kanban tasks, derived from
+ *  Claude session JSONL timestamps. `byDay` is sorted oldest → newest and
+ *  always covers the most recent 7 calendar days (entries with $0 included
+ *  so the chart has a stable shape). */
+export interface KanbanDailyCostBreakdown {
+  /** YYYY-MM-DD (local TZ) → cost */
+  byDay: { date: string; cost: number }[];
+  today: number;
+  yesterday: number;
+  /** Sum of the last 7 days inclusive of today. */
+  week: number;
+  /** Sum across the entire history found on disk. */
+  total: number;
 }
 
 /** Cumulative per-terminal usage accumulated from the session JSONL.
@@ -818,6 +835,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
   kanbanFilterAssigneeId: '',
+  kanbanFilterProjectId: '',
   kanbanBacklogStatuses: 'to do, open, backlog, planning, ready',
   kanbanBacklogListId: '',
   kanbanInProgressStatuses: 'in progress, in development, developing, working',

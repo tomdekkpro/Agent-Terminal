@@ -15,6 +15,7 @@ import {
 import { ClickUpProvider } from './providers/clickup';
 import { getSettings } from './settings-handlers';
 import { mapClickupStatusToKanban } from '../../shared/kanban-status-mapper';
+import { computeDailyCostBreakdown } from '../usage/daily-cost-aggregator';
 
 const clickUpProvider = new ClickUpProvider();
 
@@ -163,6 +164,19 @@ export function registerKanbanHandlers(
     if (!ok) return { success: false, error: 'Task not found' };
     emitKanbanEvent({ type: 'task-deleted', id });
     return { success: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.KANBAN_DAILY_COST, async () => {
+    try {
+      const breakdown = computeDailyCostBreakdown(listKanbanTasks());
+      return { success: true, data: breakdown };
+    } catch (error) {
+      debugError('[Kanban] Daily cost aggregation failed:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to compute daily cost',
+      };
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP, async () => {

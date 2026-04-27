@@ -14,6 +14,7 @@ import {
   Unlock,
   Trash2,
   Play,
+  FolderOpen,
 } from 'lucide-react';
 import type { KanbanTask, AutoFixTaskState } from '../../../shared/types';
 import type { Terminal } from '../../stores/terminal-store';
@@ -282,6 +283,18 @@ export function KanbanCard({
           >
             {effectiveAutoMerge ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
           </button>
+          {task.projectPath && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                void window.electronAPI.openPath(task.projectPath);
+              }}
+              title={`Open project folder: ${task.projectPath}`}
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
+            >
+              <FolderOpen className="w-3 h-3" />
+            </button>
+          )}
           {task.clickupUrl && task.provider !== 'local' && (
             <button
               onClick={(e) => {

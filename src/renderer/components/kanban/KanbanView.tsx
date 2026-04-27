@@ -13,6 +13,8 @@ import {
   User,
   ChevronDown,
   Plus,
+  Folder,
+  FolderOpen,
 } from 'lucide-react';
 import {
   useKanbanStore,
@@ -32,6 +34,8 @@ import { CreateLocalTaskModal } from './CreateLocalTaskModal';
 import { TaskTerminalModal } from './TaskTerminalModal';
 import { useProjectStore } from '../../stores/project-store';
 import type { TaskManagerTask } from '../../../shared/types';
+import { UsageIndicator } from '../usage/UsageIndicator';
+import { KanbanCostSummary } from './KanbanCostSummary';
 
 interface KanbanViewProps {
   /** Kept for parity with other views — the Kanban handles card activation inline via the TaskTerminalModal */
@@ -59,6 +63,7 @@ export function KanbanView(_props: KanbanViewProps) {
     deleteTask,
     refreshClickupSnapshots,
     setAssigneeFilter,
+    setProjectFilter,
     clearError,
     refreshAutoFix,
     setAutoFixStatus,
@@ -75,15 +80,18 @@ export function KanbanView(_props: KanbanViewProps) {
   const autoFixMaxIterations = useSettingsStore((s) => s.settings.autoFixMaxIterations);
   const autoFixAutoMerge = useSettingsStore((s) => s.settings.autoFixAutoMerge);
   const assigneeFilter = useSettingsStore((s) => s.settings.kanbanFilterAssigneeId);
+  const projectFilter = useSettingsStore((s) => s.settings.kanbanFilterProjectId);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [showAssigneeDropdown, setShowAssigneeDropdown] = useState(false);
+  const [showProjectDropdown, setShowProjectDropdown] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showCreateLocal, setShowCreateLocal] = useState(false);
   const [importingBacklogIds, setImportingBacklogIds] = useState<Set<string>>(new Set());
   const [activeTaskModalId, setActiveTaskModalId] = useState<string | null>(null);
   const [autoFixFilter, setAutoFixFilter] = useState<'fixing' | 'awaiting-qc' | 'escalated' | null>(null);
   const assigneeDropdownRef = useRef<HTMLDivElement>(null);
+  const projectDropdownRef = useRef<HTMLDivElement>(null);
 
   const activeModalTask = tasks.find((t) => t.id === activeTaskModalId) || null;
 
@@ -123,11 +131,14 @@ export function KanbanView(_props: KanbanViewProps) {
     };
   }, [refreshAutoFix, setAutoFixStatus]);
 
-  // Close assignee dropdown on outside click
+  // Close filter dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (assigneeDropdownRef.current && !assigneeDropdownRef.current.contains(e.target as Node)) {
         setShowAssigneeDropdown(false);
+      }
+      if (projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
+        setShowProjectDropdown(false);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -143,16 +154,29 @@ export function KanbanView(_props: KanbanViewProps) {
     return map;
   }, [terminals]);
 
-  // Apply assignee filter client-side — all tasks fetched; filter just for display.
-  // Local tasks have no ClickUp assignees by definition; they're user-created on
-  // this machine so they always belong to the current user — show them through
-  // any assignee filter.
+  // Apply assignee + project filters client-side. All tasks are fetched; we
+  // narrow purely for display.
+  // - Local tasks always pass the assignee filter (they're user-created on
+  //   this machine, so they always belong to the current user).
+  // - Older KanbanTasks may lack `projectId` (the field was added later) —
+  //   match by `projectPath` against the selected project as a fallback so
+  //   pre-projectId tasks still filter correctly.
   const visibleTasks = useMemo(() => {
-    if (!assigneeFilter) return tasks;
-    return tasks.filter(
-      (t) => t.provider === 'local' || t.clickupAssignees?.some((a) => a.id === assigneeFilter),
-    );
-  }, [tasks, assigneeFilter]);
+    let out = tasks;
+    if (assigneeFilter) {
+      out = out.filter(
+        (t) => t.provider === 'local' || t.clickupAssignees?.some((a) => a.id === assigneeFilter),
+      );
+    }
+    if (projectFilter) {
+      const selected = projects.find((p) => p.id === projectFilter);
+      const selectedPath = selected?.path;
+      out = out.filter(
+        (t) => t.projectId === projectFilter || (!!selectedPath && t.projectPath === selectedPath),
+      );
+    }
+    return out;
+  }, [tasks, assigneeFilter, projectFilter, projects]);
 
   // Filter out already-imported tasks and sort by priority (Urgent → Low → no priority)
   const visibleBacklog = useMemo(() => {
@@ -198,6 +222,7 @@ export function KanbanView(_props: KanbanViewProps) {
   }, [visibleTasks, pendingMoves]);
 
   const selectedMember = members.find((m) => m.id === assigneeFilter);
+  const selectedProject = projects.find((p) => p.id === projectFilter);
 
   const handleCardClick = useCallback(
     (task: KanbanTask) => {
@@ -332,21 +357,6 @@ export function KanbanView(_props: KanbanViewProps) {
   const fixingCount = tasks.filter((t) => t.autoFixState === 'fixing').length;
   const awaitingQCCount = tasks.filter((t) => t.autoFixState === 'awaiting-qc').length;
 
-  // Aggregate per-task usage across the visible board
-  const usageTotals = visibleTasks.reduce(
-    (acc, t) => {
-      if (!t.usage) return acc;
-      acc.cost += t.usage.cost || 0;
-      acc.input += t.usage.inputTokens || 0;
-      acc.output += t.usage.outputTokens || 0;
-      acc.cacheCreate += t.usage.cacheCreationTokens || 0;
-      acc.cacheRead += t.usage.cacheReadTokens || 0;
-      acc.tasks += 1;
-      return acc;
-    },
-    { cost: 0, input: 0, output: 0, cacheCreate: 0, cacheRead: 0, tasks: 0 },
-  );
-
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
@@ -361,21 +371,7 @@ export function KanbanView(_props: KanbanViewProps) {
                 {assigneeFilter && tasks.length !== visibleTasks.length ? ` of ${tasks.length}` : ''}
               </span>
             )}
-            {usageTotals.cost > 0 && (
-              <span
-                className="text-xs font-mono font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full"
-                title={
-                  `Total Claude API spend across ${usageTotals.tasks} task${usageTotals.tasks === 1 ? '' : 's'}\n` +
-                  `Input:        ${usageTotals.input.toLocaleString()} tokens\n` +
-                  `Output:       ${usageTotals.output.toLocaleString()} tokens\n` +
-                  `Cache write:  ${usageTotals.cacheCreate.toLocaleString()} tokens\n` +
-                  `Cache read:   ${usageTotals.cacheRead.toLocaleString()} tokens\n` +
-                  `Total cost:   $${usageTotals.cost.toFixed(4)}`
-                }
-              >
-                ${usageTotals.cost.toFixed(2)}
-              </span>
-            )}
+            <KanbanCostSummary tasks={visibleTasks} />
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -403,6 +399,7 @@ export function KanbanView(_props: KanbanViewProps) {
               <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
               Refresh
             </button>
+            <UsageIndicator />
           </div>
         </div>
 
@@ -591,6 +588,58 @@ export function KanbanView(_props: KanbanViewProps) {
                       {member.initials || member.username.slice(0, 2).toUpperCase()}
                     </span>
                     <span className="truncate">{member.username}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Project filter */}
+          <div className="relative" ref={projectDropdownRef}>
+            <button
+              onClick={() => setShowProjectDropdown(!showProjectDropdown)}
+              className={cn(
+                'flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-tertiary)] border rounded-lg text-sm text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors min-w-[180px]',
+                projectFilter ? 'border-[var(--accent)]/60' : 'border-[var(--border)]',
+              )}
+              title={
+                projectFilter
+                  ? `Showing only tasks for ${selectedProject?.name || 'selected project'}`
+                  : 'Click to filter tasks by project'
+              }
+            >
+              {projectFilter ? <FolderOpen className="w-4 h-4 text-[var(--accent)] shrink-0" /> : <Folder className="w-4 h-4 text-[var(--text-muted)] shrink-0" />}
+              <span className="truncate max-w-[200px]">
+                {selectedProject ? selectedProject.name : 'All projects'}
+              </span>
+              <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] shrink-0 ml-auto transition-transform', showProjectDropdown && 'rotate-180')} />
+            </button>
+            {showProjectDropdown && (
+              <div className="absolute z-50 top-full left-0 mt-1 min-w-[260px] max-h-72 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                <button
+                  onClick={() => { void setProjectFilter(''); setShowProjectDropdown(false); }}
+                  className={cn('w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-tertiary)] flex items-center gap-2', !projectFilter && 'bg-[var(--accent)]/10 text-[var(--accent)]')}
+                >
+                  <Folder className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                  <span>All projects</span>
+                </button>
+                <div className="border-t border-[var(--border)]" />
+                {projects.length === 0 && (
+                  <div className="px-3 py-3 text-xs text-[var(--text-muted)]">
+                    No projects yet. Add one in the sidebar to filter by it.
+                  </div>
+                )}
+                {projects.map((project) => (
+                  <button
+                    key={project.id}
+                    onClick={() => { void setProjectFilter(project.id); setShowProjectDropdown(false); }}
+                    className={cn('w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-tertiary)] flex items-center gap-2', project.id === projectFilter && 'bg-[var(--accent)]/10 text-[var(--accent)]')}
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                    <span className="truncate flex-1">{project.name}</span>
+                    {project.id === activeProjectId && (
+                      <span className="text-[9px] uppercase tracking-wide text-[var(--text-muted)] shrink-0">active</span>
+                    )}
                   </button>
                 ))}
               </div>

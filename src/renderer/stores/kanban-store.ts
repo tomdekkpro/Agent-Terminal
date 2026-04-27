@@ -94,6 +94,7 @@ interface KanbanState {
   deleteTask: (taskId: string) => Promise<void>;
   refreshClickupSnapshots: () => Promise<void>;
   setAssigneeFilter: (assigneeId: string) => Promise<void>;
+  setProjectFilter: (projectId: string) => Promise<void>;
   clearError: () => void;
   refreshAutoFix: () => Promise<void>;
   setAutoFixStatus: (payload: AutoFixStatusPayload) => void;
@@ -393,6 +394,11 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
   setAssigneeFilter: async (assigneeId: string) => {
     await useSettingsStore.getState().updateSettings({ kanbanFilterAssigneeId: assigneeId });
     // No board reload needed — we filter client-side now
+  },
+
+  setProjectFilter: async (projectId: string) => {
+    await useSettingsStore.getState().updateSettings({ kanbanFilterProjectId: projectId });
+    // Filtering is client-side too — KanbanView reads the setting and narrows visibleTasks
   },
 
   clearError: () => set({ error: null }),
