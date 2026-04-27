@@ -32,6 +32,14 @@ function load(): StoreData {
       for (const t of tasks) {
         if (!t.provider) t.provider = 'clickup';
       }
+      // Backfill orderIndex (added v1.21.x) — derive from createdAt so the
+      // existing array order is preserved on first run. Subsequent renders
+      // sort by orderIndex.
+      for (const t of tasks) {
+        if (typeof t.orderIndex !== 'number') {
+          t.orderIndex = Date.parse(t.createdAt || '') || Date.now();
+        }
+      }
       cached = { tasks };
       debugLog('[KanbanStore] Loaded', cached.tasks.length, 'kanban task(s)');
       return cached;
@@ -107,6 +115,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
   }
 
   const now = new Date().toISOString();
+  const data = load();
   const task: KanbanTask = {
     id: randomUUID(),
     provider: 'clickup',
@@ -123,6 +132,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     projectPath: input.projectPath,
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
+    orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,
     lastSeenFailureCommentId: null,
@@ -130,10 +140,20 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     updatedAt: now,
   };
 
-  const data = load();
   data.tasks.push(task);
   scheduleSave();
   return task;
+}
+
+/** Allocate the next ordering key — strictly larger than any existing,
+ *  so the new task lands at the bottom regardless of which column it's
+ *  dropped into. Date.now() is monotonic-enough across normal usage. */
+function nextOrderIndex(tasks: KanbanTask[]): number {
+  let max = 0;
+  for (const t of tasks) {
+    if (typeof t.orderIndex === 'number' && t.orderIndex > max) max = t.orderIndex;
+  }
+  return Math.max(max + 1, Date.now());
 }
 
 export interface CreateLocalTaskInput {
@@ -149,6 +169,7 @@ export interface CreateLocalTaskInput {
 export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
   const now = new Date().toISOString();
   const id = randomUUID();
+  const data = load();
   const task: KanbanTask = {
     id,
     provider: 'local',
@@ -165,6 +186,7 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     projectPath: input.projectPath,
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
+    orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,
     lastSeenFailureCommentId: null,
@@ -172,7 +194,6 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     updatedAt: now,
   };
 
-  const data = load();
   data.tasks.push(task);
   scheduleSave();
   return task;
@@ -182,12 +203,27 @@ export function updateKanbanTask(id: string, patch: Partial<KanbanTask>): Kanban
   const data = load();
   const idx = data.tasks.findIndex((t) => t.id === id);
   if (idx < 0) return null;
+  const existing = data.tasks[idx];
+
+  // When the user moves a task to a different column (drag/drop), bump
+  // orderIndex so it lands at the bottom of the destination — unless the
+  // caller explicitly set orderIndex itself (e.g., a future drag-to-reorder
+  // feature). Status changes that don't move column (same value) don't bump.
+  const movedColumn = patch.kanbanStatus && patch.kanbanStatus !== existing.kanbanStatus;
+  const explicitOrder = Object.prototype.hasOwnProperty.call(patch, 'orderIndex');
+  const finalOrderIndex = explicitOrder
+    ? patch.orderIndex
+    : movedColumn
+      ? nextOrderIndex(data.tasks)
+      : existing.orderIndex;
+
   const updated: KanbanTask = {
-    ...data.tasks[idx],
+    ...existing,
     ...patch,
-    id: data.tasks[idx].id,
-    clickupTaskId: data.tasks[idx].clickupTaskId,
-    createdAt: data.tasks[idx].createdAt,
+    orderIndex: finalOrderIndex,
+    id: existing.id,
+    clickupTaskId: existing.clickupTaskId,
+    createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
   };
   data.tasks[idx] = updated;

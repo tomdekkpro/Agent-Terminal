@@ -605,11 +605,20 @@ ${priorSection}
 
     mkdirSync(join(projectPath, '.claude', 'worktrees'), { recursive: true });
 
+    // Match `claude --worktree <name>` base-branch behavior: branch from
+    // origin/HEAD if available (per the Common Workflows docs), fall back
+    // to the project's current HEAD if there's no remote.
+    let baseRef = 'HEAD';
     try {
-      await runCmd(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+      const ref = await runCmd('git symbolic-ref refs/remotes/origin/HEAD --short', projectPath, 5_000);
+      if (ref) baseRef = ref;
+    } catch { /* no remote / HEAD not set — fall back to HEAD */ }
+
+    try {
+      await runCmd(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
     } catch {
       try { await runCmd(`git branch -D "${branch}"`, projectPath, 5_000); } catch { /* noop */ }
-      await runCmd(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+      await runCmd(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
     }
 
     try {

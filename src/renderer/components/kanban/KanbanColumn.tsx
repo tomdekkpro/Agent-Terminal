@@ -20,6 +20,11 @@ interface KanbanColumnProps {
   onDragStart: (taskId: string) => void;
   onDragEnd: () => void;
   onDrop: (to: KanbanTaskStatus) => void;
+  /** Drop landed on a specific card. `position` says which side of the
+   *  target card — used by the parent to allocate an orderIndex between
+   *  neighbors. When this fires, the column's own onDrop should NOT also
+   *  fire (cards stopPropagation). */
+  onDropOnCard: (targetTaskId: string, position: 'before' | 'after', status: KanbanTaskStatus) => void;
   onCardClick: (task: KanbanTask) => void;
   onRequeue: (taskId: string) => void;
   onToggleAutoMerge: (taskId: string, override: boolean | null) => void;
@@ -42,6 +47,7 @@ export function KanbanColumn({
   onDragStart,
   onDragEnd,
   onDrop,
+  onDropOnCard,
   onCardClick,
   onRequeue,
   onToggleAutoMerge,
@@ -125,6 +131,7 @@ export function KanbanColumn({
               isPending={task.id in pendingMoves}
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
+              onDropOnCard={(targetId, position) => onDropOnCard(targetId, position, status)}
               onClick={() => onCardClick(task)}
               onRequeue={onRequeue}
               onToggleAutoMerge={onToggleAutoMerge}

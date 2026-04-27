@@ -170,7 +170,11 @@ export function KanbanView(_props: KanbanViewProps) {
     return out;
   }, [backlog, tasks]);
 
-  // Group tasks by their local kanbanStatus, honouring optimistic moves
+  // Group tasks by their local kanbanStatus, honouring optimistic moves.
+  // Within each column we sort by orderIndex (ascending) so the order is
+  // stable across refreshes and only changes when the user drags+drops.
+  // Backfill: tasks missing orderIndex sort to the bottom of their column,
+  // ordered amongst themselves by createdAt to stay deterministic.
   const tasksByStatus = useMemo(() => {
     const by: Record<KanbanTaskStatus, KanbanTask[]> = {
       'todo': [],
@@ -182,6 +186,13 @@ export function KanbanView(_props: KanbanViewProps) {
     for (const task of visibleTasks) {
       const effective = pendingMoves[task.id] || task.kanbanStatus;
       by[effective]?.push(task);
+    }
+    const orderKey = (t: KanbanTask) =>
+      typeof t.orderIndex === 'number'
+        ? t.orderIndex
+        : Date.parse(t.createdAt || '') || Number.MAX_SAFE_INTEGER;
+    for (const status of Object.keys(by) as KanbanTaskStatus[]) {
+      by[status].sort((a, b) => orderKey(a) - orderKey(b));
     }
     return by;
   }, [visibleTasks, pendingMoves]);
@@ -202,6 +213,53 @@ export function KanbanView(_props: KanbanViewProps) {
       setDraggingTaskId(null);
     },
     [draggingTaskId, moveTask],
+  );
+
+  /** Drop landed on a specific card. Compute an orderIndex that places the
+   *  dragged task immediately before/after the target so it sorts where the
+   *  user released — not always at the bottom. The dragged task is excluded
+   *  from neighbor lookup so same-column reorders work too. */
+  const handleDropOnCard = useCallback(
+    (targetTaskId: string, position: 'before' | 'after', status: KanbanTaskStatus) => {
+      if (!draggingTaskId || draggingTaskId === targetTaskId) {
+        setDraggingTaskId(null);
+        return;
+      }
+      // Build the destination column's sorted list, excluding the dragged task.
+      const orderKey = (t: KanbanTask) =>
+        typeof t.orderIndex === 'number'
+          ? t.orderIndex
+          : Date.parse(t.createdAt || '') || Number.MAX_SAFE_INTEGER;
+      const colTasks = tasks
+        .filter((t) => {
+          if (t.id === draggingTaskId) return false;
+          const eff = pendingMoves[t.id] || t.kanbanStatus;
+          return eff === status;
+        })
+        .sort((a, b) => orderKey(a) - orderKey(b));
+
+      const targetIdx = colTasks.findIndex((t) => t.id === targetTaskId);
+      if (targetIdx < 0) {
+        moveTask(draggingTaskId, status);
+        setDraggingTaskId(null);
+        return;
+      }
+      const target = colTasks[targetIdx];
+      const targetKey = orderKey(target);
+
+      let newOrderIndex: number;
+      if (position === 'before') {
+        const prev = targetIdx > 0 ? colTasks[targetIdx - 1] : undefined;
+        newOrderIndex = prev ? (orderKey(prev) + targetKey) / 2 : targetKey - 1;
+      } else {
+        const next = targetIdx < colTasks.length - 1 ? colTasks[targetIdx + 1] : undefined;
+        newOrderIndex = next ? (targetKey + orderKey(next)) / 2 : targetKey + 1;
+      }
+
+      moveTask(draggingTaskId, status, newOrderIndex);
+      setDraggingTaskId(null);
+    },
+    [draggingTaskId, moveTask, tasks, pendingMoves],
   );
 
   /** Resolve the project to use for a newly-imported backlog task:
@@ -588,6 +646,7 @@ export function KanbanView(_props: KanbanViewProps) {
                 onDragStart={setDraggingTaskId}
                 onDragEnd={() => setDraggingTaskId(null)}
                 onDrop={handleDrop}
+                onDropOnCard={handleDropOnCard}
                 onCardClick={handleCardClick}
                 onRequeue={requeueTask}
                 onToggleAutoMerge={setTaskAutoMerge}

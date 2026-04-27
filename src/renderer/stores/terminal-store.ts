@@ -947,6 +947,13 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
           : t
       ),
     }));
+    // Clear worktree fields on the KanbanTask record as well so reopening
+    // it from the board doesn't think the worktree still lives on disk.
+    const clickupId = terminal.task?.id;
+    if (clickupId) {
+      const { useKanbanStore } = await import('./kanban-store');
+      void useKanbanStore.getState().clearWorktreeForClickupId(clickupId);
+    }
   },
 }));
 

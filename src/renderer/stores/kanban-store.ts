@@ -80,8 +80,17 @@ interface KanbanState {
     projectId?: string;
     kanbanStatus?: KanbanTaskStatus;
   }) => Promise<KanbanTask | null>;
-  moveTask: (taskId: string, to: KanbanTaskStatus) => Promise<void>;
+  /** Move a task to a different column. If `orderIndex` is supplied, the
+   *  task lands at that position; otherwise the main side bumps it to the
+   *  bottom of the destination column. Same-column reorders also use this
+   *  by passing the same status with a new `orderIndex`. */
+  moveTask: (taskId: string, to: KanbanTaskStatus, orderIndex?: number) => Promise<void>;
   updateTask: (taskId: string, patch: Partial<KanbanTask>) => Promise<void>;
+  /** Clear worktree fields on the KanbanTask whose clickupTaskId matches.
+   *  Called after a successful merge / PR flow that removed the worktree,
+   *  so reopening the task from the board doesn't think a worktree still
+   *  exists at the now-deleted path. No-op if no matching task. */
+  clearWorktreeForClickupId: (clickupTaskId: string) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   refreshClickupSnapshots: () => Promise<void>;
   setAssigneeFilter: (assigneeId: string) => Promise<void>;
@@ -306,16 +315,21 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
-  moveTask: async (taskId: string, to: KanbanTaskStatus) => {
+  moveTask: async (taskId: string, to: KanbanTaskStatus, orderIndex?: number) => {
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task) return;
-    if (task.kanbanStatus === to) return;
+    // Same column with no reorder request → no-op.
+    if (task.kanbanStatus === to && orderIndex === undefined) return;
 
-    // Optimistic update
-    set((state) => ({ pendingMoves: { ...state.pendingMoves, [taskId]: to } }));
+    // Optimistic update — only mark pendingMoves when the column actually changes
+    if (task.kanbanStatus !== to) {
+      set((state) => ({ pendingMoves: { ...state.pendingMoves, [taskId]: to } }));
+    }
 
     try {
-      const result = await window.electronAPI.kanbanUpdate(taskId, { kanbanStatus: to });
+      const patch: Partial<KanbanTask> = { kanbanStatus: to };
+      if (orderIndex !== undefined) patch.orderIndex = orderIndex;
+      const result = await window.electronAPI.kanbanUpdate(taskId, patch);
       if (result.success && result.data) {
         set((state) => {
           const { [taskId]: _drop, ...rest } = state.pendingMoves;
@@ -346,6 +360,12 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     } catch (err) {
       set({ error: err instanceof Error ? err.message : 'Failed to update task' });
     }
+  },
+
+  clearWorktreeForClickupId: async (clickupTaskId: string) => {
+    const match = get().tasks.find((t) => t.clickupTaskId === clickupTaskId);
+    if (!match) return;
+    await get().updateTask(match.id, { worktreePath: undefined, worktreeBranch: undefined });
   },
 
   deleteTask: async (taskId: string) => {

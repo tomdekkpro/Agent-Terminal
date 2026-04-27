@@ -61,6 +61,27 @@ function buildUntrackedDiff(cwd: string, relPath: string): string {
 }
 
 /** Run a git command asynchronously with timeout (non-blocking) */
+/**
+ * Resolve the project's default remote branch (e.g. "origin/main").
+ * Matches what `claude --worktree <name>` uses as the base branch — see
+ * https://code.claude.com/docs/en/common-workflows#git-worktrees. Returns
+ * `null` if there's no remote or HEAD isn't set there, so callers can fall
+ * back to the local HEAD.
+ */
+async function resolveOriginHead(projectPath: string): Promise<string | null> {
+  try {
+    const ref = await new Promise<string>((resolve, reject) => {
+      exec('git symbolic-ref refs/remotes/origin/HEAD --short', { cwd: projectPath, encoding: 'utf-8', timeout: 5000 }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    return ref || null;
+  } catch {
+    return null;
+  }
+}
+
 function gitExec(command: string, cwd: string, timeout = GIT_TIMEOUT): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(command, { cwd, encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -157,9 +178,16 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         // .claude/ is already gitignored in most projects, but ensure it
         ensureGitignore(projectPath, '.claude/');
 
+        // Use origin/HEAD as the base branch so behavior matches `claude
+        // --worktree <name>` (which branches from the default remote
+        // branch). Falls back to local HEAD when there's no remote.
+        const originHead = await resolveOriginHead(projectPath);
+        const baseRef = originHead || 'HEAD';
+        debugLog('[Git] Worktree base:', baseRef);
+
         // Try creating with new branch
         try {
-          await gitExec(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+          await gitExec(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
         } catch {
           // Branch might already exist (previous worktree was removed but branch kept)
           // Force-delete the old branch first, then try with existing branch
@@ -169,7 +197,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           } catch { /* branch may not exist, ignore */ }
 
           try {
-            await gitExec(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+            await gitExec(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
           } catch (err: any) {
             return { success: false, error: err.message || 'Failed to create worktree' };
           }
@@ -238,6 +266,42 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           return { success: false, error: 'Not a git repository' };
         }
 
+        // Claude Code auto-removes the worktree (and the branch when there
+        // are no commits) if you exit the agent with a clean working tree —
+        // see https://code.claude.com/docs/en/common-workflows#git-worktrees.
+        // If the task branch is gone, surface a clear error rather than
+        // letting `git merge` fail with a generic "not something we can merge".
+        try {
+          await gitExec(`git rev-parse --verify "${taskBranch}"`, projectPath, 5000);
+        } catch {
+          return {
+            success: false,
+            error: `Branch "${taskBranch}" no longer exists. Claude likely removed the worktree after a clean session — there's nothing to merge.`,
+          };
+        }
+
+        // Auto-commit any pending changes in the worktree — modifications,
+        // deletions, AND new files the agent created. We use `git add -A`
+        // so newly-created files come along; project `.gitignore` is the
+        // right filter for junk (build outputs, logs, .DS_Store), not
+        // limiting to tracked-only with `-u` (which silently skips new
+        // files and they get destroyed when the worktree is removed).
+        let autoCommitted = false;
+        try {
+          const status = await gitExec('git status --porcelain', worktreePath);
+          if (status.length > 0) {
+            await gitExec('git add -A', worktreePath);
+            await gitExec(`git commit -m "Auto-commit pending changes on ${taskBranch}"`, worktreePath);
+            autoCommitted = true;
+            debugLog('[Git] Auto-committed pending changes on', taskBranch);
+          }
+        } catch (err: any) {
+          return {
+            success: false,
+            error: `Failed to auto-commit pending changes on ${taskBranch}: ${err.message || err}. Commit manually with "Commit only", then retry.`,
+          };
+        }
+
         // Ensure task branch has commits ahead of target
         try {
           const aheadCount = await gitExec(
@@ -245,7 +309,10 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
             projectPath,
           );
           if (aheadCount === '0') {
-            return { success: false, error: `No commits to merge — task branch is up to date with ${targetBranch}` };
+            return {
+              success: false,
+              error: `No commits to merge — ${taskBranch} is at the same commit as ${targetBranch}. Verify the agent committed onto ${taskBranch} (\`git log ${taskBranch}\`).`,
+            };
           }
         } catch {
           // Could not determine ahead count, proceed anyway
@@ -290,7 +357,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         } catch { /* ignore */ }
 
         debugLog('[Git] Merged task branch into', targetBranch);
-        return { success: true, targetBranch };
+        return { success: true, targetBranch, autoCommitted };
       } catch (error: any) {
         debugError('[Git] mergeTask error:', error);
         return { success: false, error: error.message || 'Failed to merge task branch' };

@@ -563,6 +563,12 @@ export interface KanbanTask {
   /** Our workflow status */
   kanbanStatus: KanbanTaskStatus;
 
+  /** Stable ordering key. Tasks render in ascending orderIndex within each
+   *  column, so ordering survives refreshes and only changes when the user
+   *  drags+drops (which bumps it to "newest" in the destination column).
+   *  Backfilled from createdAt for tasks created before this field existed. */
+  orderIndex?: number;
+
   /** Agent session data — persisted across terminal recreation */
   agentSessionId?: string;
   agentProvider?: AgentProviderId;

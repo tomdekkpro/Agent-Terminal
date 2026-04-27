@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   ExternalLink,
   Terminal as TerminalIcon,
@@ -32,6 +33,10 @@ interface KanbanCardProps {
   isPending: boolean;
   onDragStart: (taskId: string) => void;
   onDragEnd: () => void;
+  /** Drop fired ON this card. `position` says whether the dragged item was
+   *  released on the top half ('before') or bottom half ('after'). The
+   *  parent uses this to compute an orderIndex between neighbors. */
+  onDropOnCard?: (targetTaskId: string, position: 'before' | 'after') => void;
   onClick: () => void;
   onRequeue: (taskId: string) => void;
   onToggleAutoMerge: (taskId: string, override: boolean | null) => void;
@@ -87,12 +92,17 @@ export function KanbanCard({
   isPending,
   onDragStart,
   onDragEnd,
+  onDropOnCard,
   onClick,
   onRequeue,
   onToggleAutoMerge,
   onToggleAutoFix,
   onDelete,
 }: KanbanCardProps) {
+  /** Drop indicator state — set during dragover, cleared on dragleave/drop.
+   *  Renders a thin highlighted line above ('before') or below ('after')
+   *  the card so the user sees where the released item will land. */
+  const [insertHint, setInsertHint] = useState<'before' | 'after' | null>(null);
   const badge = autoFixBadge(task.autoFixState);
   const iteration = task.iterationCount || 0;
   const isEscalated = task.autoFixState === 'escalated';
@@ -152,6 +162,25 @@ export function KanbanCard({
           e.currentTarget.style.opacity = '1';
         }
       }}
+      onDragOver={(e) => {
+        if (!onDropOnCard) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const rect = e.currentTarget.getBoundingClientRect();
+        const half = rect.top + rect.height / 2;
+        setInsertHint(e.clientY < half ? 'before' : 'after');
+      }}
+      onDragLeave={() => setInsertHint(null)}
+      onDrop={(e) => {
+        if (!onDropOnCard) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't bubble to column's "drop at end" handler
+        const rect = e.currentTarget.getBoundingClientRect();
+        const half = rect.top + rect.height / 2;
+        const position: 'before' | 'after' = e.clientY < half ? 'before' : 'after';
+        setInsertHint(null);
+        onDropOnCard(task.id, position);
+      }}
       onClick={onClick}
       className={cn(
         'group relative border rounded-lg bg-[var(--bg-primary)] p-3 cursor-grab active:cursor-grabbing transition-all',
@@ -165,6 +194,14 @@ export function KanbanCard({
         highlighted && 'ring-2 ring-[var(--accent)] shadow-[0_0_0_4px_rgba(99,102,241,0.25)]',
       )}
     >
+      {/* Drop position indicator — thin line above/below to show where the
+          dragged card will land if released. */}
+      {insertHint === 'before' && (
+        <div className="absolute -top-1 left-0 right-0 h-0.5 bg-[var(--accent)] rounded-full pointer-events-none" />
+      )}
+      {insertHint === 'after' && (
+        <div className="absolute -bottom-1 left-0 right-0 h-0.5 bg-[var(--accent)] rounded-full pointer-events-none" />
+      )}
       {/* Top row: customId + ClickUp status + actions */}
       <div className="flex items-start justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-1.5 min-w-0 flex-wrap">

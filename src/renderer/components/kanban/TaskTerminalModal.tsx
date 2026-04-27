@@ -19,6 +19,7 @@ import { TerminalPanel } from '../terminal/TerminalPanel';
 import { ChangesSplitLayout } from '../terminal/TerminalView';
 import { cn } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
+import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
 
 interface TaskTerminalModalProps {
   task: KanbanTask | null;
@@ -34,7 +35,9 @@ function toTerminalTask(t: KanbanTask): TerminalTask {
     status: t.clickupStatus,
     statusColor: t.clickupStatusColor || '#888',
     url: t.clickupUrl,
-    provider: 'clickup',
+    // Local KanbanTasks have no task-manager link; surface that as 'none'
+    // so downstream UI (PR title prefix, task-manager actions) skips them.
+    provider: t.provider === 'local' ? 'none' : 'clickup',
   };
 }
 
@@ -66,6 +69,20 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
   const projects = useProjectStore((s) => s.projects);
   const settings = useSettingsStore((s) => s.settings);
   const refreshClickup = useKanbanStore((s) => s.refreshClickupSnapshots);
+
+  // Project that owns this task — needed by useCompleteTaskFlow
+  const taskProject = task
+    ? (projects.find((p) => p.path === task.projectPath)
+       || projects.find((p) => p.id === task.projectId)
+       || null)
+    : null;
+
+  // Complete-task flow (Merge Locally / Create PR / Branch & PR / Commit only)
+  const { openCompleteTask, modal: completeTaskModal, statusBanner: completeTaskBanner } =
+    useCompleteTaskFlow(
+      taskProject ? { path: taskProject.path } : null,
+      settings.taskManagerProvider !== 'none',
+    );
 
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   const [terminalId, setTerminalId] = useState<string | null>(null);
@@ -156,30 +173,37 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
         } catch { /* non-critical — claude --worktree will create it */ }
 
-        // Probe candidate cwds to find where the conversation file actually
-        // lives. `claude --worktree X --resume <id>` only finds sessions in
-        // that worktree's encoded path, so on resume we cd to the matched
-        // location and skip the --worktree flag.
-        const resolved = await resolveSessionCwd(
-          task.agentSessionId,
-          buildSessionCandidates({
-            agentCwd: task.agentCwd,
-            worktreePath: task.worktreePath,
-            nativeWorktreePath,
-            computedWorktreePath: legacyWorktreePath,
-            projectPath: project.path,
-          }),
-        );
+        // Detect legacy `.task-worktrees/<id>` sessions (pre-v1.14.0). Native
+        // worktrees living under `.claude/worktrees/<name>` use Claude's own
+        // `--resume <id>` cross-worktree resolution (see Common Workflows
+        // docs) and don't need cwd probing.
+        const isLegacyWorktree = !!task.worktreePath && task.worktreePath.includes('.task-worktrees');
 
-        // cwd for the PTY: if we found the session somewhere, cd there;
-        // otherwise stay at project root (fresh sessions launch via --worktree).
-        const cwd = resolved?.cwd || project.path;
+        // Legacy path only: probe candidate cwds to find the conversation file.
+        const resolved = isLegacyWorktree
+          ? await resolveSessionCwd(
+              task.agentSessionId,
+              buildSessionCandidates({
+                agentCwd: task.agentCwd,
+                worktreePath: task.worktreePath,
+                nativeWorktreePath,
+                computedWorktreePath: legacyWorktreePath,
+                projectPath: project.path,
+              }),
+            )
+          : null;
+
+        // PTY cwd: legacy → wherever the session was found.
+        // Native → project root; `claude --worktree <name>` cd's into the worktree itself.
+        const cwd = isLegacyWorktree ? (resolved?.cwd || project.path) : project.path;
 
         updateTerminal(terminal.id, {
           task: toTerminalTask(task),
           cwd,
-          worktreePath: resolved?.isWorktree ? resolved.cwd : worktreePath,
-          worktreeBranch: resolved?.isWorktree && task.worktreeBranch
+          worktreePath: isLegacyWorktree
+            ? (resolved?.isWorktree ? resolved.cwd : worktreePath)
+            : worktreePath,
+          worktreeBranch: isLegacyWorktree && resolved?.isWorktree && task.worktreeBranch
             ? task.worktreeBranch
             : worktreeBranch,
           title,
@@ -200,10 +224,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           rows: 24,
         });
 
-        // Resume the stored agent session if we located it. Always cd to the
-        // matched cwd (no --worktree on resume — Claude only finds sessions
-        // within --worktree's own encoded scope).
-        if (task.agentSessionId && resolved) {
+        // Resume the stored agent session.
+        // - Native: pass --worktree <name> + --resume <id>; cwd stays at project root.
+        // - Legacy: cd to the probed cwd and run --resume <id> (no --worktree flag).
+        const shouldResume = task.agentSessionId && (!isLegacyWorktree || resolved);
+        if (shouldResume) {
           const agentId: AgentProviderId = task.agentProvider || 'claude';
           updateTerminal(terminal.id, {
             agentSessionId: task.agentSessionId,
@@ -215,6 +240,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             await window.electronAPI.resumeAgent(terminal.id, agentId, {
               sessionId: task.agentSessionId,
               cwd,
+              worktreeName: isLegacyWorktree ? undefined : worktreeName,
             });
           } catch {
             updateTerminal(terminal.id, { isClaudeMode: false, status: 'idle' });
@@ -447,6 +473,8 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             </div>
           )}
 
+          {completeTaskBanner}
+
           {terminal && (
             <div className={cn('flex-1 min-h-0 flex flex-col')}>
               {terminal.previewOpen ? (
@@ -459,6 +487,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                     skills={projects.find((p) => p.id === terminal.projectId)?.skills}
                     onInvokeAgent={handleInvokeAgent}
                     onProviderChange={handleProviderChange}
+                    onMergeComplete={() => openCompleteTask(terminal)}
                     onClose={handleCloseTerminal}
                     onFocus={() => useTerminalStore.getState().setActiveTerminal(terminal.id)}
                   />
@@ -472,6 +501,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   skills={projects.find((p) => p.id === terminal.projectId)?.skills}
                   onInvokeAgent={handleInvokeAgent}
                   onProviderChange={handleProviderChange}
+                  onMergeComplete={() => openCompleteTask(terminal)}
                   onClose={handleCloseTerminal}
                   onFocus={() => useTerminalStore.getState().setActiveTerminal(terminal.id)}
                 />
@@ -479,6 +509,10 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             </div>
           )}
         </div>
+        {/* CompleteTask modal — must live inside the stopPropagation wrapper so
+            clicks (e.g. opening the PR split-button dropdown) don't bubble up
+            to the backdrop and dismiss the Kanban modal. */}
+        {completeTaskModal}
       </div>
     </div>
   );

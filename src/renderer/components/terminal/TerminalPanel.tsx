@@ -52,10 +52,11 @@ interface TerminalPanelProps {
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico']);
 
 /** Actions dropdown — sends prompt-based actions to the agent terminal */
-function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
+function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteControl }: {
   terminal: Terminal;
   isSplit?: boolean;
-  onMergeComplete: () => void;
+  onMergeComplete?: () => void;
+  onMobileRemoteControl?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -91,12 +92,22 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
     useTerminalStore.getState().removeTerminal(terminal.id);
   };
 
-  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean; worktreeOnly?: boolean }[] = [
+  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean; worktreeOnly?: boolean; mergeOnly?: boolean; mobileOnly?: boolean; disabled?: boolean }[] = [
     {
       icon: <GitMerge className="w-3.5 h-3.5" />,
       label: 'Complete Task',
       description: 'Merge, create PR, or push code',
-      action: () => { setOpen(false); onMergeComplete(); },
+      action: () => { setOpen(false); onMergeComplete?.(); },
+      mergeOnly: true,
+    },
+    {
+      icon: <Smartphone className="w-3.5 h-3.5" />,
+      label: 'Remote Control',
+      description: terminal.isClaudeBusy ? 'Wait for agent to finish' : 'Open agent on phone — scan QR',
+      action: () => { setOpen(false); onMobileRemoteControl?.(); },
+      mobileOnly: true,
+      agentOnly: true,
+      disabled: terminal.isClaudeBusy,
     },
     {
       icon: <GitCommitVertical className="w-3.5 h-3.5" />,
@@ -142,8 +153,12 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
   const visibleActions = actions.filter((a) => {
     if (a.agentOnly && !isAgent) return false;
     if (a.worktreeOnly && !isWorktree) return false;
+    if (a.mergeOnly && !onMergeComplete) return false;
+    if (a.mobileOnly && !onMobileRemoteControl) return false;
     return true;
   });
+
+  if (visibleActions.length === 0) return null;
 
   return (
     <div className="relative" ref={ref}>
@@ -162,7 +177,13 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete }: {
             <button
               key={i}
               onClick={(e) => { e.stopPropagation(); a.action(); }}
-              className="w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-[var(--bg-tertiary)] transition-colors"
+              disabled={a.disabled}
+              className={cn(
+                'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
+                a.disabled
+                  ? 'opacity-40 cursor-not-allowed'
+                  : 'hover:bg-[var(--bg-tertiary)]'
+              )}
             >
               <span className="mt-0.5 text-[var(--text-muted)]">{a.icon}</span>
               <div className="min-w-0">
@@ -233,6 +254,15 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const [remoteUrl, setRemoteUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+
+  /** Kick off remote-control: arm the URL capture buffer, then send /remote-control to the agent */
+  const triggerRemoteControl = useCallback(() => {
+    rcBufferRef.current = '';
+    if (rcTimeoutRef.current) clearTimeout(rcTimeoutRef.current);
+    rcTimeoutRef.current = setTimeout(() => { rcBufferRef.current = null; rcTimeoutRef.current = null; }, 15000);
+    window.electronAPI.sendTerminalInput(terminal.id, '/remote-control');
+    setTimeout(() => window.electronAPI.sendTerminalInput(terminal.id, '\r'), 50);
+  }, [terminal.id]);
 
   // Time tracking
   const startTimer = useTerminalStore((s) => s.startTimer);
@@ -712,6 +742,15 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <GripVertical className="w-3.5 h-3.5" />
             </div>
           )}
+          {/* Active indicator — green Bot icon, pulses while thinking */}
+          {terminal.isClaudeMode && (
+            <div
+              className="flex items-center justify-center shrink-0"
+              title={terminal.isClaudeBusy ? `${currentProvider?.displayName || 'Agent'} thinking…` : `${currentProvider?.displayName || 'Agent'} active`}
+            >
+              <Bot className={cn('w-4 h-4 text-emerald-400', terminal.isClaudeBusy && 'animate-pulse')} />
+            </div>
+          )}
           {isEditingTitle ? (
             <input
               className="text-xs text-[var(--text-primary)] bg-transparent outline-none border-b border-[var(--accent)] truncate shrink-0 py-0 w-[120px]"
@@ -883,11 +922,12 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               )}
             </div>
           )}
-          {terminal.task && onMergeComplete && (
+          {terminal.task && (
             <ActionsDropdown
               terminal={terminal}
               isSplit={isSplit}
               onMergeComplete={onMergeComplete}
+              onMobileRemoteControl={currentProvider?.capabilities.remoteControl ? triggerRemoteControl : undefined}
             />
           )}
           {!terminal.task && onLinkTask && (
@@ -965,17 +1005,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
           {terminal.isClaudeMode && (
             <>
-              {/* Mobile button — only for agents with remoteControl */}
-              {currentProvider?.capabilities.remoteControl && (
+              {/* Mobile button — only for agents with remoteControl, and only when there's no task (task terminals get this in the Actions menu) */}
+              {!terminal.task && currentProvider?.capabilities.remoteControl && (
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    rcBufferRef.current = '';
-                    if (rcTimeoutRef.current) clearTimeout(rcTimeoutRef.current);
-                    rcTimeoutRef.current = setTimeout(() => { rcBufferRef.current = null; rcTimeoutRef.current = null; }, 15000);
-                    window.electronAPI.sendTerminalInput(terminal.id, '/remote-control');
-                    setTimeout(() => window.electronAPI.sendTerminalInput(terminal.id, '\r'), 50);
-                  }}
+                  onClick={(e) => { e.stopPropagation(); triggerRemoteControl(); }}
                   disabled={terminal.isClaudeBusy}
                   className={cn(
                     'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors',
@@ -1007,17 +1040,6 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 <Eraser className="w-3.5 h-3.5" />
                 {!isSplit && 'Clear'}
               </button>
-              {/* Active indicator */}
-              <div
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs"
-                style={{
-                  backgroundColor: `${currentProvider?.color || '#22c55e'}20`,
-                  color: currentProvider?.color || '#22c55e',
-                }}
-              >
-                <Bot className={cn('w-3.5 h-3.5', terminal.isClaudeBusy && 'animate-pulse')} />
-                {!isSplit && (terminal.isClaudeBusy ? 'Thinking...' : `${currentProvider?.displayName || 'Agent'} Active`)}
-              </div>
             </>
           )}
           {/* Changes toggle */}
