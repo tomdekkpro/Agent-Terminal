@@ -36,6 +36,10 @@ import { useProjectStore } from '../../stores/project-store';
 import type { TaskManagerTask } from '../../../shared/types';
 import { UsageIndicator } from '../usage/UsageIndicator';
 import { KanbanCostSummary } from './KanbanCostSummary';
+import { ProjectGitActions } from '../shared/ProjectGitActions';
+import { ProjectSkillsAction } from '../shared/ProjectSkillsAction';
+import { SystemMonitor } from '../status/SystemMonitor';
+import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
 
 interface KanbanViewProps {
   /** Kept for parity with other views — the Kanban handles card activation inline via the TaskTerminalModal */
@@ -399,6 +403,11 @@ export function KanbanView(_props: KanbanViewProps) {
               <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
               Refresh
             </button>
+            <div className="h-6 w-px bg-[var(--border)] mx-1" />
+            <ProjectGitActions />
+            <ProjectSkillsAction />
+            <SystemMonitor />
+            <ServiceStatusIndicator />
             <UsageIndicator />
           </div>
         </div>
