@@ -19,6 +19,10 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
 
   const members = useKanbanStore((s) => s.members);
+  const membersLoading = useKanbanStore((s) => s.membersLoading);
+  const membersError = useKanbanStore((s) => s.membersError);
+  const loadMembers = useKanbanStore((s) => s.loadMembers);
+  const setAssigneeFilter = useKanbanStore((s) => s.setAssigneeFilter);
   const importTask = useKanbanStore((s) => s.importTask);
   const existingTasks = useKanbanStore((s) => s.tasks);
 
@@ -26,6 +30,8 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
   const [selectedListId, setSelectedListId] = useState<string>('');
   const [listDropdownOpen, setListDropdownOpen] = useState(false);
   const listDropdownRef = useRef<HTMLDivElement>(null);
+  const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
+  const assigneeDropdownRef = useRef<HTMLDivElement>(null);
 
   const [selectedProjectPath, setSelectedProjectPath] = useState<string>('');
 
@@ -62,16 +68,28 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
     else if (projects.length > 0) setSelectedProjectPath(projects[0].path);
   }, [open, activeProjectId, projects, selectedProjectPath]);
 
-  // Close list dropdown on outside click
+  // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (listDropdownRef.current && !listDropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (listDropdownRef.current && !listDropdownRef.current.contains(target)) {
         setListDropdownOpen(false);
+      }
+      if (assigneeDropdownRef.current && !assigneeDropdownRef.current.contains(target)) {
+        setAssigneeDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  // Lazy-load members the first time the dropdown opens if we don't have them yet
+  useEffect(() => {
+    if (!open) return;
+    if (members.length === 0 && !membersLoading && !membersError) {
+      void loadMembers();
+    }
+  }, [open, members.length, membersLoading, membersError, loadMembers]);
 
   // Search whenever query/list/filter changes (debounced)
   const runSearch = useCallback(async () => {
@@ -230,13 +248,71 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
               </select>
             </div>
 
-            {/* Assignee filter indicator (read-only here) */}
-            <div
-              className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] px-2 py-1 rounded-md bg-[var(--bg-tertiary)]"
-              title={assigneeFilter ? `Filtering to ${selectedMember?.username || 'selected user'}` : 'No assignee filter applied'}
-            >
-              {assigneeFilter ? <User className="w-3.5 h-3.5 text-[var(--accent)]" /> : <Users className="w-3.5 h-3.5" />}
-              <span>{assigneeFilter ? selectedMember?.username || 'Assignee filter on' : 'All assignees'}</span>
+            {/* Assignee filter */}
+            <div className="relative" ref={assigneeDropdownRef}>
+              <button
+                onClick={() => setAssigneeDropdownOpen(!assigneeDropdownOpen)}
+                className={cn(
+                  'flex items-center gap-1.5 px-2 py-1.5 bg-[var(--bg-tertiary)] border rounded-lg text-xs text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors min-w-[160px]',
+                  assigneeFilter ? 'border-[var(--accent)]/60' : 'border-[var(--border)]',
+                )}
+                title={assigneeFilter ? `Filtering to ${selectedMember?.username || 'selected user'}` : 'Click to filter by assignee'}
+              >
+                {assigneeFilter ? <User className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" /> : <Users className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />}
+                <span className="truncate">
+                  {assigneeFilter ? selectedMember?.username || 'Assignee filter on' : 'All assignees'}
+                </span>
+                <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] shrink-0 ml-auto transition-transform', assigneeDropdownOpen && 'rotate-180')} />
+              </button>
+              {assigneeDropdownOpen && (
+                <div className="absolute z-20 top-full left-0 mt-1 min-w-[240px] max-h-64 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                  <button
+                    onClick={() => { void setAssigneeFilter(''); setAssigneeDropdownOpen(false); }}
+                    className={cn('w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-tertiary)] flex items-center gap-2', !assigneeFilter && 'bg-[var(--accent)]/10 text-[var(--accent)]')}
+                  >
+                    <Users className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                    <span>All assignees</span>
+                  </button>
+                  <div className="border-t border-[var(--border)]" />
+                  {membersLoading && (
+                    <div className="px-3 py-3 text-xs text-[var(--text-muted)] flex items-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Loading members…
+                    </div>
+                  )}
+                  {membersError && !membersLoading && (
+                    <div className="px-3 py-3 text-xs text-red-400 space-y-1.5">
+                      <div className="flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>{membersError}</span>
+                      </div>
+                      <button onClick={() => void loadMembers()} className="text-[var(--accent)] hover:underline">
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {!membersLoading && !membersError && members.length === 0 && (
+                    <div className="px-3 py-3 text-xs text-[var(--text-muted)]">
+                      No workspace members. Check <code className="text-[10px]">clickupWorkspaceId</code> in Settings.
+                    </div>
+                  )}
+                  {!membersLoading && !membersError && members.map((member) => (
+                    <button
+                      key={member.id}
+                      onClick={() => { void setAssigneeFilter(member.id); setAssigneeDropdownOpen(false); }}
+                      className={cn('w-full text-left px-3 py-2 text-sm hover:bg-[var(--bg-tertiary)] flex items-center gap-2', member.id === assigneeFilter && 'bg-[var(--accent)]/10 text-[var(--accent)]')}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-full text-[9px] font-medium flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: member.color || 'var(--bg-tertiary)', color: '#fff' }}
+                      >
+                        {member.initials || member.username.slice(0, 2).toUpperCase()}
+                      </span>
+                      <span className="truncate">{member.username}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
