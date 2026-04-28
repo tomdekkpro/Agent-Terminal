@@ -439,6 +439,14 @@ export function KanbanCard({
               <span className="truncate font-mono">{task.worktreeBranch}</span>
             </>
           )}
+          {task.baseBranch && (
+            <span
+              className="truncate font-mono text-[var(--text-muted)] shrink-0"
+              title={`Worktree forked from ${task.baseBranch} — merge/PR target`}
+            >
+              ← {task.baseBranch}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1 shrink-0">

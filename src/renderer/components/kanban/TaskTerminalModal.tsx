@@ -437,6 +437,15 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   <CopyButton text={task.worktreeBranch} label="branch name" />
                 </div>
               )}
+              {task.baseBranch && (
+                <div
+                  className="flex items-center gap-1 text-[var(--text-muted)]"
+                  title={`Worktree was forked from ${task.baseBranch} — merge/PR target`}
+                >
+                  <span>←</span>
+                  <span className="font-mono">{task.baseBranch}</span>
+                </div>
+              )}
               {task.projectPath && (
                 <div className="flex items-center gap-1 truncate max-w-[260px]" title={task.projectPath}>
                   <FolderOpen className="w-3 h-3" />
