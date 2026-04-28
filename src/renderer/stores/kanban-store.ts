@@ -71,6 +71,7 @@ interface KanbanState {
     clickupTask: TaskManagerTask;
     projectPath: string;
     projectId?: string;
+    baseBranch?: string;
   }) => Promise<KanbanTask | null>;
   /** Create a local-only task (no ClickUp link). */
   createLocalTask: (input: {
@@ -79,6 +80,7 @@ interface KanbanState {
     projectPath: string;
     projectId?: string;
     kanbanStatus?: KanbanTaskStatus;
+    baseBranch?: string;
   }) => Promise<KanbanTask | null>;
   /** Move a task to a different column. If `orderIndex` is supplied, the
    *  task lands at that position; otherwise the main side bumps it to the
@@ -262,7 +264,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
-  importTask: async ({ clickupTask, projectPath, projectId }) => {
+  importTask: async ({ clickupTask, projectPath, projectId, baseBranch }) => {
     try {
       const input = {
         clickupTaskId: clickupTask.id,
@@ -281,6 +283,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
         clickupUpdatedAt: clickupTask.updatedAt,
         projectPath,
         projectId,
+        baseBranch,
       };
       const result = await window.electronAPI.kanbanImport(input);
       if (result.success && result.data) {
@@ -295,7 +298,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
-  createLocalTask: async ({ name, description, projectPath, projectId, kanbanStatus }) => {
+  createLocalTask: async ({ name, description, projectPath, projectId, kanbanStatus, baseBranch }) => {
     try {
       const result = await window.electronAPI.kanbanCreateLocal({
         name,
@@ -303,6 +306,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
         projectPath,
         projectId,
         kanbanStatus,
+        baseBranch,
       });
       if (result.success && result.data) {
         set((state) => ({ tasks: upsertTask(state.tasks, result.data) }));

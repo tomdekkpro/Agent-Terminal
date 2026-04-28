@@ -93,6 +93,9 @@ export interface ImportTaskInput {
   projectPath: string;
   projectId?: string;
   kanbanStatus?: KanbanTaskStatus;
+  /** Branch to fork the task's worktree from. Persisted on the KanbanTask
+   *  and used as the merge/PR target. Empty/undefined falls back to origin/HEAD. */
+  baseBranch?: string;
 }
 
 export function importKanbanTask(input: ImportTaskInput): KanbanTask {
@@ -132,6 +135,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     projectPath: input.projectPath,
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
+    baseBranch: input.baseBranch || undefined,
     orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,
@@ -162,6 +166,9 @@ export interface CreateLocalTaskInput {
   projectPath: string;
   projectId?: string;
   kanbanStatus?: KanbanTaskStatus;
+  /** Branch to fork the task's worktree from. Persisted on the KanbanTask
+   *  and used as the merge/PR target. Empty/undefined falls back to origin/HEAD. */
+  baseBranch?: string;
 }
 
 /** Create a local-only Kanban task (no ClickUp link). The orchestrator
@@ -186,6 +193,7 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     projectPath: input.projectPath,
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
+    baseBranch: input.baseBranch || undefined,
     orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,

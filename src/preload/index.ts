@@ -117,7 +117,8 @@ const electronAPI = {
   saveClaudeSkill: (projectPath: string, skillName: string, content: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL, projectPath, skillName, content),
 
   // Git
-  createTaskWorktree: (projectPath: string, taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId),
+  createTaskWorktree: (projectPath: string, taskId: string, baseBranch?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId, undefined, baseBranch),
   removeTaskWorktree: (projectPath: string, worktreePath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_REMOVE_WORKTREE, projectPath, worktreePath),
   mergeTaskBranch: (projectPath: string, worktreePath: string, taskBranch: string, targetBranch: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_MERGE_TASK, projectPath, worktreePath, taskBranch, targetBranch),
   listBranches: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_LIST_BRANCHES, projectPath),

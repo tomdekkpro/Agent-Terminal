@@ -9,6 +9,7 @@ import {
   KANBAN_COLUMN_COLORS,
 } from '../../stores/kanban-store';
 import { cn } from '../../../shared/utils';
+import { BaseBranchPicker } from '../shared/BaseBranchPicker';
 
 interface CreateLocalTaskModalProps {
   open: boolean;
@@ -24,6 +25,7 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
   const [description, setDescription] = useState('');
   const [projectPath, setProjectPath] = useState('');
   const [kanbanStatus, setKanbanStatus] = useState<KanbanTaskStatus>('todo');
+  const [baseBranch, setBaseBranch] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
@@ -36,11 +38,18 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
     setName('');
     setDescription('');
     setKanbanStatus('todo');
+    setBaseBranch('');
     setError(null);
     const active = projects.find((p) => p.id === activeProjectId);
     setProjectPath(active?.path || projects[0]?.path || '');
     setTimeout(() => nameInputRef.current?.focus(), 50);
   }, [open, activeProjectId, projects]);
+
+  // Clear the base-branch selection when the project changes — the picker
+  // will repopulate from the new project's branches and default to current.
+  useEffect(() => {
+    setBaseBranch('');
+  }, [projectPath]);
 
   // Close project dropdown on outside click
   useEffect(() => {
@@ -85,6 +94,7 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
       projectPath,
       projectId: selectedProject?.id,
       kanbanStatus,
+      baseBranch: baseBranch || undefined,
     });
     setSubmitting(false);
     if (created) {
@@ -186,6 +196,14 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
               </div>
             )}
           </div>
+
+          {/* Base branch */}
+          <BaseBranchPicker
+            label="Base branch"
+            projectPath={projectPath}
+            value={baseBranch}
+            onChange={setBaseBranch}
+          />
 
           {/* Kanban column */}
           <div>

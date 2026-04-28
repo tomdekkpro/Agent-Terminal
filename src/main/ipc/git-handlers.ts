@@ -151,7 +151,7 @@ function ensureGitignore(projectPath: string, entry: string): void {
 export function registerGitHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     IPC_CHANNELS.GIT_CREATE_WORKTREE,
-    async (_event, projectPath: string, taskId: string, _taskName?: string) => {
+    async (_event, projectPath: string, taskId: string, _taskName?: string, baseBranch?: string) => {
       try {
         if (!isGitRepo(projectPath)) {
           return { success: false, error: 'Not a git repository' };
@@ -178,11 +178,17 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         // .claude/ is already gitignored in most projects, but ensure it
         ensureGitignore(projectPath, '.claude/');
 
-        // Use origin/HEAD as the base branch so behavior matches `claude
-        // --worktree <name>` (which branches from the default remote
-        // branch). Falls back to local HEAD when there's no remote.
-        const originHead = await resolveOriginHead(projectPath);
-        const baseRef = originHead || 'HEAD';
+        // Pick the base ref:
+        //  1. Explicit caller override (per-task selection from the UI)
+        //  2. origin/HEAD — matches `claude --worktree <name>`
+        //  3. local HEAD — for projects with no remote
+        let baseRef: string;
+        if (baseBranch && baseBranch.trim()) {
+          baseRef = baseBranch.trim();
+        } else {
+          const originHead = await resolveOriginHead(projectPath);
+          baseRef = originHead || 'HEAD';
+        }
         debugLog('[Git] Worktree base:', baseRef);
 
         // Try creating with new branch

@@ -5,6 +5,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore, type WorkspaceMember } from '../../stores/kanban-store';
 import { cn } from '../../../shared/utils';
+import { BaseBranchPicker } from '../shared/BaseBranchPicker';
 
 interface ImportTaskModalProps {
   open: boolean;
@@ -34,6 +35,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
   const assigneeDropdownRef = useRef<HTMLDivElement>(null);
 
   const [selectedProjectPath, setSelectedProjectPath] = useState<string>('');
+  const [baseBranch, setBaseBranch] = useState<string>('');
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TaskManagerTask[]>([]);
@@ -67,6 +69,12 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
     if (activeProject) setSelectedProjectPath(activeProject.path);
     else if (projects.length > 0) setSelectedProjectPath(projects[0].path);
   }, [open, activeProjectId, projects, selectedProjectPath]);
+
+  // Reset the base-branch selection whenever the project changes — the
+  // picker will reload branches and default to the new project's current.
+  useEffect(() => {
+    setBaseBranch('');
+  }, [selectedProjectPath]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -139,6 +147,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
           clickupTask: task,
           projectPath: selectedProjectPath,
           projectId: matchedProject?.id,
+          baseBranch: baseBranch || undefined,
         });
       } finally {
         setImporting((prev) => {
@@ -148,7 +157,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
         });
       }
     },
-    [importTask, selectedProjectPath, projects],
+    [importTask, selectedProjectPath, projects, baseBranch],
   );
 
   if (!open) return null;
@@ -313,6 +322,18 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Base branch — applies to the next imported task */}
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-[var(--text-muted)] shrink-0">Fork worktree from:</span>
+            <div className="flex-1 max-w-xs">
+              <BaseBranchPicker
+                projectPath={selectedProjectPath || undefined}
+                value={baseBranch}
+                onChange={setBaseBranch}
+              />
             </div>
           </div>
 

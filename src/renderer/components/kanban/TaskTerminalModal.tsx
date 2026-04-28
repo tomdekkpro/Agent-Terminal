@@ -163,10 +163,12 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
         // Pre-create the native worktree so git ops (status, push, PR) work
         // before / between Claude runs. createTaskWorktree is idempotent.
+        // Pass through the user-selected baseBranch so the worktree forks
+        // from the right branch (falls back to origin/HEAD inside the handler).
         let worktreePath = nativeWorktreePath;
         let worktreeBranch = nativeBranch;
         try {
-          const wt = await window.electronAPI.createTaskWorktree(project.path, worktreeName);
+          const wt = await window.electronAPI.createTaskWorktree(project.path, worktreeName, task.baseBranch);
           if (wt?.success && wt.data) {
             worktreePath = wt.data;
             if (wt.branch) worktreeBranch = wt.branch;
@@ -209,13 +211,19 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           title,
         } as Partial<Terminal>);
 
-        // Base branch
-        try {
-          const br = await window.electronAPI.listBranches(project.path);
-          if (br?.success && br.current) {
-            updateTerminal(terminal.id, { baseBranch: br.current });
-          }
-        } catch { /* non-critical */ }
+        // Base branch — prefer the one the task was imported with (so the
+        // merge/PR target matches what the worktree was actually forked
+        // from). Fall back to the project's current branch otherwise.
+        if (task.baseBranch) {
+          updateTerminal(terminal.id, { baseBranch: task.baseBranch });
+        } else {
+          try {
+            const br = await window.electronAPI.listBranches(project.path);
+            if (br?.success && br.current) {
+              updateTerminal(terminal.id, { baseBranch: br.current });
+            }
+          } catch { /* non-critical */ }
+        }
 
         await window.electronAPI.createTerminal({
           id: terminal.id,
