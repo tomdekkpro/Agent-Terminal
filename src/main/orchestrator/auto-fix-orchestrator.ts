@@ -464,8 +464,8 @@ class AutoFixOrchestrator {
     });
     this.emitLog({ taskId: task.id, message: `Fix attempt ${iteration} — starting`, level: 'info' });
 
-    // 3. Resolve worktree
-    await this.ensureWorktree(projectPath, worktreeDir, branch);
+    // 3. Resolve worktree — fork from the task's chosen base branch, not the repo default
+    await this.ensureWorktree(projectPath, worktreeDir, branch, task.baseBranch);
 
     // 4. Build prompt with prior attempts
     const priorBotAttempts = comments
@@ -517,7 +517,13 @@ class AutoFixOrchestrator {
     }
 
     // 7. PR
-    const pr = await this.resolvePR(projectPath, branch, task.clickupName, task.clickupCustomId || task.clickupTaskId);
+    const pr = await this.resolvePR(
+      projectPath,
+      branch,
+      task.clickupName,
+      task.clickupCustomId || task.clickupTaskId,
+      task.baseBranch,
+    );
     if (pr?.url) this.patch(task.id, { prUrl: pr.url });
 
     // 8. ClickUp status flip + comment
@@ -597,7 +603,12 @@ ${priorSection}
 - You have full shell access — run tests or checks if that helps you validate the fix.`;
   }
 
-  private async ensureWorktree(projectPath: string, worktreeDir: string, branch: string): Promise<void> {
+  private async ensureWorktree(
+    projectPath: string,
+    worktreeDir: string,
+    branch: string,
+    taskBaseBranch?: string,
+  ): Promise<void> {
     if (existsSync(worktreeDir)) {
       try {
         await runCmd(`git pull --ff-only`, worktreeDir, NETWORK_TIMEOUT);
@@ -609,14 +620,19 @@ ${priorSection}
 
     mkdirSync(join(projectPath, '.claude', 'worktrees'), { recursive: true });
 
-    // Match `claude --worktree <name>` base-branch behavior: branch from
-    // origin/HEAD if available (per the Common Workflows docs), fall back
-    // to the project's current HEAD if there's no remote.
+    // Pick the base ref:
+    //  1. Per-task baseBranch (chosen by the user when importing the task)
+    //  2. origin/HEAD — matches `claude --worktree <name>`
+    //  3. local HEAD — for projects with no remote
     let baseRef = 'HEAD';
-    try {
-      const ref = await runCmd('git symbolic-ref refs/remotes/origin/HEAD --short', projectPath, 5_000);
-      if (ref) baseRef = ref;
-    } catch { /* no remote / HEAD not set — fall back to HEAD */ }
+    if (taskBaseBranch && taskBaseBranch.trim()) {
+      baseRef = taskBaseBranch.trim();
+    } else {
+      try {
+        const ref = await runCmd('git symbolic-ref refs/remotes/origin/HEAD --short', projectPath, 5_000);
+        if (ref) baseRef = ref;
+      } catch { /* no remote / HEAD not set — fall back to HEAD */ }
+    }
 
     try {
       await runCmd(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
@@ -672,6 +688,7 @@ ${priorSection}
     branch: string,
     taskName: string,
     taskIdentifier: string,
+    baseBranch?: string,
   ): Promise<{ number: number; url: string } | null> {
     try {
       const existing = await runCmd(
@@ -691,10 +708,13 @@ ${priorSection}
       const escapedTitle = title.replace(/"/g, '\\"');
       const bodyFile = join(tmpdir(), `auto-fix-body-${Date.now()}.md`);
       writeFileSync(bodyFile, body, 'utf-8');
+      // Without --base, gh defaults to the repo's default branch — wrong when
+      // the task was forked from a different base (e.g. Develop).
+      const baseFlag = baseBranch && baseBranch.trim() ? `--base "${baseBranch.trim()}" ` : '';
       let url: string;
       try {
         url = await runCmd(
-          `gh pr create --head "${branch}" --title "${escapedTitle}" --body-file "${bodyFile}"`,
+          `gh pr create ${baseFlag}--head "${branch}" --title "${escapedTitle}" --body-file "${bodyFile}"`,
           projectPath,
           NETWORK_TIMEOUT,
         );
