@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Search, Loader2, AlertTriangle, Check, FolderOpen, List, ChevronDown, User, Users } from 'lucide-react';
+import { X, Search, Loader2, AlertTriangle, Check, FolderOpen, List, ChevronDown, User, Users, GitBranch, GitFork } from 'lucide-react';
 import type { TaskManagerTask, TaskManagerList } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -36,6 +36,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
 
   const [selectedProjectPath, setSelectedProjectPath] = useState<string>('');
   const [baseBranch, setBaseBranch] = useState<string>('');
+  const [useWorktree, setUseWorktree] = useState<boolean>(true);
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TaskManagerTask[]>([]);
@@ -147,7 +148,8 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
           clickupTask: task,
           projectPath: selectedProjectPath,
           projectId: matchedProject?.id,
-          baseBranch: baseBranch || undefined,
+          baseBranch: useWorktree ? (baseBranch || undefined) : undefined,
+          useWorktree,
         });
       } finally {
         setImporting((prev) => {
@@ -157,7 +159,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
         });
       }
     },
-    [importTask, selectedProjectPath, projects, baseBranch],
+    [importTask, selectedProjectPath, projects, baseBranch, useWorktree],
   );
 
   if (!open) return null;
@@ -325,16 +327,54 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
             </div>
           </div>
 
-          {/* Base branch — applies to the next imported task */}
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] text-[var(--text-muted)] shrink-0">Fork worktree from:</span>
-            <div className="flex-1 max-w-xs">
-              <BaseBranchPicker
-                projectPath={selectedProjectPath || undefined}
-                value={baseBranch}
-                onChange={setBaseBranch}
-              />
+          {/* Workspace mode + (when applicable) base branch — applies to next import */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="inline-flex rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setUseWorktree(true)}
+                className={cn(
+                  'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] transition-colors',
+                  useWorktree
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]',
+                )}
+                title="Create a dedicated worktree forked from the base branch (recommended)"
+              >
+                <GitFork className="w-3 h-3" />
+                Worktree
+              </button>
+              <button
+                type="button"
+                onClick={() => setUseWorktree(false)}
+                className={cn(
+                  'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] transition-colors',
+                  !useWorktree
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]',
+                )}
+                title="Run on the project's currently checked-out branch — no worktree, shares uncommitted state"
+              >
+                <GitBranch className="w-3 h-3" />
+                Current branch
+              </button>
             </div>
+            {useWorktree ? (
+              <>
+                <span className="text-[11px] text-[var(--text-muted)] shrink-0">Fork from:</span>
+                <div className="flex-1 max-w-xs">
+                  <BaseBranchPicker
+                    projectPath={selectedProjectPath || undefined}
+                    value={baseBranch}
+                    onChange={setBaseBranch}
+                  />
+                </div>
+              </>
+            ) : (
+              <span className="text-[11px] text-[var(--text-muted)] italic">
+                Agent will run in the project's checked-out branch.
+              </span>
+            )}
           </div>
 
           {/* Search */}

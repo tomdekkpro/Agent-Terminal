@@ -614,6 +614,11 @@ export interface KanbanTask {
   worktreePath?: string;
   worktreeBranch?: string;
   baseBranch?: string;
+  /** When false, the agent runs directly against the project's current branch
+   *  — no worktree is created and `--worktree` is not passed to Claude. The
+   *  baseBranch + worktreeBranch fields are not used in that case. Undefined
+   *  defaults to worktree mode for back-compat with pre-1.23.5 records. */
+  useWorktree?: boolean;
 
   /** Auto-fix loop state */
   autoFixState: AutoFixTaskState;

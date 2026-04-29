@@ -433,19 +433,31 @@ export function KanbanCard({
               <span className="italic">Click to start</span>
             </>
           )}
-          {task.worktreeBranch && (
-            <>
-              <GitBranch className="w-3 h-3 shrink-0 ml-0.5" />
-              <span className="truncate font-mono">{task.worktreeBranch}</span>
-            </>
-          )}
-          {task.baseBranch && (
+          {task.useWorktree === false ? (
             <span
-              className="truncate font-mono text-[var(--text-muted)] shrink-0"
-              title={`Worktree forked from ${task.baseBranch} — merge/PR target`}
+              className="flex items-center gap-1 shrink-0 text-amber-400"
+              title="No worktree — runs on the project's checked-out branch"
             >
-              ← {task.baseBranch}
+              <GitBranch className="w-3 h-3" />
+              <span className="text-[10px]">current branch</span>
             </span>
+          ) : (
+            <>
+              {task.worktreeBranch && (
+                <>
+                  <GitBranch className="w-3 h-3 shrink-0 ml-0.5" />
+                  <span className="truncate font-mono">{task.worktreeBranch}</span>
+                </>
+              )}
+              {task.baseBranch && (
+                <span
+                  className="truncate font-mono text-[var(--text-muted)] shrink-0"
+                  title={`Worktree forked from ${task.baseBranch} — merge/PR target`}
+                >
+                  ← {task.baseBranch}
+                </span>
+              )}
+            </>
           )}
         </div>
 

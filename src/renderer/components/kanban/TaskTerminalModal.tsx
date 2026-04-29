@@ -157,6 +157,56 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         const worktreeName = (task.clickupCustomId || task.clickupTaskId).replace(/[^a-zA-Z0-9_-]/g, '-');
         const sep = project.path.includes('\\') ? '\\' : '/';
 
+        // useWorktree=false → run directly on the project's checked-out branch.
+        // No worktree creation, no --worktree flag, baseBranch comes from
+        // whatever the project is currently on.
+        const wantsWorktree = task.useWorktree !== false;
+
+        if (!wantsWorktree) {
+          updateTerminal(terminal.id, {
+            task: toTerminalTask(task),
+            cwd: project.path,
+            worktreePath: undefined,
+            worktreeBranch: undefined,
+            title,
+          } as Partial<Terminal>);
+
+          try {
+            const br = await window.electronAPI.listBranches(project.path);
+            if (br?.success && br.current) {
+              updateTerminal(terminal.id, { baseBranch: br.current });
+            }
+          } catch { /* non-critical */ }
+
+          await window.electronAPI.createTerminal({
+            id: terminal.id,
+            cwd: project.path,
+            cols: 80,
+            rows: 24,
+          });
+
+          if (task.agentSessionId) {
+            const agentId: AgentProviderId = task.agentProvider || 'claude';
+            updateTerminal(terminal.id, {
+              agentSessionId: task.agentSessionId,
+              agentProvider: agentId,
+              isClaudeMode: true,
+              status: 'claude-active',
+            });
+            try {
+              await window.electronAPI.resumeAgent(terminal.id, agentId, {
+                sessionId: task.agentSessionId,
+                cwd: project.path,
+              });
+            } catch {
+              updateTerminal(terminal.id, { isClaudeMode: false, status: 'idle' });
+            }
+          }
+
+          setTerminalId(terminal.id);
+          return;
+        }
+
         const nativeWorktreePath = `${project.path}${sep}.claude${sep}worktrees${sep}${worktreeName}`;
         const nativeBranch = `worktree-${worktreeName}`;
         const legacyWorktreePath = `${project.path}${sep}.task-worktrees${sep}${worktreeName}`;
@@ -284,8 +334,10 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     const model = project?.agentModel || settings.agentModels?.[agentId] || undefined;
     // Pass --worktree <id> when this terminal is bound to a task so Claude
     // creates / reuses <repo>/.claude/worktrees/<id>. Skip for non-Claude
-    // providers since the flag is Claude-specific.
-    const worktreeName = terminal.task && agentId === 'claude'
+    // providers (flag is Claude-specific) and for tasks the user opted out of
+    // worktree mode (`useWorktree === false`) — those run on the project's
+    // checked-out branch.
+    const worktreeName = terminal.task && agentId === 'claude' && task?.useWorktree !== false
       ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
       : undefined;
     const result = await window.electronAPI.invokeAgent(terminal.id, agentId, {
@@ -340,7 +392,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         }
       }
     }
-  }, [terminal, projects, settings.agentModels]);
+  }, [terminal, projects, settings.agentModels, task]);
 
   const handleProviderChange = useCallback((provider: AgentProviderId) => {
     if (!terminal) return;
@@ -430,7 +482,15 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   <ExternalLink className="w-2.5 h-2.5" />
                 </button>
               )}
-              {task.worktreeBranch && (
+              {task.useWorktree === false ? (
+                <div
+                  className="flex items-center gap-1 text-amber-400"
+                  title="No worktree — agent runs on the project's checked-out branch"
+                >
+                  <GitBranch className="w-3 h-3" />
+                  <span>Current branch</span>
+                </div>
+              ) : task.worktreeBranch && (
                 <div className="flex items-center gap-1" title="Git branch for this task's worktree">
                   <GitBranch className="w-3 h-3" />
                   <span className="font-mono">{task.worktreeBranch}</span>

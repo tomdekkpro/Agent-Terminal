@@ -259,6 +259,9 @@ class AutoFixOrchestrator {
     for (const task of all) {
       // Local tasks have no ClickUp QC signal — skip the auto-fix loop.
       if (task.provider === 'local') continue;
+      // No-worktree tasks share the project's checked-out branch — auto-fix
+      // would clobber whatever the user is working on. Skip them.
+      if (task.useWorktree === false) continue;
       if (task.clickupStatus?.toLowerCase() !== failedStatus) continue;
 
       // Mirror Kanban status to Failed column whenever ClickUp reports Failed
@@ -326,6 +329,7 @@ class AutoFixOrchestrator {
     const tracked = listKanbanTasks().filter(
       (t) =>
         t.provider !== 'local' &&
+        t.useWorktree !== false &&
         (t.autoFixState === 'awaiting-qc' || t.autoFixState === 'merging'),
     );
 

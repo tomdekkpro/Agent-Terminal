@@ -40,6 +40,11 @@ function load(): StoreData {
           t.orderIndex = Date.parse(t.createdAt || '') || Date.now();
         }
       }
+      // Backfill useWorktree (added v1.23.5) — every existing record was
+      // created in worktree-only mode, so default to true.
+      for (const t of tasks) {
+        if (typeof t.useWorktree !== 'boolean') t.useWorktree = true;
+      }
       cached = { tasks };
       debugLog('[KanbanStore] Loaded', cached.tasks.length, 'kanban task(s)');
       return cached;
@@ -96,6 +101,9 @@ export interface ImportTaskInput {
   /** Branch to fork the task's worktree from. Persisted on the KanbanTask
    *  and used as the merge/PR target. Empty/undefined falls back to origin/HEAD. */
   baseBranch?: string;
+  /** When false, no worktree is created; the agent runs on the project's
+   *  current branch. Undefined/true preserves the worktree default. */
+  useWorktree?: boolean;
 }
 
 export function importKanbanTask(input: ImportTaskInput): KanbanTask {
@@ -136,6 +144,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
     baseBranch: input.baseBranch || undefined,
+    useWorktree: input.useWorktree === false ? false : true,
     orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,
@@ -169,6 +178,9 @@ export interface CreateLocalTaskInput {
   /** Branch to fork the task's worktree from. Persisted on the KanbanTask
    *  and used as the merge/PR target. Empty/undefined falls back to origin/HEAD. */
   baseBranch?: string;
+  /** When false, no worktree is created; the agent runs on the project's
+   *  current branch. Undefined/true preserves the worktree default. */
+  useWorktree?: boolean;
 }
 
 /** Create a local-only Kanban task (no ClickUp link). The orchestrator
@@ -194,6 +206,7 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
     baseBranch: input.baseBranch || undefined,
+    useWorktree: input.useWorktree === false ? false : true,
     orderIndex: nextOrderIndex(data.tasks),
     autoFixState: 'idle',
     iterationCount: 0,
