@@ -124,23 +124,35 @@ export function computeDailyCostBreakdown(tasks: KanbanTask[]): KanbanDailyCostB
 
   for (const task of tasks) {
     if (!task.agentSessionId) continue;
-    // Prefer the cwd the agent was actually started in. Falls back to the
-    // project path so older records (pre-`agentCwd`) still work — those
-    // sessions ran from the project root before native worktrees existed.
-    const cwd = task.agentCwd || task.projectPath;
-    if (!cwd) continue;
 
-    const projectDir = getClaudeProjectDir(cwd);
-    const parentJsonl = join(projectDir, `${task.agentSessionId}.jsonl`);
-    const subagentRoot = join(projectDir, task.agentSessionId);
+    // The session JSONL lives under Claude's encoded directory for the cwd
+    // Claude was actually invoked from. For `claude --worktree <id>`, Claude
+    // cd's into the worktree itself before writing — so the encoded dir is
+    // the worktree path, not the PTY cwd (which we record as `agentCwd` and
+    // is usually the project root). Try every plausible candidate and union
+    // the results; deduped via seenFiles, so the same JSONL only counts once.
+    const candidateCwds: string[] = [];
+    const pushUnique = (c: string | undefined | null) => {
+      if (c && !candidateCwds.includes(c)) candidateCwds.push(c);
+    };
+    pushUnique(task.worktreePath);
+    pushUnique(task.agentCwd);
+    pushUnique(task.projectPath);
 
-    const candidates = [parentJsonl, ...listJsonlRecursive(subagentRoot)];
-    for (const file of candidates) {
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
-      const bucket = bucketFile(file);
-      for (const [date, cost] of bucket) {
-        totals.set(date, (totals.get(date) || 0) + cost);
+    for (const cwd of candidateCwds) {
+      const projectDir = getClaudeProjectDir(cwd);
+      const parentJsonl = join(projectDir, `${task.agentSessionId}.jsonl`);
+      const subagentRoot = join(projectDir, task.agentSessionId);
+
+      const fileList = [parentJsonl, ...listJsonlRecursive(subagentRoot)];
+      for (const file of fileList) {
+        if (seenFiles.has(file)) continue;
+        if (!existsSync(file)) continue; // skip the wrong candidate dirs cheaply
+        seenFiles.add(file);
+        const bucket = bucketFile(file);
+        for (const [date, cost] of bucket) {
+          totals.set(date, (totals.get(date) || 0) + cost);
+        }
       }
     }
   }
