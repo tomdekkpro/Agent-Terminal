@@ -637,6 +637,9 @@ ${priorSection}
     try {
       await runCmd(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
     } catch {
+      // Stale worktree record (dir deleted manually) and/or stale branch — clear both before retrying
+      try { await runCmd(`git worktree remove --force "${worktreeDir}"`, projectPath, 5_000); } catch { /* noop */ }
+      try { await runCmd('git worktree prune --expire=now', projectPath, 5_000); } catch { /* noop */ }
       try { await runCmd(`git branch -D "${branch}"`, projectPath, 5_000); } catch { /* noop */ }
       await runCmd(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
     }

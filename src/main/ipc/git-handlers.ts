@@ -195,8 +195,17 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         try {
           await gitExec(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
         } catch {
-          // Branch might already exist (previous worktree was removed but branch kept)
-          // Force-delete the old branch first, then try with existing branch
+          // Two stale-state cases git won't recover from on its own:
+          //  - branch already exists (previous worktree removed but branch kept)
+          //  - worktree record still registered ("is already used by worktree at ...")
+          //    happens when the dir was deleted manually so plain `prune` skips it.
+          try {
+            await gitExec(`git worktree remove --force "${worktreeDir}"`, projectPath, 5000);
+            debugLog('[Git] Removed stale worktree record:', worktreeDir);
+          } catch { /* no record or path mismatch, ignore */ }
+          try {
+            await gitExec('git worktree prune --expire=now', projectPath, 5000);
+          } catch { /* noop */ }
           try {
             await gitExec(`git branch -D "${branch}"`, projectPath, 5000);
             debugLog('[Git] Deleted stale branch:', branch);
