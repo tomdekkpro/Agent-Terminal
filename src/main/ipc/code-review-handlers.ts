@@ -1227,6 +1227,49 @@ export function registerCodeReviewHandlers(
     },
   );
 
+  // ─── Add PR manually ────────────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_REVIEW_ADD_PR,
+    async (_event, projectPath: string, prInput: string) => {
+      try {
+        const trimmed = (prInput || '').trim();
+        if (!trimmed) return { success: false, error: 'PR URL or number is required' };
+        if (!projectPath) return { success: false, error: 'Project path is required' };
+
+        // Accept: full URL, #123, or plain number
+        let prNumber: number | null = null;
+        const urlMatch = trimmed.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/i);
+        if (urlMatch) {
+          prNumber = parseInt(urlMatch[1], 10);
+        } else {
+          const numMatch = trimmed.match(/^#?(\d+)$/);
+          if (numMatch) prNumber = parseInt(numMatch[1], 10);
+        }
+
+        if (!prNumber || Number.isNaN(prNumber)) {
+          return { success: false, error: 'Invalid PR — paste a GitHub PR URL or PR number' };
+        }
+
+        // Validate PR exists in the selected project repo
+        const info = await fetchPRInfo(projectPath, prNumber);
+        return {
+          success: true,
+          data: {
+            prNumber,
+            prUrl: info.url,
+            prBranch: info.branch,
+            prTitle: info.title,
+            state: info.state,
+          },
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'Failed to add PR';
+        debugError('[CodeReview] addPR error:', error);
+        return { success: false, error: msg };
+      }
+    },
+  );
+
   // ─── Stop review ────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.CODE_REVIEW_STOP, async (_event, taskId: string) => {
     const killed = killReviewProcess(taskId);

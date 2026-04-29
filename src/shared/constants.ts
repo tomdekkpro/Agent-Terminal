@@ -142,6 +142,7 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_STOP_ALL: 'code-review:stop-all',
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
   CODE_REVIEW_FORCE_APPROVE: 'code-review:force-approve',
+  CODE_REVIEW_ADD_PR: 'code-review:add-pr',
   // Kanban Tasks (local task records)
   KANBAN_LIST: 'kanban:list',
   KANBAN_GET: 'kanban:get',

@@ -265,6 +265,8 @@ const electronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle),
   codeReviewForceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE, projectPath, taskId, prNumber, prTitle),
+  codeReviewAddPR: (projectPath: string, prInput: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_ADD_PR, projectPath, prInput),
   codeReviewStop: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_STOP, taskId),
   codeReviewStopAll: () => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_STOP_ALL),
   codeReviewSchedulerStart: () => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SCHEDULER_START),

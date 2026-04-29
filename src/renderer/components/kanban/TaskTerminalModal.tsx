@@ -9,6 +9,8 @@ import {
   Loader2,
   Hash,
   FolderOpen,
+  Pencil,
+  Save,
 } from 'lucide-react';
 import type { KanbanTask, AgentProviderMeta, AgentProviderId, TaskManagerTask, TerminalTask } from '../../../shared/types';
 import { useTerminalStore, type Terminal } from '../../stores/terminal-store';
@@ -57,6 +59,149 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
       className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
     >
       {copied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+    </button>
+  );
+}
+
+/** Inline editor for manually setting (or replacing) a task's agent session id.
+ *  Used when auto-capture lost the id and the user wants to resume an existing
+ *  Claude conversation. */
+function SessionIdEditor({
+  task,
+  agentProviders,
+}: {
+  task: KanbanTask;
+  agentProviders: AgentProviderMeta[];
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(task.agentSessionId || '');
+  const [provider, setProvider] = useState<AgentProviderId>(task.agentProvider || 'claude');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const open = () => {
+    setValue(task.agentSessionId || '');
+    setProvider(task.agentProvider || 'claude');
+    setError(null);
+    setEditing(true);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setError(null);
+  };
+
+  const save = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setError('Session ID is required');
+      return;
+    }
+    // Claude session ids are UUIDs — accept anything that looks roughly like one
+    // (8-4-4-4-12 hex). Other providers may use different formats, so only
+    // hard-fail when the format is clearly wrong for Claude.
+    if (provider === 'claude' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+      setError('Claude session IDs are UUIDs (e.g. 1a2b3c4d-…)');
+      return;
+    }
+    if (trimmed === task.agentSessionId && provider === task.agentProvider) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      // Clear agentCwd so the resume flow re-probes candidates for this new id.
+      await useKanbanStore.getState().updateTask(task.id, {
+        agentSessionId: trimmed,
+        agentProvider: provider,
+        agentCwd: undefined,
+      });
+      setEditing(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <Hash className="w-3 h-3 text-[var(--text-muted)]" />
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setError(null); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') save();
+            if (e.key === 'Escape') cancel();
+          }}
+          placeholder="Paste session ID (UUID)"
+          disabled={saving}
+          className="font-mono text-[11px] bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 w-[280px] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)] disabled:opacity-50"
+        />
+        {agentProviders.length > 0 ? (
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as AgentProviderId)}
+            disabled={saving}
+            className="text-[11px] bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:opacity-50"
+          >
+            {agentProviders.map((p) => (
+              <option key={p.id} value={p.id}>{p.displayName || p.id}</option>
+            ))}
+          </select>
+        ) : null}
+        <button
+          onClick={save}
+          disabled={saving || !value.trim()}
+          title="Save session ID"
+          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-green-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+        </button>
+        <button
+          onClick={cancel}
+          disabled={saving}
+          title="Cancel"
+          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+        >
+          <X className="w-3 h-3" />
+        </button>
+        {error && <span className="text-[11px] text-red-400">{error}</span>}
+      </div>
+    );
+  }
+
+  if (task.agentSessionId) {
+    return (
+      <div className="flex items-center gap-1" title="Agent session id — used to resume the agent on reopen">
+        <Hash className="w-3 h-3" />
+        <span className="font-mono">
+          {task.agentSessionId.slice(0, 8)}…{task.agentSessionId.slice(-4)}
+        </span>
+        <CopyButton text={task.agentSessionId} label="session id" />
+        <button
+          onClick={open}
+          title="Edit session ID — paste an existing one to resume that conversation"
+          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
+        >
+          <Pencil className="w-3 h-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={open}
+      title="Manually paste a session ID to resume an existing agent conversation"
+      className="flex items-center gap-1 italic opacity-70 hover:opacity-100 hover:text-[var(--text-primary)] transition-all"
+    >
+      <Pencil className="w-3 h-3" />
+      <span>No agent session — set session ID</span>
     </button>
   );
 }
@@ -460,17 +605,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
             {/* Meta row: session id, PR, branch, project */}
             <div className="flex items-center gap-4 flex-wrap mt-1.5 text-[11px] text-[var(--text-muted)]">
-              {task.agentSessionId ? (
-                <div className="flex items-center gap-1" title="Agent session id — used to resume the agent on reopen">
-                  <Hash className="w-3 h-3" />
-                  <span className="font-mono">
-                    {task.agentSessionId.slice(0, 8)}…{task.agentSessionId.slice(-4)}
-                  </span>
-                  <CopyButton text={task.agentSessionId} label="session id" />
-                </div>
-              ) : (
-                <span className="italic opacity-70">No agent session yet — start the agent to create one</span>
-              )}
+              <SessionIdEditor task={task} agentProviders={agentProviders} />
               {task.prUrl && (
                 <button
                   onClick={() => window.electronAPI.openExternal(task.prUrl!)}

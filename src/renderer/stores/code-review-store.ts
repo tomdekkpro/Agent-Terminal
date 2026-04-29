@@ -14,6 +14,7 @@ interface CodeReviewState {
   stopAllReviews: () => Promise<void>;
   submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
   forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) => Promise<void>;
+  addPR: (projectPath: string, taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
   updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
@@ -132,6 +133,34 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       // Revert on failure
       get().updatePR(taskId, prNumber, { status: 'failed' });
       console.error('[CodeReview] Failed to force approve:', err);
+    }
+  },
+
+  addPR: async (projectPath, taskId, prInput) => {
+    try {
+      const result = await window.electronAPI.codeReviewAddPR(projectPath, prInput);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      const { prNumber, prUrl, prBranch, prTitle } = result.data;
+      const item = get().items.find((i) => i.taskId === taskId);
+      if (!item) return { success: false, error: 'Task not found' };
+      if (item.prs.some((p) => p.prNumber === prNumber)) {
+        return { success: false, error: `PR #${prNumber} already attached` };
+      }
+      const newPR: CodeReviewPR = {
+        prNumber,
+        prUrl,
+        prBranch,
+        prTitle,
+        status: 'pending',
+        findings: [],
+      };
+      const updatedPRs = [...item.prs, newPR];
+      get().updateItem(taskId, { prs: updatedPRs, status: deriveTaskStatus(updatedPRs) });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to add PR' };
     }
   },
 

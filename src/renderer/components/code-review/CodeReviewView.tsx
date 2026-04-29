@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
-  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp,
+  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -230,17 +230,106 @@ function PRRow({
   );
 }
 
+function AddPRInput({
+  taskId,
+  projectPath,
+  onAddPR,
+  compact,
+}: {
+  taskId: string;
+  projectPath: string;
+  onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
+  compact?: boolean;
+}) {
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(!compact);
+
+  const submit = async () => {
+    if (!value.trim() || busy) return;
+    if (!projectPath) {
+      setError('Select a project first');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await onAddPR(taskId, value.trim());
+    setBusy(false);
+    if (result.success) {
+      setValue('');
+      if (compact) setOpen(false);
+    } else {
+      setError(result.error || 'Failed to add PR');
+    }
+  };
+
+  if (compact && !open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+      >
+        <Plus className="w-3 h-3" />
+        Add PR manually
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setError(null); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+          placeholder="Paste PR URL or #123"
+          disabled={busy}
+          className="flex-1 text-xs bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)] disabled:opacity-50"
+        />
+        <button
+          onClick={submit}
+          disabled={busy || !value.trim()}
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+        >
+          {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+          Add PR
+        </button>
+        {compact && (
+          <button
+            onClick={() => { setOpen(false); setValue(''); setError(null); }}
+            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+            title="Cancel"
+          >
+            <XCircle className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+      {error && (
+        <div className="flex items-center gap-1.5 text-[11px] text-red-400">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewItemCard({
   item,
+  projectPath,
   onReview,
   onStop,
   onApprove,
+  onAddPR,
 }: {
   item: CodeReviewItem;
   projectPath: string;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
   onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
+  onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
@@ -280,12 +369,15 @@ function ReviewItemCard({
           </div>
         </div>
 
-        {/* No PRs warning */}
+        {/* No PRs warning + manual input */}
         {!hasPRs && item.status === 'pending' && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            No open PR found. Add a GitHub PR URL to the task description.
-          </div>
+          <>
+            <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              No open PR found. Add it manually below.
+            </div>
+            <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} />
+          </>
         )}
 
         {/* PR list */}
@@ -301,6 +393,7 @@ function ReviewItemCard({
                 onApprove={onApprove}
               />
             ))}
+            <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} compact />
           </div>
         )}
       </div>
@@ -521,7 +614,7 @@ function SchedulerPanel({ projectPath }: { projectPath: string }) {
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
@@ -623,6 +716,11 @@ export function CodeReviewView() {
     if (!selectedProjectPath) return;
     forceApprove(selectedProjectPath, taskId, prNumber, prTitle);
   }, [selectedProjectPath, forceApprove]);
+
+  const handleAddPR = useCallback(async (taskId: string, prInput: string) => {
+    if (!selectedProjectPath) return { success: false, error: 'Select a project first' };
+    return addPR(selectedProjectPath, taskId, prInput);
+  }, [selectedProjectPath, addPR]);
 
   const projectPath = selectedProjectPath || '';
   const allPRs = items.flatMap((i) => i.prs || []);
@@ -841,6 +939,7 @@ export function CodeReviewView() {
               onReview={handleReview}
               onStop={handleStop}
               onApprove={handleApprove}
+              onAddPR={handleAddPR}
             />
           ))}
         </div>
