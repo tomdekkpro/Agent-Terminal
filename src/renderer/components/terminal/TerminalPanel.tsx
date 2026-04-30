@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -196,6 +196,144 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteCon
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Shows the terminal's agent session ID with copy + manual-import affordance.
+ *  Mirrors the Kanban SessionIdEditor — same UUID validation, same display
+ *  format (first8…last4), so users get a consistent way to inspect and override
+ *  the resume target across both surfaces. */
+function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: boolean }) {
+  const updateTerminal = useTerminalStore((s) => s.updateTerminal);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(terminal.agentSessionId || '');
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setEditing(false);
+        setError(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [editing]);
+
+  const open = () => {
+    setValue(terminal.agentSessionId || '');
+    setError(null);
+    setEditing(true);
+  };
+
+  const save = () => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      updateTerminal(terminal.id, { agentSessionId: undefined });
+      setEditing(false);
+      return;
+    }
+    if (terminal.agentProvider === 'claude' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+      setError('Claude session IDs are UUIDs (e.g. 1a2b3c4d-…)');
+      return;
+    }
+    if (trimmed === terminal.agentSessionId) {
+      setEditing(false);
+      return;
+    }
+    updateTerminal(terminal.id, { agentSessionId: trimmed });
+    setEditing(false);
+  };
+
+  const copy = () => {
+    if (!terminal.agentSessionId) return;
+    navigator.clipboard.writeText(terminal.agentSessionId);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  if (editing) {
+    return (
+      <div ref={wrapRef} className="flex items-center gap-1 shrink-0">
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-[var(--bg-tertiary)] border border-[var(--accent)]/40">
+          <Hash className="w-2.5 h-2.5 text-[var(--text-muted)]" />
+          <input
+            type="text"
+            autoFocus
+            value={value}
+            onChange={(e) => { setValue(e.target.value); setError(null); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); save(); }
+              if (e.key === 'Escape') { setEditing(false); setError(null); }
+            }}
+            placeholder="Paste session ID (UUID)"
+            className={cn(
+              'font-mono text-[10px] bg-transparent text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]',
+              isSplit ? 'w-[160px]' : 'w-[260px]',
+            )}
+            onClick={(e) => e.stopPropagation()}
+          />
+          <button
+            onClick={(e) => { e.stopPropagation(); save(); }}
+            title="Save (Enter)"
+            className="p-0.5 rounded hover:bg-[var(--bg-card)] text-emerald-400"
+          >
+            <Save className="w-2.5 h-2.5" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setEditing(false); setError(null); }}
+            title="Cancel (Esc)"
+            className="p-0.5 rounded hover:bg-[var(--bg-card)] text-[var(--text-muted)]"
+          >
+            <X className="w-2.5 h-2.5" />
+          </button>
+        </span>
+        {error && <span className="text-[10px] text-red-400">{error}</span>}
+      </div>
+    );
+  }
+
+  if (!terminal.agentSessionId) {
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); open(); }}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] border border-[var(--border)] shrink-0 transition-colors"
+        title="Set session ID — paste an existing one to resume that agent conversation on reopen"
+      >
+        <Hash className="w-2.5 h-2.5" />
+        {!isSplit && <span className="italic">Set session ID</span>}
+        <Pencil className="w-2.5 h-2.5 opacity-70" />
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 shrink-0"
+      title={`Agent session ID\n${terminal.agentSessionId}\n\nUsed to resume the agent on reopen.`}
+    >
+      <Hash className="w-2.5 h-2.5" />
+      <span className="font-mono">
+        {terminal.agentSessionId.slice(0, 8)}…{terminal.agentSessionId.slice(-4)}
+      </span>
+      <button
+        onClick={(e) => { e.stopPropagation(); copy(); }}
+        className="p-0.5 rounded hover:bg-cyan-500/20 transition-colors"
+        title="Copy session ID"
+      >
+        {copied ? <Check className="w-2.5 h-2.5" /> : <Copy className="w-2.5 h-2.5" />}
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); open(); }}
+        className="p-0.5 rounded hover:bg-cyan-500/20 transition-colors"
+        title="Edit session ID — paste a different one to resume that conversation on next open"
+      >
+        <Pencil className="w-2.5 h-2.5" />
+      </button>
     </div>
   );
 }
@@ -834,6 +972,11 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 <span className="text-[9px] uppercase tracking-wide font-medium opacity-80">· cleanup pending</span>
               )}
             </span>
+          )}
+          {/* Session ID chip — show for any terminal that has or could have an agent
+              (linked to a task, agent already invoked, or a session id was captured) */}
+          {(terminal.task || terminal.isClaudeMode || terminal.agentSessionId) && (
+            <SessionIdChip terminal={terminal} isSplit={isSplit} />
           )}
           {/* Per-terminal usage pill */}
           {terminal.usage && (terminal.usage.cost > 0 || terminal.usage.outputTokens > 0) && (

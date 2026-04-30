@@ -86,15 +86,22 @@ export class ClaudeAgentProvider implements IAgentProvider {
   }
 
   getModels(): AgentModelOption[] {
+    // Aliases auto-resolve to the latest version Anthropic ships — picking
+    // these means new releases work immediately without an app update.
+    // Pinned IDs let users hold a specific release; the Custom field in
+    // settings accepts any future ID the CLI accepts.
     return [
-      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+      { id: 'opus', label: 'Opus (latest)' },
+      { id: 'sonnet', label: 'Sonnet (latest)' },
+      { id: 'haiku', label: 'Haiku (latest)' },
+      { id: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
     ];
   }
 
   getDefaultModel(): string {
-    return 'claude-opus-4-6';
+    return 'opus';
   }
 
   getSettingsFields(): AgentSettingsField[] {

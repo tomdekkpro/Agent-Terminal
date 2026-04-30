@@ -747,21 +747,24 @@ export function SettingsView() {
                   <p className="text-[10px] text-[var(--text-muted)] mt-1">AI provider selected by default when creating new terminals</p>
                 </div>
 
-                {/* Per-agent model selector */}
+                {/* Per-agent model selector — known options + Custom for any future model ID */}
                 {(() => {
                   const selectedProvider = agentProviders.find((p) => p.id === localSettings.defaultAgentProvider);
                   if (!selectedProvider || selectedProvider.models.length === 0) return null;
                   const agentModels = localSettings.agentModels || {};
                   const currentModel = agentModels[selectedProvider.id] || selectedProvider.defaultModel;
+                  const CUSTOM = '__custom__';
+                  const isCustom = !selectedProvider.models.some((m) => m.id === currentModel);
                   return (
                     <div>
                       <label className="block text-sm text-[var(--text-secondary)] mb-1.5">
                         Default Model ({selectedProvider.displayName})
                       </label>
                       <select
-                        value={currentModel}
+                        value={isCustom ? CUSTOM : currentModel}
                         onChange={(e) => {
-                          const updated = { ...localSettings.agentModels, [selectedProvider.id]: e.target.value };
+                          const value = e.target.value === CUSTOM ? '' : e.target.value;
+                          const updated = { ...localSettings.agentModels, [selectedProvider.id]: value };
                           handleChange('agentModels', updated);
                         }}
                         className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
@@ -769,7 +772,23 @@ export function SettingsView() {
                         {selectedProvider.models.map((m) => (
                           <option key={m.id} value={m.id}>{m.label}</option>
                         ))}
+                        <option value={CUSTOM}>Custom…</option>
                       </select>
+                      {isCustom && (
+                        <input
+                          type="text"
+                          value={currentModel}
+                          onChange={(e) => {
+                            const updated = { ...localSettings.agentModels, [selectedProvider.id]: e.target.value };
+                            handleChange('agentModels', updated);
+                          }}
+                          placeholder="e.g. claude-opus-4-7"
+                          className="mt-2 w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] font-mono"
+                        />
+                      )}
+                      <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                        Aliases (Opus / Sonnet / Haiku) always use the latest version. Use Custom… to type a specific model ID.
+                      </p>
                     </div>
                   );
                 })()}

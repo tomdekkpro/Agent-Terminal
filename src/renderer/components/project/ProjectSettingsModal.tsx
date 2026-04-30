@@ -28,6 +28,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
   const [name, setName] = useState(project.name);
   const [agentProvider, setAgentProvider] = useState<AgentProviderId | ''>(project.agentProvider || '');
   const [agentModel, setAgentModel] = useState(project.agentModel || '');
+  const [customModelMode, setCustomModelMode] = useState(false);
   const [agentConfig, setAgentConfig] = useState<Record<string, string>>(project.agentConfig || {});
   const [skills, setSkills] = useState<ProjectSkill[]>(project.skills || []);
   const [claudeSkills, setClaudeSkills] = useState<ProjectSkill[]>([]);
@@ -329,6 +330,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                     onChange={(e) => {
                       setAgentProvider(e.target.value as AgentProviderId | '');
                       setAgentModel('');
+                      setCustomModelMode(false);
                       setAgentConfig({});
                     }}
                     className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
@@ -342,24 +344,49 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                 </div>
               </div>
 
-              {agentProvider && availableModels.length > 0 && (
-                <div>
-                  <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Model</label>
-                  <div className="relative mt-1">
-                    <select
-                      value={agentModel}
-                      onChange={(e) => setAgentModel(e.target.value)}
-                      className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
-                    >
-                      <option value="">Use Default</option>
-                      {availableModels.map((m) => (
-                        <option key={m.id} value={m.id}>{m.label}</option>
-                      ))}
-                    </select>
-                    <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+              {agentProvider && availableModels.length > 0 && (() => {
+                const CUSTOM = '__custom__';
+                // Custom mode = either the user explicitly toggled it, or the
+                // saved value isn't a known model id (e.g. a hand-typed ID).
+                const valueIsKnown = availableModels.some((m) => m.id === agentModel);
+                const isCustom = customModelMode || (!!agentModel && !valueIsKnown);
+                return (
+                  <div>
+                    <label className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">Model</label>
+                    <div className="relative mt-1">
+                      <select
+                        value={isCustom ? CUSTOM : agentModel}
+                        onChange={(e) => {
+                          if (e.target.value === CUSTOM) {
+                            setCustomModelMode(true);
+                            setAgentModel('');
+                          } else {
+                            setCustomModelMode(false);
+                            setAgentModel(e.target.value);
+                          }
+                        }}
+                        className="w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] appearance-none"
+                      >
+                        <option value="">Use Default</option>
+                        {availableModels.map((m) => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
+                        <option value={CUSTOM}>Custom…</option>
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                    </div>
+                    {isCustom && (
+                      <input
+                        type="text"
+                        value={agentModel}
+                        onChange={(e) => setAgentModel(e.target.value)}
+                        placeholder="e.g. claude-opus-4-7"
+                        className="mt-2 w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono placeholder:text-[var(--text-muted)]"
+                      />
+                    )}
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {agentProvider && settingsFields.length > 0 && (
                 <div className="space-y-3 pt-2 border-t border-[var(--border)]">

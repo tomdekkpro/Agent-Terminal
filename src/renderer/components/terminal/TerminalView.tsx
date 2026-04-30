@@ -2,13 +2,20 @@ import { useCallback, useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
-  Columns2, ChevronDown, GitBranch,
+  Columns2, ChevronDown, ChevronRight, GitBranch,
   ArrowLeft, FolderGit2, Folder, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, Zap, FolderOpen,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
-import { useKanbanStore } from '../../stores/kanban-store';
+import {
+  useKanbanStore,
+  KANBAN_COLUMN_ORDER,
+  KANBAN_COLUMN_LABELS,
+  KANBAN_COLUMN_COLORS,
+} from '../../stores/kanban-store';
 import { useSettingsStore } from '../../stores/settings-store';
+import { mapClickupStatusToKanban } from '../../../shared/kanban-status-mapper';
+import type { KanbanTaskStatus } from '../../../shared/types';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
 import { ChangesPanel } from './ChangesPanel';
@@ -745,6 +752,25 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const reorderTerminalsInGroup = useTerminalStore((s) => s.reorderTerminalsInGroup);
 
+  // Tree sidebar — search + collapsed categories (persisted)
+  const [treeSearch, setTreeSearch] = useState('');
+  const TREE_COLLAPSED_KEY = 'terminal-tree-collapsed';
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(TREE_COLLAPSED_KEY);
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch { /* ignore */ }
+    return new Set();
+  });
+  const toggleCategory = useCallback((name: string) => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      try { localStorage.setItem(TREE_COLLAPSED_KEY, JSON.stringify(Array.from(next))); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+
   const [showTaskPicker, setShowTaskPicker] = useState(false);
   const [taskPickerMode, setTaskPickerMode] = useState<'tab' | 'split' | 'link'>('tab');
   const [linkTargetTerminalId, setLinkTargetTerminalId] = useState<string | null>(null);
@@ -772,7 +798,9 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const openNewMenu = useCallback(() => {
     if (menuTriggerRef.current) {
       const rect = menuTriggerRef.current.getBoundingClientRect();
-      setMenuPos({ top: rect.bottom + 4, left: rect.left });
+      // Trigger lives at the bottom of the sidebar — pop the menu upward.
+      const MENU_HEIGHT = 80; // ~2 items × ~36px + padding
+      setMenuPos({ top: Math.max(8, rect.top - MENU_HEIGHT - 4), left: rect.left });
     }
     setShowNewMenu((v) => !v);
   }, []);
@@ -1387,6 +1415,62 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     settings.taskManagerProvider !== 'none',
   );
 
+  // Derive sidebar categories using the same status mapping as the Kanban board:
+  // raw task.status → one of KANBAN_COLUMN_ORDER (todo / in-progress / review / failed / done).
+  // Statuses that don't map fall into "Other"; terminals without a task fall into "No task".
+  // Order matches the Kanban columns; "Other" and "No task" pin to the end.
+  const OTHER_KEY = '__other__';
+  const NO_TASK_KEY = '__no_task__';
+  const treeQuery = treeSearch.trim().toLowerCase();
+  const categories = (() => {
+    type Entry = { key: string; name: string; color?: string; groupIds: string[] };
+    const map = new Map<string, Entry>();
+    for (const groupId of groupIds) {
+      const groupTerminals = terminals.filter((t) => t.groupId === groupId);
+      const first = groupTerminals[0];
+      if (!first) continue;
+      if (treeQuery) {
+        const cid = first.task?.customId?.toLowerCase() || '';
+        if (!cid.includes(treeQuery)) continue;
+      }
+
+      let key: string;
+      let name: string;
+      let color: string | undefined;
+      if (!first.task) {
+        key = NO_TASK_KEY;
+        name = 'No task';
+      } else {
+        const kanban: KanbanTaskStatus | null = mapClickupStatusToKanban(first.task.status, settings);
+        if (kanban) {
+          key = kanban;
+          name = KANBAN_COLUMN_LABELS[kanban];
+          color = KANBAN_COLUMN_COLORS[kanban];
+        } else {
+          key = OTHER_KEY;
+          name = 'Other';
+          color = first.task.statusColor;
+        }
+      }
+
+      let entry = map.get(key);
+      if (!entry) {
+        entry = { key, name, color, groupIds: [] };
+        map.set(key, entry);
+      }
+      entry.groupIds.push(groupId);
+    }
+
+    const orderIndex = (key: string): number => {
+      const i = (KANBAN_COLUMN_ORDER as readonly string[]).indexOf(key);
+      if (i !== -1) return i;
+      if (key === OTHER_KEY) return KANBAN_COLUMN_ORDER.length;
+      if (key === NO_TASK_KEY) return KANBAN_COLUMN_ORDER.length + 1;
+      return KANBAN_COLUMN_ORDER.length + 2;
+    };
+    return Array.from(map.values()).sort((a, b) => orderIndex(a.key) - orderIndex(b.key));
+  })();
+
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {/* Task picker modal */}
@@ -1516,191 +1600,6 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         </div>
       </div>
 
-      {/* Tab bar - shows groups */}
-      <div className="h-10 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center px-2 gap-1 overflow-x-auto shrink-0">
-        {groupIds.map((groupId) => {
-          const groupTerminals = terminals.filter((t) => t.groupId === groupId);
-          const firstTerminal = groupTerminals[0];
-          if (!firstTerminal) return null;
-          const isGroupSplit = groupTerminals.length > 1;
-          const hasClaudeActive = groupTerminals.some((t) => t.isClaudeMode);
-          const hasClaudeBusy = groupTerminals.some((t) => t.isClaudeBusy);
-
-          return (
-            <div
-              key={groupId}
-              onClick={() => setActiveGroup(groupId)}
-              draggable
-              onDragStart={(e) => {
-                setDragGroupId(groupId);
-                e.dataTransfer.effectAllowed = 'move';
-                e.dataTransfer.setData('text/plain', groupId);
-                // Make the drag image slightly transparent
-                if (e.currentTarget instanceof HTMLElement) {
-                  e.currentTarget.style.opacity = '0.5';
-                }
-              }}
-              onDragEnd={(e) => {
-                setDragGroupId(null);
-                setDragOverGroupId(null);
-                if (e.currentTarget instanceof HTMLElement) {
-                  e.currentTarget.style.opacity = '1';
-                }
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'move';
-                if (dragGroupId && dragGroupId !== groupId) {
-                  setDragOverGroupId(groupId);
-                }
-              }}
-              onDragLeave={() => {
-                if (dragOverGroupId === groupId) setDragOverGroupId(null);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (dragGroupId && dragGroupId !== groupId) {
-                  reorderGroups(projectId, dragGroupId, groupId);
-                }
-                setDragGroupId(null);
-                setDragOverGroupId(null);
-              }}
-              className={cn(
-                'group flex items-center gap-2 px-3 h-8 rounded-md text-xs transition-all min-w-0 shrink-0 cursor-pointer',
-                'hover:bg-[var(--bg-tertiary)]',
-                activeGroupId === groupId
-                  ? 'bg-[var(--bg-card)] text-[var(--text-primary)] border border-[var(--border)]'
-                  : 'text-[var(--text-secondary)]',
-                dragOverGroupId === groupId && dragGroupId !== groupId && 'ring-2 ring-[var(--accent)] ring-inset',
-              )}
-              style={firstTerminal.task ? {
-                backgroundColor: `${firstTerminal.task.statusColor}15`,
-              } : undefined}
-            >
-              <GripVertical className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-40 cursor-grab active:cursor-grabbing transition-opacity -mr-1" />
-              {isGroupSplit ? (
-                <Columns2 className="w-3.5 h-3.5 shrink-0" />
-              ) : hasClaudeActive ? (
-                <Bot
-                  className={cn(
-                    'w-3.5 h-3.5 shrink-0',
-                    hasClaudeBusy && 'animate-pulse text-[var(--accent)]'
-                  )}
-                />
-              ) : (
-                <TerminalIcon className="w-3.5 h-3.5 shrink-0" />
-              )}
-              {/* Task status dot */}
-              {firstTerminal.task && (
-                <div
-                  className="w-2 h-2 rounded-full shrink-0 -mr-1"
-                  style={{ backgroundColor: firstTerminal.task.statusColor }}
-                  title={`${firstTerminal.task.status}`}
-                />
-              )}
-              {editingGroupId === groupId ? (
-                <input
-                  className="bg-transparent text-xs text-[var(--text-primary)] outline-none border-b border-[var(--accent)] w-[120px] py-0"
-                  value={editingTitle}
-                  onChange={(e) => setEditingTitle(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      const trimmed = editingTitle.trim();
-                      if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
-                      setEditingGroupId(null);
-                    } else if (e.key === 'Escape') {
-                      setEditingGroupId(null);
-                    }
-                  }}
-                  onBlur={() => {
-                    const trimmed = editingTitle.trim();
-                    if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
-                    setEditingGroupId(null);
-                  }}
-                  autoFocus
-                  onClick={(e) => e.stopPropagation()}
-                />
-              ) : (
-                <span
-                  className="truncate max-w-[160px]"
-                  title={firstTerminal.task ? `${firstTerminal.task.customId ? firstTerminal.task.customId + ' — ' : ''}${firstTerminal.task.name} [${firstTerminal.task.status}]` : firstTerminal.title}
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    setEditingGroupId(groupId);
-                    setEditingTitle(firstTerminal.title);
-                  }}
-                >
-                  {firstTerminal.title}
-                  {isGroupSplit && (
-                    <span className="text-[var(--text-muted)] ml-1">+{groupTerminals.length - 1}</span>
-                  )}
-                </span>
-              )}
-              {firstTerminal.status === 'exited' && !isGroupSplit && (
-                <span className="text-[10px] text-[var(--error)]">exited</span>
-              )}
-              <button
-                className="w-4 h-4 shrink-0 rounded opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[var(--error)]/20 hover:text-[var(--error)] text-[var(--text-muted)] transition-all"
-                onClick={(e) => handleCloseGroup(groupId, e)}
-                title="Close tab"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          );
-        })}
-
-        {/* New terminal button with dropdown */}
-        <div className="flex items-center shrink-0">
-          <button
-            onClick={handleNewTerminal}
-            disabled={!canAddTerminal() || !projectId}
-            className={cn(
-              'w-8 h-8 rounded-md flex items-center justify-center transition-all shrink-0',
-              'hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)]',
-              'disabled:opacity-30 disabled:cursor-not-allowed'
-            )}
-            title={!projectId ? 'Open a project first' : 'New Tab'}
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-          {activeGroupId && canAddTerminal() && projectId && (
-            <button
-              ref={menuTriggerRef}
-              onClick={openNewMenu}
-              className="w-5 h-8 rounded-md flex items-center justify-center hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-all shrink-0"
-              title="More options"
-            >
-              <ChevronDown className="w-3 h-3" />
-            </button>
-          )}
-        </div>
-        {/* Dropdown rendered via portal to escape overflow clipping */}
-        {showNewMenu && createPortal(
-          <div
-            ref={newMenuRef}
-            className="fixed z-[9999] w-48 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl overflow-hidden"
-            style={{ top: menuPos.top, left: menuPos.left }}
-          >
-            <button
-              onClick={() => { setShowNewMenu(false); handleNewTerminal(); }}
-              className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)]"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>New Tab</span>
-            </button>
-            <button
-              onClick={() => { setShowNewMenu(false); handleNewSplit(); }}
-              className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)]"
-            >
-              <Columns2 className="w-3.5 h-3.5" />
-              <span>Split Terminal</span>
-            </button>
-          </div>,
-          document.body
-        )}
-      </div>
-
       {/* CLI error notification */}
       {cliError && (
         <div className="px-4 py-2 text-xs flex items-center justify-between shrink-0 bg-red-500/20 text-red-400 border-b border-red-500/30">
@@ -1731,6 +1630,246 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       {/* Terminal panels + optional files panel */}
       <div className="flex-1 flex min-h-0">
+      {/* Tree sidebar — categories grouped by task status, with task-ID search */}
+      <div className="w-60 shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col min-h-0">
+        <div className="p-2 border-b border-[var(--border)] shrink-0">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--text-muted)] pointer-events-none" />
+            <input
+              type="text"
+              value={treeSearch}
+              onChange={(e) => setTreeSearch(e.target.value)}
+              placeholder="Search task ID..."
+              className="w-full pl-7 pr-7 py-1.5 text-xs rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--accent)] transition-colors"
+            />
+            {treeSearch && (
+              <button
+                onClick={() => setTreeSearch('')}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-card)]"
+                title="Clear search"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto py-1">
+          {categories.length === 0 ? (
+            <div className="text-[11px] text-[var(--text-muted)] px-3 py-6 text-center">
+              {treeSearch
+                ? 'No tasks match'
+                : !projectId
+                  ? 'Open a project first'
+                  : 'No terminals open'}
+            </div>
+          ) : (
+            categories.map((cat) => {
+              const collapsed = collapsedCategories.has(cat.key);
+              return (
+                <div key={cat.key} className="mb-0.5">
+                  <button
+                    onClick={() => toggleCategory(cat.key)}
+                    className="w-full flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wide font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
+                  >
+                    {collapsed
+                      ? <ChevronRight className="w-3 h-3 shrink-0" />
+                      : <ChevronDown className="w-3 h-3 shrink-0" />}
+                    {cat.color && (
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: cat.color }}
+                      />
+                    )}
+                    <span className="truncate flex-1 text-left">{cat.name}</span>
+                    <span className="text-[var(--text-muted)] opacity-60 font-normal normal-case shrink-0">
+                      {cat.groupIds.length}
+                    </span>
+                  </button>
+                  {!collapsed && cat.groupIds.map((groupId) => {
+                    const groupTerminals = terminals.filter((t) => t.groupId === groupId);
+                    const firstTerminal = groupTerminals[0];
+                    if (!firstTerminal) return null;
+                    const isGroupSplit = groupTerminals.length > 1;
+                    const hasClaudeActive = groupTerminals.some((t) => t.isClaudeMode);
+                    const hasClaudeBusy = groupTerminals.some((t) => t.isClaudeBusy);
+                    const isActive = activeGroupId === groupId;
+                    return (
+                      <div
+                        key={groupId}
+                        onClick={() => setActiveGroup(groupId)}
+                        draggable
+                        onDragStart={(e) => {
+                          setDragGroupId(groupId);
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', groupId);
+                          if (e.currentTarget instanceof HTMLElement) {
+                            e.currentTarget.style.opacity = '0.5';
+                          }
+                        }}
+                        onDragEnd={(e) => {
+                          setDragGroupId(null);
+                          setDragOverGroupId(null);
+                          if (e.currentTarget instanceof HTMLElement) {
+                            e.currentTarget.style.opacity = '1';
+                          }
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                          if (dragGroupId && dragGroupId !== groupId) {
+                            setDragOverGroupId(groupId);
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverGroupId === groupId) setDragOverGroupId(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          if (dragGroupId && dragGroupId !== groupId) {
+                            reorderGroups(projectId, dragGroupId, groupId);
+                          }
+                          setDragGroupId(null);
+                          setDragOverGroupId(null);
+                        }}
+                        className={cn(
+                          'group flex items-center gap-1.5 mx-1 pl-5 pr-1 py-1 rounded text-xs transition-all min-w-0 cursor-pointer',
+                          'hover:bg-[var(--bg-tertiary)]',
+                          isActive
+                            ? 'bg-[var(--bg-card)] text-[var(--text-primary)] border border-[var(--border)]'
+                            : 'text-[var(--text-secondary)]',
+                          dragOverGroupId === groupId && dragGroupId !== groupId && 'ring-1 ring-[var(--accent)] ring-inset',
+                        )}
+                        style={isActive && firstTerminal.task
+                          ? { backgroundColor: `${firstTerminal.task.statusColor}20` }
+                          : undefined}
+                      >
+                        <GripVertical className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-40 cursor-grab active:cursor-grabbing transition-opacity -ml-1" />
+                        {isGroupSplit ? (
+                          <Columns2 className="w-3 h-3 shrink-0" />
+                        ) : hasClaudeActive ? (
+                          <Bot
+                            className={cn(
+                              'w-3 h-3 shrink-0',
+                              hasClaudeBusy && 'animate-pulse text-[var(--accent)]'
+                            )}
+                          />
+                        ) : (
+                          <TerminalIcon className="w-3 h-3 shrink-0" />
+                        )}
+                        {firstTerminal.task?.customId && (
+                          <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">
+                            {firstTerminal.task.customId}
+                          </span>
+                        )}
+                        {editingGroupId === groupId ? (
+                          <input
+                            className="bg-transparent text-xs text-[var(--text-primary)] outline-none border-b border-[var(--accent)] flex-1 min-w-0 py-0"
+                            value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const trimmed = editingTitle.trim();
+                                if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
+                                setEditingGroupId(null);
+                              } else if (e.key === 'Escape') {
+                                setEditingGroupId(null);
+                              }
+                            }}
+                            onBlur={() => {
+                              const trimmed = editingTitle.trim();
+                              if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
+                              setEditingGroupId(null);
+                            }}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <span
+                            className="truncate flex-1"
+                            title={firstTerminal.task ? `${firstTerminal.task.customId ? firstTerminal.task.customId + ' — ' : ''}${firstTerminal.task.name} [${firstTerminal.task.status}]` : firstTerminal.title}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              setEditingGroupId(groupId);
+                              setEditingTitle(firstTerminal.title);
+                            }}
+                          >
+                            {firstTerminal.task?.name || firstTerminal.title}
+                            {isGroupSplit && (
+                              <span className="text-[var(--text-muted)] ml-1">+{groupTerminals.length - 1}</span>
+                            )}
+                          </span>
+                        )}
+                        {firstTerminal.status === 'exited' && !isGroupSplit && (
+                          <span className="text-[9px] text-[var(--error)] shrink-0">exited</span>
+                        )}
+                        <button
+                          className="w-4 h-4 shrink-0 rounded opacity-0 group-hover:opacity-100 flex items-center justify-center hover:bg-[var(--error)]/20 hover:text-[var(--error)] text-[var(--text-muted)] transition-all"
+                          onClick={(e) => handleCloseGroup(groupId, e)}
+                          title="Close tab"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <div className="p-1.5 border-t border-[var(--border)] shrink-0 flex items-center gap-1">
+          <button
+            onClick={handleNewTerminal}
+            disabled={!canAddTerminal() || !projectId}
+            className={cn(
+              'flex-1 flex items-center justify-center gap-1.5 h-7 rounded-md text-xs transition-all',
+              'bg-[var(--bg-tertiary)] hover:bg-[var(--bg-card)] text-[var(--text-secondary)]',
+              'disabled:opacity-30 disabled:cursor-not-allowed'
+            )}
+            title={!projectId ? 'Open a project first' : 'New Terminal'}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>New Terminal</span>
+          </button>
+          {activeGroupId && canAddTerminal() && projectId && (
+            <button
+              ref={menuTriggerRef}
+              onClick={openNewMenu}
+              className="w-7 h-7 rounded-md flex items-center justify-center bg-[var(--bg-tertiary)] hover:bg-[var(--bg-card)] text-[var(--text-muted)] transition-all shrink-0"
+              title="More options"
+            >
+              <ChevronDown className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {showNewMenu && createPortal(
+          <div
+            ref={newMenuRef}
+            className="fixed z-[9999] w-48 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl overflow-hidden"
+            style={{ top: menuPos.top, left: menuPos.left }}
+          >
+            <button
+              onClick={() => { setShowNewMenu(false); handleNewTerminal(); }}
+              className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)]"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>New Tab</span>
+            </button>
+            <button
+              onClick={() => { setShowNewMenu(false); handleNewSplit(); }}
+              className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)]"
+            >
+              <Columns2 className="w-3.5 h-3.5" />
+              <span>Split Terminal</span>
+            </button>
+          </div>,
+          document.body
+        )}
+      </div>
+
       <div className="flex-1 relative min-h-0 min-w-0 overflow-hidden">
         {terminals.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-[var(--text-muted)] gap-4">

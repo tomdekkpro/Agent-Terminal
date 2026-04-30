@@ -1,5 +1,5 @@
 import * as os from 'os';
-import { readdirSync, statSync, existsSync } from 'fs';
+import { readdirSync, statSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { TerminalCreateOptions, AgentProviderId, AgentInvokeOptions } from '../../shared/types';
 import type { TerminalProcess, WindowGetter, TerminalOperationResult } from './types';
@@ -49,6 +49,42 @@ function getSessionSnapshot(claudeDir: string): Map<string, number> {
     }
   } catch { /* ignore */ }
   return result;
+}
+
+/** Claude Code v2.1+ session-state directory — one `<pid>.json` per running
+ *  Claude process, written on launch (before the first prompt). The JSON has
+ *  the real session UUID plus the cwd, so we can identify the right one
+ *  immediately instead of waiting for the .jsonl to appear. */
+function getClaudeSessionsDir(): string {
+  return join(os.homedir(), '.claude', 'sessions');
+}
+
+/** Snapshot the PIDs of existing Claude session-state files so we only match
+ *  newly-started processes. */
+function getClaudeSessionPidSnapshot(): Set<string> {
+  const result = new Set<string>();
+  const dir = getClaudeSessionsDir();
+  try {
+    if (!existsSync(dir)) return result;
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith('.json')) result.add(f.replace('.json', ''));
+    }
+  } catch { /* ignore */ }
+  return result;
+}
+
+/** Read a Claude session-state JSON file and pull out (sessionId, cwd). */
+interface ClaudeSessionState {
+  sessionId?: string;
+  cwd?: string;
+  version?: string;
+}
+function readClaudeSessionState(file: string): ClaudeSessionState | null {
+  try {
+    const data = JSON.parse(readFileSync(file, 'utf-8'));
+    if (typeof data.sessionId === 'string') return data as ClaudeSessionState;
+  } catch { /* skip malformed */ }
+  return null;
 }
 
 export class TerminalManager {
@@ -232,9 +268,11 @@ export class TerminalManager {
       : dir;
 
     let preSnapshot: Map<string, number> | undefined;
+    let preSessionPids: Set<string> | undefined;
     if (agentId === 'claude') {
       const claudeDir = getClaudeProjectDir(sessionStorageDir);
       preSnapshot = getSessionSnapshot(claudeDir);
+      preSessionPids = getClaudeSessionPidSnapshot();
     }
 
     const { cdCmd, clearCmd, separator } = buildShellCommand(terminal.shellType, dir);
@@ -253,9 +291,9 @@ export class TerminalManager {
     }
 
     // Claude session detection (filesystem-based)
-    if (agentId === 'claude' && preSnapshot) {
+    if (agentId === 'claude' && preSnapshot && preSessionPids) {
       const claudeDir = getClaudeProjectDir(sessionStorageDir);
-      this.detectAgentSession(terminal, claudeDir, preSnapshot);
+      this.detectAgentSession(terminal, claudeDir, preSnapshot, sessionStorageDir, preSessionPids);
     }
 
     // Copilot session detection (filesystem-based, like Claude)
@@ -374,43 +412,80 @@ export class TerminalManager {
     terminal: TerminalProcess,
     claudeDir: string,
     preSnapshot: Map<string, number>,
+    sessionStorageDir: string,
+    preSessionPids: Set<string>,
   ): void {
-    let attempts = 0;
-    const MAX_ATTEMPTS = 45;
+    // Two detection paths, both polled until the terminal exits or a session
+    // is found:
+    //   1. Claude Code v2.1+ session-state — `~/.claude/sessions/<pid>.json`
+    //      created on launch with `{sessionId, cwd, ...}`. Fires immediately
+    //      after Claude boots — no need to wait for the first prompt.
+    //   2. Legacy `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` —
+    //      created on first prompt. Kept as a fallback for older versions.
+    // Adaptive cadence: 1s for the first 30s, then 3s.
+    let elapsedMs = 0;
+    const targetCwd = sessionStorageDir.toLowerCase();
 
-    const poll = () => {
-      attempts++;
-      if (attempts > MAX_ATTEMPTS || terminal.hasExited || terminal.agentSessionId) return;
+    const emit = (sessionId: string, jsonlPath?: string) => {
+      terminal.agentSessionId = sessionId;
+      terminal.claudeSessionId = sessionId; // deprecated alias
+      debugLog('[TerminalManager] Detected agent session:', sessionId, 'for terminal:', terminal.id);
+      if (jsonlPath) sessionUsageTracker.start(terminal.id, jsonlPath);
+      const win = this.getWindow();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send(IPC_CHANNELS.TERMINAL_AGENT_SESSION, terminal.id, sessionId);
+        win.webContents.send(IPC_CHANNELS.TERMINAL_CLAUDE_SESSION, terminal.id, sessionId);
+      }
+    };
 
+    /** Try the new session-state dir. Returns true if a match was found. */
+    const checkSessionState = (): boolean => {
+      const dir = getClaudeSessionsDir();
+      if (!existsSync(dir)) return false;
       try {
-        if (!existsSync(claudeDir)) {
-          setTimeout(poll, 1000);
-          return;
+        for (const f of readdirSync(dir)) {
+          if (!f.endsWith('.json')) continue;
+          const pid = f.replace('.json', '');
+          if (preSessionPids.has(pid)) continue; // pre-existing session, not ours
+          const state = readClaudeSessionState(join(dir, f));
+          if (!state || !state.sessionId || !state.cwd) continue;
+          if (state.cwd.toLowerCase() !== targetCwd) continue;
+          // Match — also try to attach the JSONL path (if it exists yet) for
+          // the cost tracker; if not, the tracker will pick it up later when
+          // the file appears since the watcher uses the session id directly.
+          const jsonlPath = join(claudeDir, `${state.sessionId}.jsonl`);
+          emit(state.sessionId, existsSync(jsonlPath) ? jsonlPath : undefined);
+          return true;
         }
+      } catch { /* ignore */ }
+      return false;
+    };
 
+    /** Try the legacy projects dir. Returns true if a match was found. */
+    const checkProjectsDir = (): boolean => {
+      if (!existsSync(claudeDir)) return false;
+      try {
         for (const f of readdirSync(claudeDir)) {
           if (!f.endsWith('.jsonl')) continue;
           const mtime = statSync(join(claudeDir, f)).mtimeMs;
           const prevMtime = preSnapshot.get(f);
-
           if (prevMtime === undefined || mtime > prevMtime + 500) {
             const sessionId = f.replace('.jsonl', '');
-            terminal.agentSessionId = sessionId;
-            terminal.claudeSessionId = sessionId; // deprecated alias
-            debugLog('[TerminalManager] Detected agent session:', sessionId, 'for terminal:', terminal.id);
-            sessionUsageTracker.start(terminal.id, join(claudeDir, f));
-            const win = this.getWindow();
-            if (win && !win.isDestroyed()) {
-              win.webContents.send(IPC_CHANNELS.TERMINAL_AGENT_SESSION, terminal.id, sessionId);
-              // Also fire legacy channel
-              win.webContents.send(IPC_CHANNELS.TERMINAL_CLAUDE_SESSION, terminal.id, sessionId);
-            }
-            return;
+            emit(sessionId, join(claudeDir, f));
+            return true;
           }
         }
       } catch { /* ignore */ }
+      return false;
+    };
 
-      setTimeout(poll, 1000);
+    const poll = () => {
+      if (terminal.hasExited || terminal.agentSessionId) return;
+      if (checkSessionState()) return;
+      if (checkProjectsDir()) return;
+      const next = elapsedMs < 30_000 ? 1000 : 3000;
+      elapsedMs += next;
+      setTimeout(poll, next);
     };
 
     setTimeout(poll, 2000);
@@ -442,16 +517,19 @@ export class TerminalManager {
     preSnapshot: Set<string>,
   ): void {
     const sessionDir = join(os.homedir(), '.copilot', 'session-state');
-    let attempts = 0;
-    const MAX_ATTEMPTS = 30;
+    // Poll for as long as the terminal is alive (Copilot may take a while to
+    // create its session dir, especially before the first prompt). 2s for the
+    // first 30s, then 5s.
+    let elapsedMs = 0;
 
     const poll = () => {
-      attempts++;
-      if (attempts > MAX_ATTEMPTS || terminal.hasExited || terminal.agentSessionId) return;
+      if (terminal.hasExited || terminal.agentSessionId) return;
 
       try {
         if (!existsSync(sessionDir)) {
-          setTimeout(poll, 2000);
+          const next = elapsedMs < 30_000 ? 2000 : 5000;
+          elapsedMs += next;
+          setTimeout(poll, next);
           return;
         }
 
@@ -476,7 +554,9 @@ export class TerminalManager {
         }
       } catch { /* ignore */ }
 
-      setTimeout(poll, 2000);
+      const next = elapsedMs < 30_000 ? 2000 : 5000;
+      elapsedMs += next;
+      setTimeout(poll, next);
     };
 
     setTimeout(poll, 3000);
