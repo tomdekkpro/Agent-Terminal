@@ -116,12 +116,15 @@ export function useCompleteTaskFlow(
       useTerminalStore.getState().updateTerminal(mergeTarget.id, {
         worktreePath: undefined,
         worktreeBranch: undefined,
+        agentSessionId: undefined,
         cwd: project.path,
       });
-      // Clear worktree fields on the KanbanTask too, so reopening from the
-      // board doesn't think the worktree still exists at the deleted path.
+      // Mark the KanbanTask as merged-locally: clears worktree pointers,
+      // flips useWorktree=false, and drops the agent session hooks. Next
+      // reopen lands on the project's current branch with no resume — work
+      // is in local now.
       if (mergeTarget.task?.id) {
-        void useKanbanStore.getState().clearWorktreeForClickupId(mergeTarget.task.id);
+        void useKanbanStore.getState().markTaskMergedLocally(mergeTarget.task.id);
       }
       await stopAndSyncTimer(mergeTarget.id, mergeTarget.task?.id);
       const prefix = result.autoCommitted ? 'Auto-committed pending changes, then merged' : 'Merged';

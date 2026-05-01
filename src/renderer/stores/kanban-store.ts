@@ -95,6 +95,11 @@ interface KanbanState {
    *  so reopening the task from the board doesn't think a worktree still
    *  exists at the now-deleted path. No-op if no matching task. */
   clearWorktreeForClickupId: (clickupTaskId: string) => Promise<void>;
+  /** Mark a task as merged into local: clears the worktree pointer, flips
+   *  `useWorktree` to false so the next reopen runs against the project's
+   *  current branch, and drops the agent session hooks since the work is
+   *  done. No-op if no matching task. */
+  markTaskMergedLocally: (clickupTaskId: string) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   refreshClickupSnapshots: () => Promise<void>;
   setAssigneeFilter: (assigneeId: string) => Promise<void>;
@@ -375,6 +380,19 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     const match = get().tasks.find((t) => t.clickupTaskId === clickupTaskId);
     if (!match) return;
     await get().updateTask(match.id, { worktreePath: undefined, worktreeBranch: undefined });
+  },
+
+  markTaskMergedLocally: async (clickupTaskId: string) => {
+    const match = get().tasks.find((t) => t.clickupTaskId === clickupTaskId);
+    if (!match) return;
+    await get().updateTask(match.id, {
+      worktreePath: undefined,
+      worktreeBranch: undefined,
+      useWorktree: false,
+      agentSessionId: undefined,
+      agentProvider: undefined,
+      agentCwd: undefined,
+    });
   },
 
   deleteTask: async (taskId: string) => {
