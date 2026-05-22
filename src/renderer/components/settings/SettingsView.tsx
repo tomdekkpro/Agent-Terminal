@@ -1014,7 +1014,7 @@ export function SettingsView() {
                     type="text"
                     value={localSettings.autoFixRetestStatus}
                     onChange={(e) => handleChange('autoFixRetestStatus', e.target.value)}
-                    placeholder="qc"
+                    placeholder="ready for review"
                     className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
                   />
                   <p className="text-[11px] text-[var(--text-muted)] mt-1">After a fix is pushed.</p>

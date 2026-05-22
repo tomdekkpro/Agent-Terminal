@@ -24,7 +24,7 @@ export function mapClickupStatusToKanban(
 
   if (s === (settings.autoFixFailedStatus || 'failed').toLowerCase()) return 'failed';
   if (s === (settings.autoFixDoneStatus || 'done').toLowerCase()) return 'done';
-  if (s === (settings.autoFixRetestStatus || 'qc').toLowerCase()) return 'review';
+  if (s === (settings.autoFixRetestStatus || 'ready for review').toLowerCase()) return 'review';
 
   if (csvToSet(settings.kanbanBacklogStatuses).has(s)) return 'todo';
   if (csvToSet(settings.kanbanInProgressStatuses).has(s)) return 'in-progress';

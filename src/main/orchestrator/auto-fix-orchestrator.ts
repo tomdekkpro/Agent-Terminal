@@ -640,7 +640,7 @@ class AutoFixOrchestrator {
 
     // 8. ClickUp status flip + comment
     const shortSha = headAfter ? headAfter.substring(0, 7) : 'HEAD';
-    const retestStatus = settings.autoFixRetestStatus || 'qc';
+    const retestStatus = settings.autoFixRetestStatus || 'ready for review';
     const commentLines = [
       `🔧 **Auto-Fix Attempt ${iteration}/${settings.autoFixMaxIterations}**`,
       ``,

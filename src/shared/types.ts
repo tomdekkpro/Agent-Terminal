@@ -849,7 +849,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoFixMaxIterations: 3,
   autoFixPollIntervalMinutes: 30,
   autoFixFailedStatus: 'failed',
-  autoFixRetestStatus: 'qc',
+  autoFixRetestStatus: 'ready for review',
   autoFixProjectPath: '',
   autoFixAutoMerge: false,
   autoFixDoneStatus: 'done',
