@@ -1,8 +1,11 @@
 import type { BrowserWindow } from 'electron';
 import { exec, spawn } from 'child_process';
-import { existsSync, mkdirSync, cpSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, cpSync, writeFileSync, unlinkSync, createWriteStream } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { request as httpsRequest } from 'https';
+import { request as httpRequest } from 'http';
+import { URL } from 'url';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { debugLog, debugError } from '../../shared/utils';
 import { getSettings } from '../ipc/settings-handlers';
@@ -49,17 +52,98 @@ function sanitizeTaskId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
 
-function extractCommentText(comment: any): string {
-  if (comment.comment_text) return comment.comment_text;
+interface CommentImage {
+  url: string;
+  name: string;
+  extension: string;
+}
+
+interface CommentContent {
+  /** Reconstructed prose. Image blocks are replaced with [screenshot: name]
+   *  markers so position context isn't lost when QC interleaves text + images. */
+  text: string;
+  /** Embedded images discovered in the rich `comment` blocks. */
+  images: CommentImage[];
+  /** Bookmark/unfurled link URLs from rich blocks. */
+  links: { url: string; title?: string }[];
+}
+
+/** Pull text + media out of a ClickUp comment. ClickUp's `comment_text` field
+ *  collapses image blocks to the literal string "image.png" and drops the URL,
+ *  so we walk the rich `comment` block array ourselves whenever it's present. */
+function extractCommentContent(comment: any): CommentContent {
+  const images: CommentImage[] = [];
+  const links: { url: string; title?: string }[] = [];
+
   if (Array.isArray(comment.comment)) {
-    return comment.comment.map((block: any) => block.text || '').join('').trim();
+    const parts: string[] = [];
+    for (const block of comment.comment) {
+      if (block && block.type === 'image' && block.image?.url) {
+        const name = block.image.name || `image-${images.length + 1}.png`;
+        // ClickUp returns "image/png" in extension; normalize to a file ext.
+        const rawExt = (block.image.extension || '').replace(/^image\//, '');
+        const ext = (rawExt || name.split('.').pop() || 'png').toLowerCase();
+        images.push({ url: block.image.url, name, extension: ext });
+        parts.push(`\n[screenshot: ${name}]\n`);
+        continue;
+      }
+      if (block && block.type === 'bookmark' && block.bookmark?.url) {
+        const url = block.bookmark.url;
+        const title = block.bookmark.title;
+        links.push({ url, title });
+        parts.push(title ? `\n[link: ${title} — ${url}]\n` : `\n[link: ${url}]\n`);
+        continue;
+      }
+      if (typeof block?.text === 'string') {
+        parts.push(block.text);
+      }
+    }
+    const text = parts.join('').replace(/\n{3,}/g, '\n\n').trim();
+    return { text, images, links };
   }
-  return '';
+
+  return { text: (comment.comment_text || '').trim(), images, links };
+}
+
+/** Legacy helper kept for the bot-comment scan (which only needs plain text). */
+function extractCommentText(comment: any): string {
+  return extractCommentContent(comment).text;
 }
 
 function isBotComment(text: string): boolean {
   const lower = text.toLowerCase();
   return BOT_COMMENT_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/** Stream a remote file to disk. Follows up to 3 redirects (ClickUp's CDN can
+ *  308-redirect to a signed location). Resolves on 2xx, rejects otherwise. */
+function downloadToFile(url: string, destPath: string, hops = 3): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let parsed: URL;
+    try { parsed = new URL(url); } catch (err) { reject(err); return; }
+    const transport = parsed.protocol === 'http:' ? httpRequest : httpsRequest;
+    const req = transport(parsed, { method: 'GET' }, (res) => {
+      const status = res.statusCode || 0;
+      if ((status === 301 || status === 302 || status === 307 || status === 308) && res.headers.location && hops > 0) {
+        res.resume();
+        const next = new URL(res.headers.location, parsed).toString();
+        downloadToFile(next, destPath, hops - 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${status} when fetching ${url}`));
+        return;
+      }
+      const out = createWriteStream(destPath);
+      res.pipe(out);
+      out.on('finish', () => out.close(() => resolve()));
+      out.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(NETWORK_TIMEOUT, () => req.destroy(new Error(`Timeout fetching ${url}`)));
+    req.end();
+  });
 }
 
 export interface AutoFixStatusPayload {
@@ -426,8 +510,19 @@ class AutoFixOrchestrator {
     }
     const comments = commentsResult.data || [];
     const devComments = comments
-      .map((c: any) => ({ id: c.id, text: extractCommentText(c).trim(), user: c.user?.username || 'QC', date: c.date }))
-      .filter((c: any) => c.text && !isBotComment(c.text));
+      .map((c: any) => {
+        const content = extractCommentContent(c);
+        return {
+          id: c.id,
+          text: content.text,
+          images: content.images,
+          links: content.links,
+          user: c.user?.username || 'QC',
+          date: c.date,
+        };
+      })
+      // Skip bot-authored comments AND skip empty ones (no text + no images).
+      .filter((c) => (c.text || c.images.length > 0) && !isBotComment(c.text));
 
     if (devComments.length === 0) {
       throw new Error('Task is Failed but has no QC comments to act on');
@@ -467,19 +562,36 @@ class AutoFixOrchestrator {
     // 3. Resolve worktree — fork from the task's chosen base branch, not the repo default
     await this.ensureWorktree(projectPath, worktreeDir, branch, task.baseBranch);
 
-    // 4. Build prompt with prior attempts
+    // 4. Build prompt with prior attempts. Download any screenshots so Claude
+    //    can actually SEE them via vision (via @path attachments) instead of
+    //    just being told "[image: foo.png]" without context.
     const priorBotAttempts = comments
       .map((c: any) => extractCommentText(c).trim())
       .filter((t: string) => t && t.toLowerCase().includes(BOT_FIX_MARKER.toLowerCase()))
       .slice(-PREVIOUS_COMMENT_LIMIT);
 
     const priorDevComments = devComments.slice(-PREVIOUS_COMMENT_LIMIT);
+    const renderedDevComments = await Promise.all(
+      priorDevComments.map(async (c) => {
+        const imagePaths = await this.downloadCommentImages(c.id, c.images, worktreeDir);
+        const lines = [`[${c.user}]: ${c.text || '(no text — screenshots only)'}`];
+        if (imagePaths.length > 0) {
+          lines.push('Screenshots from QC (attached for review):');
+          for (const rel of imagePaths) lines.push(`  @${rel}`);
+        }
+        if (c.links.length > 0) {
+          lines.push('Linked resources:');
+          for (const l of c.links) lines.push(`  - ${l.title ? `${l.title} — ` : ''}${l.url}`);
+        }
+        return lines.join('\n');
+      }),
+    );
     const prompt = this.buildFixPrompt({
       taskName: task.clickupName,
       customId: task.clickupCustomId,
       iteration,
       maxIterations: settings.autoFixMaxIterations,
-      devComments: priorDevComments.map((c: any) => `[${c.user}]: ${c.text}`),
+      devComments: renderedDevComments,
       priorBotAttempts,
     });
 
@@ -588,19 +700,85 @@ ${ctx.customId ? `ID: ${ctx.customId}\n` : ''}Title: ${ctx.taskName}
 Fix attempt: ${ctx.iteration} of ${ctx.maxIterations}
 
 ## QC Failure Comments (chronological)
+Each comment may include screenshots saved under \`.qc-images/<commentId>/\`. Their paths are listed in the comment block (e.g. \`@.qc-images/123/1.png\`). Open every screenshot with the Read tool — QC often points at a specific UI state that the text alone doesn't fully describe.
+
 ${ctx.devComments.join('\n\n')}
 ${priorSection}
 ## Instructions
-1. Read the failure comments carefully. The LATEST comment is the current blocker.
-2. Inspect the repository as needed (\`gh pr diff\`, \`git log\`, read source files).
-3. Implement a fix that addresses the root cause.
-4. Commit your changes with a clear message.
-5. DO NOT push — the orchestrator will push and update the PR.
+1. Read every failure comment carefully. The LATEST comment is the current blocker.
+2. Use the Read tool to open every screenshot referenced as \`@.qc-images/...\` so you can see what QC actually saw. Don't skip them.
+3. Inspect the repository as needed (\`gh pr diff\`, \`git log\`, read source files).
+4. Implement a fix that addresses the root cause.
+5. Commit your changes with a clear message.
+6. DO NOT push — the orchestrator will push and update the PR.
 
 ## Constraints
 - Make minimal, surgical changes. Do not refactor unrelated code.
 - If you cannot determine a fix from the information given, exit without committing — the orchestrator will escalate to a human.
 - You have full shell access — run tests or checks if that helps you validate the fix.`;
+  }
+
+  /** Download images embedded in a QC comment into the worktree so Claude can
+   *  read them as vision inputs via the `@<relpath>` syntax. Returns the list
+   *  of relative paths (relative to the worktree root) that were successfully
+   *  saved — failed downloads are skipped silently so a flaky CDN can't block
+   *  the entire fix attempt. */
+  private async downloadCommentImages(
+    commentId: string,
+    images: CommentImage[],
+    worktreeDir: string,
+  ): Promise<string[]> {
+    if (!images || images.length === 0) return [];
+    const relDir = `.qc-images/${commentId}`;
+    const absDir = join(worktreeDir, relDir);
+    try { mkdirSync(absDir, { recursive: true }); } catch { /* will fail on write below */ }
+    // Mark .qc-images/ as locally-excluded so commitStragglers' `git add -A`
+    // doesn't drag the screenshots into the auto-fix commit. info/exclude is
+    // per-worktree and never committed, so it's the right place for this.
+    await this.markExcluded(worktreeDir, '.qc-images/');
+    const saved: string[] = [];
+    await Promise.all(
+      images.map(async (img, idx) => {
+        const ext = (img.extension || 'png').replace(/^\./, '');
+        const baseName = `${idx + 1}.${ext}`;
+        const dest = join(absDir, baseName);
+        try {
+          await downloadToFile(img.url, dest);
+          // Normalize to forward slashes — `@path` lookups work with either,
+          // but logs and prompts read cleaner with /.
+          saved.push(`${relDir}/${baseName}`);
+        } catch (err) {
+          this.emitLog({
+            message: `Failed to download QC screenshot ${img.name} from comment ${commentId}: ${err instanceof Error ? err.message : String(err)}`,
+            level: 'warn',
+          });
+        }
+      }),
+    );
+    return saved;
+  }
+
+  /** Append a pattern to the worktree's local `.git/info/exclude` (idempotent).
+   *  Local-only — doesn't touch the project's tracked `.gitignore`. */
+  private async markExcluded(worktreeDir: string, pattern: string): Promise<void> {
+    const excludePath = await this.safeGitCmd('git rev-parse --git-path info/exclude', worktreeDir);
+    if (!excludePath) return;
+    const abs = excludePath.startsWith('/') || /^[A-Za-z]:/.test(excludePath)
+      ? excludePath
+      : join(worktreeDir, excludePath);
+    try {
+      const { readFileSync, appendFileSync } = await import('fs');
+      let current = '';
+      try { current = readFileSync(abs, 'utf-8'); } catch { /* file may not exist */ }
+      if (!current.split(/\r?\n/).some((line) => line.trim() === pattern)) {
+        appendFileSync(abs, (current && !current.endsWith('\n') ? '\n' : '') + pattern + '\n');
+      }
+    } catch (err) {
+      this.emitLog({
+        message: `Could not update worktree exclude file: ${err instanceof Error ? err.message : String(err)}`,
+        level: 'warn',
+      });
+    }
   }
 
   private async ensureWorktree(
