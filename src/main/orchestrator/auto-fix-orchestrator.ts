@@ -323,6 +323,22 @@ class AutoFixOrchestrator {
             }
           }
 
+          // Reconcile autoFixState with the live ClickUp status. The orchestrator
+          // only sets 'awaiting-qc'/'fixing' while a task is inside the
+          // failed → retest → done loop. Once QC has moved the task to anything
+          // outside that loop (To Do, In Progress, Blocked, etc.) those states
+          // are stale and shouldn't keep the yellow "Awaiting QC" badge lit.
+          if (task.autoFixState === 'awaiting-qc' || task.autoFixState === 'fixing') {
+            const lower = (fresh.status.name || '').toLowerCase();
+            const retestStatus = (settings.autoFixRetestStatus || 'ready for review').toLowerCase();
+            const failedStatus = (settings.autoFixFailedStatus || 'failed').toLowerCase();
+            const doneStatus = (settings.autoFixDoneStatus || 'done').toLowerCase();
+            const inLoop = lower === retestStatus || lower === failedStatus || lower === doneStatus;
+            if (!inLoop) {
+              snapshotPatch.autoFixState = 'idle';
+            }
+          }
+
           this.patch(task.id, snapshotPatch);
         } catch {
           /* non-critical — we'll try again next cycle */
@@ -461,6 +477,10 @@ class AutoFixOrchestrator {
         message: `Auto-merge queued on branch "${worktreeBranch}" — will merge when CI passes`,
         level: 'info',
       });
+      // gh accepted the auto-merge — from the orchestrator's POV the task is
+      // complete. Don't leave it sitting at 'merging' forever waiting for a
+      // signal that never comes (gh handles the actual merge on CI green).
+      this.patch(task.id, { autoFixState: 'done', kanbanStatus: 'done' });
       try {
         await clickUpProvider.postComment(
           getSettings(),

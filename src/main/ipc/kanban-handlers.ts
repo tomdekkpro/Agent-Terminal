@@ -83,6 +83,20 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
           }
         }
 
+        // Drop a stale 'awaiting-qc'/'fixing' badge if QC has moved the task
+        // out of the failed → retest → done auto-fix loop. Mirrors the same
+        // logic in auto-fix-orchestrator.refreshSnapshots so renderer-triggered
+        // refreshes also reconcile the badge.
+        if (task.autoFixState === 'awaiting-qc' || task.autoFixState === 'fixing') {
+          const lower = (fresh.status.name || '').toLowerCase();
+          const retestStatus = (settings.autoFixRetestStatus || 'ready for review').toLowerCase();
+          const failedStatus = (settings.autoFixFailedStatus || 'failed').toLowerCase();
+          const doneStatus = (settings.autoFixDoneStatus || 'done').toLowerCase();
+          if (lower !== retestStatus && lower !== failedStatus && lower !== doneStatus) {
+            patch.autoFixState = 'idle';
+          }
+        }
+
         const next = updateKanbanTask(task.id, patch);
         updated.push(next || task);
       } catch (err) {
