@@ -220,6 +220,67 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
   return task;
 }
 
+export interface LinkLocalToClickupInput {
+  /** Local KanbanTask id to convert. Must currently have provider==='local'. */
+  localId: string;
+  /** Snapshot fields from the ClickUp task the user picked. */
+  clickupTaskId: string;
+  clickupCustomId?: string;
+  clickupName: string;
+  clickupStatus: string;
+  clickupStatusColor?: string;
+  clickupUrl: string;
+  clickupAssignees?: KanbanTask['clickupAssignees'];
+  clickupPriority?: KanbanTask['clickupPriority'];
+  clickupTags?: KanbanTask['clickupTags'];
+  clickupUpdatedAt?: string;
+}
+
+/** Convert a local-only kanban task into a ClickUp-linked one. Preserves
+ *  the local workflow state (kanbanStatus, worktree info, session id, auto-fix
+ *  iteration count, etc.) so the existing terminal/worktree keeps working. */
+export function linkKanbanTaskToClickup(input: LinkLocalToClickupInput): KanbanTask | null {
+  const data = load();
+  const idx = data.tasks.findIndex((t) => t.id === input.localId);
+  if (idx < 0) return null;
+  const existing = data.tasks[idx];
+  if (existing.provider === 'clickup') {
+    // Already linked — no-op rather than clobbering snapshot fields.
+    return existing;
+  }
+  // Refuse the link if the chosen ClickUp task is already on the board
+  // — silently merging two records would lose history.
+  const conflict = data.tasks.find(
+    (t) => t.id !== input.localId && t.clickupTaskId === input.clickupTaskId,
+  );
+  if (conflict) {
+    throw new Error(
+      `ClickUp task ${input.clickupCustomId || input.clickupTaskId} is already imported as "${conflict.clickupName}". Delete the existing record first if you want to link this local task instead.`,
+    );
+  }
+  const updated: KanbanTask = {
+    ...existing,
+    provider: 'clickup',
+    clickupTaskId: input.clickupTaskId,
+    clickupCustomId: input.clickupCustomId,
+    clickupName: input.clickupName,
+    clickupStatus: input.clickupStatus,
+    clickupStatusColor: input.clickupStatusColor,
+    clickupUrl: input.clickupUrl,
+    clickupAssignees: input.clickupAssignees,
+    clickupPriority: input.clickupPriority,
+    clickupTags: input.clickupTags,
+    clickupUpdatedAt: input.clickupUpdatedAt,
+    // Description was the local task's prompt body — drop it now that the
+    // ClickUp description is the source of truth (fetched live via the API).
+    description: undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  data.tasks[idx] = updated;
+  scheduleSave();
+  return updated;
+}
+
 export function updateKanbanTask(id: string, patch: Partial<KanbanTask>): KanbanTask | null {
   const data = load();
   const idx = data.tasks.findIndex((t) => t.id === id);

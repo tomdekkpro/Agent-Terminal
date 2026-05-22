@@ -7,10 +7,12 @@ import {
   getKanbanTask,
   importKanbanTask,
   createLocalKanbanTask,
+  linkKanbanTaskToClickup,
   updateKanbanTask,
   deleteKanbanTask,
   type ImportTaskInput,
   type CreateLocalTaskInput,
+  type LinkLocalToClickupInput,
 } from '../kanban/kanban-task-store';
 import { ClickUpProvider } from './providers/clickup';
 import { getSettings } from './settings-handlers';
@@ -145,6 +147,24 @@ export function registerKanbanHandlers(
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to create local task',
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.KANBAN_LINK_CLICKUP, async (_event, input: LinkLocalToClickupInput) => {
+    try {
+      if (!input?.localId || !input?.clickupTaskId) {
+        return { success: false, error: 'localId and clickupTaskId are required' };
+      }
+      const task = linkKanbanTaskToClickup(input);
+      if (!task) return { success: false, error: 'Local task not found' };
+      emitKanbanEvent({ type: 'task-updated', task });
+      debugLog('[Kanban] Linked local task', input.localId, '→ ClickUp', input.clickupCustomId || input.clickupTaskId);
+      return { success: true, data: task };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to link to ClickUp',
       };
     }
   });

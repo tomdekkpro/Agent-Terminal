@@ -148,6 +148,7 @@ export const IPC_CHANNELS = {
   KANBAN_GET: 'kanban:get',
   KANBAN_IMPORT: 'kanban:import',
   KANBAN_CREATE_LOCAL: 'kanban:create-local',
+  KANBAN_LINK_CLICKUP: 'kanban:link-clickup',
   KANBAN_UPDATE: 'kanban:update',
   KANBAN_DELETE: 'kanban:delete',
   KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',

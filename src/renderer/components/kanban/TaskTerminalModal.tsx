@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Pencil,
   Save,
+  Link as LinkIcon,
 } from 'lucide-react';
 import type { KanbanTask, AgentProviderMeta, AgentProviderId, TaskManagerTask, TerminalTask } from '../../../shared/types';
 import { useTerminalStore, type Terminal } from '../../stores/terminal-store';
@@ -18,7 +19,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import { TerminalPanel } from '../terminal/TerminalPanel';
-import { ChangesSplitLayout } from '../terminal/TerminalView';
+import { ChangesSplitLayout, TaskPickerModal } from '../terminal/TerminalView';
 import { cn } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
@@ -234,6 +235,33 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
   const [setupError, setSetupError] = useState<string | null>(null);
   const [settingUp, setSettingUp] = useState(false);
   const setupRef = useRef<string | null>(null); // dedupe effect across strict-mode double-invoke
+
+  // Link-to-ClickUp flow for local tasks
+  const linkLocalToClickup = useKanbanStore((s) => s.linkLocalToClickup);
+  const [showLinkPicker, setShowLinkPicker] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [linking, setLinking] = useState(false);
+
+  const handleLinkPicked = useCallback(async (picked: TaskManagerTask) => {
+    if (!task) return;
+    setShowLinkPicker(false);
+    setLinking(true);
+    setLinkError(null);
+    const updated = await linkLocalToClickup(task.id, picked);
+    setLinking(false);
+    if (!updated) {
+      // linkLocalToClickup writes the error to the global store; surface it locally too.
+      setLinkError(useKanbanStore.getState().error || 'Failed to link to ClickUp');
+      useKanbanStore.getState().clearError();
+      setTimeout(() => setLinkError(null), 6000);
+      return;
+    }
+    // Sync the terminal's task pointer to the new ClickUp id so subsequent
+    // "Complete Task" / "Open in ClickUp" actions use the real ClickUp task.
+    if (terminalId) {
+      updateTerminal(terminalId, { task: toTerminalTask(updated) });
+    }
+  }, [task, linkLocalToClickup, terminalId, updateTerminal]);
 
   // Load agent providers once
   useEffect(() => {
@@ -590,14 +618,30 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   {task.clickupPriority.name}
                 </span>
               )}
-              <button
-                onClick={() => window.electronAPI.openExternal(task.clickupUrl)}
-                className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-                title="Open in ClickUp"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                ClickUp
-              </button>
+              {task.provider === 'local' ? (
+                settings.taskManagerProvider === 'clickup' && (
+                  <button
+                    onClick={() => setShowLinkPicker(true)}
+                    disabled={linking}
+                    className="flex items-center gap-1 text-xs text-[var(--accent)] hover:opacity-80 transition-opacity disabled:opacity-50"
+                    title="Attach this local task to an existing ClickUp task"
+                  >
+                    {linking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LinkIcon className="w-3.5 h-3.5" />}
+                    Link to ClickUp
+                  </button>
+                )
+              ) : (
+                task.clickupUrl && (
+                  <button
+                    onClick={() => window.electronAPI.openExternal(task.clickupUrl)}
+                    className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                    title="Open in ClickUp"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    ClickUp
+                  </button>
+                )
+              )}
             </div>
             <h2 className="text-base font-semibold text-[var(--text-primary)] truncate">
               {task.clickupName}
@@ -687,6 +731,19 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
           {completeTaskBanner}
 
+          {linkError && (
+            <div className="m-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 flex items-start justify-between gap-2">
+              <span>{linkError}</span>
+              <button
+                onClick={() => setLinkError(null)}
+                className="text-red-400 hover:opacity-70"
+                title="Dismiss"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+
           {terminal && (
             <div className={cn('flex-1 min-h-0 flex flex-col')}>
               {terminal.previewOpen ? (
@@ -725,6 +782,13 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             clicks (e.g. opening the PR split-button dropdown) don't bubble up
             to the backdrop and dismiss the Kanban modal. */}
         {completeTaskModal}
+        {showLinkPicker && (
+          <TaskPickerModal
+            mode="link"
+            onSelect={handleLinkPicked}
+            onCancel={() => setShowLinkPicker(false)}
+          />
+        )}
       </div>
     </div>
   );

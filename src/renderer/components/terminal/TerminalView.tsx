@@ -938,6 +938,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           provider: task.provider,
         };
 
+        // If this ClickUp task is already on the Kanban board, honor the
+        // baseBranch the user picked at import time. Otherwise the worktree
+        // falls through to origin/HEAD inside the IPC handler, which produces
+        // a worktree forked from the wrong branch (and the eventual auto-fix
+        // PR ends up full of unrelated commits — see DP2-24681).
+        const kanbanTask = useKanbanStore.getState().tasks.find((t) => t.clickupTaskId === task.id);
+        const taskBaseBranch = kanbanTask?.baseBranch || undefined;
+
         if (cwdOverride) {
           useTerminalStore.getState().updateTerminal(terminal.id, {
             title,
@@ -952,7 +960,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           // PR). The terminal stays at the project root and `claude
           // --worktree <id>` will reuse this worktree on launch.
           const taskSlug = task.customId || task.id;
-          const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug);
+          const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug, taskBaseBranch);
           if (result.success && result.data) {
             useTerminalStore.getState().updateTerminal(terminal.id, {
               title,
@@ -986,16 +994,22 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           }
         } catch { /* non-critical */ }
 
-        // Auto-detect base branch — use current branch as default
-        try {
-          const brResult = await window.electronAPI.listBranches(activeProject?.path || cwd);
-          if (brResult.success) {
-            const base = brResult.current || undefined;
-            if (base) {
-              useTerminalStore.getState().updateTerminal(terminal.id, { baseBranch: base });
+        // Base branch: prefer the kanban task's stored selection (so merge/PR
+        // target matches the worktree fork point). Fall back to the project's
+        // current branch.
+        if (taskBaseBranch) {
+          useTerminalStore.getState().updateTerminal(terminal.id, { baseBranch: taskBaseBranch });
+        } else {
+          try {
+            const brResult = await window.electronAPI.listBranches(activeProject?.path || cwd);
+            if (brResult.success) {
+              const base = brResult.current || undefined;
+              if (base) {
+                useTerminalStore.getState().updateTerminal(terminal.id, { baseBranch: base });
+              }
             }
-          }
-        } catch { /* non-critical */ }
+          } catch { /* non-critical */ }
+        }
       }
 
       await window.electronAPI.createTerminal({

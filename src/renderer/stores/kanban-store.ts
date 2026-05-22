@@ -84,6 +84,10 @@ interface KanbanState {
     baseBranch?: string;
     useWorktree?: boolean;
   }) => Promise<KanbanTask | null>;
+  /** Convert a local kanban task into a ClickUp-linked one by attaching a
+   *  ClickUp task the user picked. Preserves the local workflow state
+   *  (column, worktree, session, auto-fix counters). */
+  linkLocalToClickup: (localId: string, clickupTask: TaskManagerTask) => Promise<KanbanTask | null>;
   /** Move a task to a different column. If `orderIndex` is supplied, the
    *  task lands at that position; otherwise the main side bumps it to the
    *  bottom of the destination column. Same-column reorders also use this
@@ -302,6 +306,37 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
       return null;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : 'Failed to import task' });
+      return null;
+    }
+  },
+
+  linkLocalToClickup: async (localId, clickupTask) => {
+    try {
+      const result = await window.electronAPI.kanbanLinkClickup({
+        localId,
+        clickupTaskId: clickupTask.id,
+        clickupCustomId: clickupTask.customId,
+        clickupName: clickupTask.name,
+        clickupStatus: clickupTask.status.name,
+        clickupStatusColor: clickupTask.status.color,
+        clickupUrl: clickupTask.url,
+        clickupAssignees: clickupTask.assignees.map((a) => ({
+          id: a.id,
+          username: a.username,
+          initials: a.initials,
+        })),
+        clickupPriority: clickupTask.priority,
+        clickupTags: clickupTask.tags,
+        clickupUpdatedAt: clickupTask.updatedAt,
+      });
+      if (result.success && result.data) {
+        set((state) => ({ tasks: upsertTask(state.tasks, result.data) }));
+        return result.data;
+      }
+      set({ error: result.error || 'Failed to link to ClickUp' });
+      return null;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to link to ClickUp' });
       return null;
     }
   },

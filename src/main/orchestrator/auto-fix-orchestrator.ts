@@ -610,6 +610,40 @@ ${priorSection}
     taskBaseBranch?: string,
   ): Promise<void> {
     if (existsSync(worktreeDir)) {
+      // Sanity-check the existing worktree was actually forked from the
+      // task's chosen base. When a worktree was created earlier from
+      // origin/HEAD (e.g. via `claude --worktree` directly, or a pre-1.24.2
+      // TerminalView path) the orchestrator would otherwise push a PR full
+      // of unrelated commits from the wrong base — see DP2-24681.
+      if (taskBaseBranch && taskBaseBranch.trim()) {
+        const base = taskBaseBranch.trim();
+        // Refresh the base from origin so the merge-base check uses the
+        // latest tip — ignore failures (offline, branch is local-only).
+        try { await runCmd(`git fetch origin "${base}"`, worktreeDir, NETWORK_TIMEOUT); } catch { /* noop */ }
+        // Only run the ancestor check if the base ref actually resolves —
+        // otherwise we'd false-positive on local-only or deleted branches.
+        const baseResolves = await this.safeGitCmd(
+          `git rev-parse --verify "${base}^{commit}"`,
+          worktreeDir,
+        );
+        if (baseResolves !== null) {
+          const baseIsAncestor = await this.safeGitCmd(
+            `git merge-base --is-ancestor "${base}" HEAD`,
+            worktreeDir,
+          );
+          // safeGitCmd returns '' on success, null on non-zero exit.
+          // Non-zero → base is NOT reachable from HEAD → worktree was forked elsewhere.
+          if (baseIsAncestor === null) {
+            const safeId = branch.replace(/^worktree-/, '');
+            throw new Error(
+              `Worktree base mismatch — branch "${branch}" was not forked from "${base}". ` +
+              `Opening a PR now would include unrelated commits from a different base. ` +
+              `Delete .claude/worktrees/${safeId} (and the branch with \`git branch -D ${branch}\`), ` +
+              `then re-open the task so the worktree is recreated from "${base}".`,
+            );
+          }
+        }
+      }
       try {
         await runCmd(`git pull --ff-only`, worktreeDir, NETWORK_TIMEOUT);
       } catch { /* non-critical */ }
