@@ -771,6 +771,51 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     });
   }, []);
 
+  // Tree sidebar width — draggable splitter, persisted across sessions.
+  // 240px matches the original w-60 default so existing users see no shift.
+  const TREE_WIDTH_KEY = 'terminal-tree-width';
+  const TREE_WIDTH_MIN = 160;
+  const TREE_WIDTH_MAX = 560;
+  const TREE_WIDTH_DEFAULT = 240;
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(TREE_WIDTH_KEY);
+      const parsed = raw ? Number(raw) : NaN;
+      if (Number.isFinite(parsed) && parsed >= TREE_WIDTH_MIN && parsed <= TREE_WIDTH_MAX) return parsed;
+    } catch { /* ignore */ }
+    return TREE_WIDTH_DEFAULT;
+  });
+  const [resizingTree, setResizingTree] = useState(false);
+  const treeContainerRef = useRef<HTMLDivElement>(null);
+  const handleTreeResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizingTree(true);
+    const startX = e.clientX;
+    const startWidth = treeContainerRef.current?.getBoundingClientRect().width ?? treeWidth;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, startWidth + (ev.clientX - startX)));
+      setTreeWidth(next);
+    };
+    const onUp = () => {
+      setResizingTree(false);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      // Read final value off state via the ref-style trick: schedule a write
+      // after React commits the new state. Cheap to write in the move handler
+      // too, but throttling to one write per drag keeps localStorage quiet.
+      const finalWidth = treeContainerRef.current?.getBoundingClientRect().width;
+      if (finalWidth) {
+        try { localStorage.setItem(TREE_WIDTH_KEY, String(Math.round(finalWidth))); } catch { /* ignore */ }
+      }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [treeWidth]);
+  const handleTreeResizeDoubleClick = useCallback(() => {
+    setTreeWidth(TREE_WIDTH_DEFAULT);
+    try { localStorage.setItem(TREE_WIDTH_KEY, String(TREE_WIDTH_DEFAULT)); } catch { /* ignore */ }
+  }, []);
+
   const [showTaskPicker, setShowTaskPicker] = useState(false);
   const [taskPickerMode, setTaskPickerMode] = useState<'tab' | 'split' | 'link'>('tab');
   const [linkTargetTerminalId, setLinkTargetTerminalId] = useState<string | null>(null);
@@ -1643,9 +1688,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       )}
 
       {/* Terminal panels + optional files panel */}
-      <div className="flex-1 flex min-h-0">
-      {/* Tree sidebar — categories grouped by task status, with task-ID search */}
-      <div className="w-60 shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col min-h-0">
+      <div className="flex-1 flex min-h-0 relative">
+      {resizingTree && (
+        <div className="absolute inset-0 z-50 cursor-col-resize" />
+      )}
+      {/* Tree sidebar — categories grouped by task status, with task-ID search.
+          Width is user-resizable via the handle to the right; persisted to localStorage. */}
+      <div
+        ref={treeContainerRef}
+        style={{ width: treeWidth }}
+        className="shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col min-h-0"
+      >
         <div className="p-2 border-b border-[var(--border)] shrink-0">
           <div className="relative">
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--text-muted)] pointer-events-none" />
@@ -1882,6 +1935,24 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           </div>,
           document.body
         )}
+      </div>
+
+      {/* Draggable splitter between tree sidebar and terminal area. Hover/drag
+          highlights it; double-click resets to the default width. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize tree sidebar"
+        onMouseDown={handleTreeResizeStart}
+        onDoubleClick={handleTreeResizeDoubleClick}
+        className={cn(
+          'w-1 shrink-0 cursor-col-resize relative group transition-colors',
+          resizingTree ? 'bg-[var(--accent)]' : 'bg-transparent hover:bg-[var(--accent)]/40',
+        )}
+        title="Drag to resize · Double-click to reset"
+      >
+        {/* widen the hit area without changing visible width */}
+        <div className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
       </div>
 
       <div className="flex-1 relative min-h-0 min-w-0 overflow-hidden">
