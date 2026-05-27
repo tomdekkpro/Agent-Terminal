@@ -1066,13 +1066,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       // Ensure a KanbanTask exists for this ClickUp task — idempotent on the
       // main side, so repeated calls just refresh the snapshot. Means every
-      // terminal with a task shows up on the Kanban board.
+      // terminal with a task shows up on the Kanban board. Pass useWorktree
+      // through so the picker's "Current Branch" choice persists onto the
+      // KanbanTask — otherwise reopening from the board would create a
+      // worktree the user explicitly opted out of.
       if (task && activeProject?.path) {
         try {
           await useKanbanStore.getState().importTask({
             clickupTask: task,
             projectPath: activeProject.path,
             projectId: activeProject.id,
+            useWorktree,
           });
         } catch { /* non-critical */ }
       }
@@ -1129,13 +1133,19 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         }
       } catch { /* non-critical */ }
 
-      // Mirror the link into the Kanban board — idempotent on the main side
+      // Mirror the link into the Kanban board — idempotent on the main side.
+      // Derive useWorktree from the linked terminal's actual state: if it
+      // already has a worktreePath we're in worktree mode, otherwise we're
+      // running on the project's checked-out branch. Keeps the KanbanTask
+      // record consistent with what the user is actually working in.
       if (activeProject?.path) {
         try {
+          const linkedTerm = useTerminalStore.getState().terminals.find((t) => t.id === terminalId);
           await useKanbanStore.getState().importTask({
             clickupTask: task,
             projectPath: activeProject.path,
             projectId: activeProject.id,
+            useWorktree: !!linkedTerm?.worktreePath,
           });
         } catch { /* non-critical */ }
       }

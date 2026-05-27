@@ -110,7 +110,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
   const existing = getKanbanTaskByClickup(input.clickupTaskId);
   if (existing) {
     // Refresh ClickUp snapshot fields but preserve local state
-    return updateKanbanTask(existing.id, {
+    const patch: Partial<KanbanTask> = {
       clickupCustomId: input.clickupCustomId,
       clickupName: input.clickupName,
       clickupStatus: input.clickupStatus,
@@ -122,7 +122,14 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
       clickupUpdatedAt: input.clickupUpdatedAt,
       projectPath: input.projectPath || existing.projectPath,
       projectId: input.projectId ?? existing.projectId,
-    })!;
+    };
+    // Re-import via the Import modal explicitly passes useWorktree; honor it so
+    // toggling Worktree ↔ Current branch on an already-tracked task actually
+    // updates the record. Background auto-imports (terminal restore, etc.)
+    // leave it undefined and preserve the existing choice.
+    if (input.useWorktree !== undefined) patch.useWorktree = input.useWorktree;
+    if (input.baseBranch !== undefined) patch.baseBranch = input.baseBranch;
+    return updateKanbanTask(existing.id, patch)!;
   }
 
   const now = new Date().toISOString();
