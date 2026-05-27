@@ -38,8 +38,10 @@ import { UsageIndicator } from '../usage/UsageIndicator';
 import { KanbanCostSummary } from './KanbanCostSummary';
 import { ProjectGitActions } from '../shared/ProjectGitActions';
 import { ProjectSkillsAction } from '../shared/ProjectSkillsAction';
+import { ProjectDevServerActions } from '../shared/ProjectDevServerActions';
 import { SystemMonitor } from '../status/SystemMonitor';
 import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
+import { DevServerLogPanel } from '../dev-server/DevServerLogPanel';
 
 interface KanbanViewProps {
   /** Kept for parity with other views — the Kanban handles card activation inline via the TaskTerminalModal */
@@ -404,6 +406,7 @@ export function KanbanView(_props: KanbanViewProps) {
               Refresh
             </button>
             <div className="h-6 w-px bg-[var(--border)] mx-1" />
+            <ProjectDevServerActions />
             <ProjectGitActions />
             <ProjectSkillsAction />
             <SystemMonitor />
@@ -715,6 +718,10 @@ export function KanbanView(_props: KanbanViewProps) {
           </div>
         )}
       </div>
+
+      {/* Dev-server log panel (FE/BE) — shares the dev-server store with the
+          toolbar buttons; renders at the bottom when a log is toggled open. */}
+      <DevServerLogPanel />
 
       <ImportTaskModal open={showImport} onClose={() => setShowImport(false)} />
       <CreateLocalTaskModal open={showCreateLocal} onClose={() => setShowCreateLocal(false)} />
