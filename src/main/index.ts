@@ -15,8 +15,9 @@ import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handle
 import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
-import { registerAutoFixHandlers, stopAutoFixOrchestrator } from './ipc/auto-fix-handlers';
+import { registerAutoCodeHandlers, stopAutoCodeOrchestrator } from './ipc/auto-code-handlers';
 import { registerKanbanHandlers } from './ipc/kanban-handlers';
+import { registerActivityHandlers } from './ipc/activity-handlers';
 import { flushKanbanTasks } from './kanban/kanban-task-store';
 import { registerClaudeSessionsHandlers } from './ipc/claude-sessions-handlers';
 import { registerDevServerHandlers } from './ipc/dev-server-handlers';
@@ -126,7 +127,8 @@ app.whenReady().then(() => {
   registerQCHandlers(ipcMain, getWindow);
   registerCodeReviewHandlers(ipcMain, getWindow);
   registerKanbanHandlers(ipcMain, getWindow);
-  registerAutoFixHandlers(ipcMain, getWindow);
+  registerActivityHandlers(ipcMain, getWindow);
+  registerAutoCodeHandlers(ipcMain, getWindow);
   registerClaudeSessionsHandlers(ipcMain);
   registerDevServerHandlers(ipcMain, getWindow);
   registerFilesHandlers(ipcMain);
@@ -162,7 +164,7 @@ app.on('before-quit', () => {
   stopUsagePolling();
   stopServiceStatusPolling();
   stopSystemMonitorPolling();
-  stopAutoFixOrchestrator();
+  stopAutoCodeOrchestrator();
   flushKanbanTasks();
   if (terminalManager) {
     // Save output buffers while terminals are still alive

@@ -16,7 +16,7 @@ const OUTPUT_TOKENS_PATTERN = /(?:Output tokens|Tokens out):?\s*([0-9,]+)/i;
 const EXIT_PATTERNS = [/Goodbye!?\s*$/im, /Session ended/i];
 
 const INSIGHTS_MODEL_MAP: Record<string, string> = {
-  opus: 'claude-opus-4-6',
+  opus: 'claude-opus-4-8',
   sonnet: 'claude-sonnet-4-6',
   haiku: 'claude-haiku-4-5-20251001',
 };
@@ -35,6 +35,7 @@ export class ClaudeAgentProvider implements IAgentProvider {
     sessionDetection: true,
     remoteControl: true,
     insights: true,
+    headless: true,
   };
 
   isAvailable(): boolean {
@@ -67,6 +68,47 @@ export class ClaudeAgentProvider implements IAgentProvider {
     return cmd;
   }
 
+  buildHeadlessArgs(options: { model?: string; cwd: string; jsonOutput?: boolean }): string[] {
+    // Single-shot, non-interactive run. Prompt is piped to stdin by the caller.
+    // Defaults to Sonnet to keep auto-code cost predictable (the interactive
+    // default is Opus); pass options.model to override per task.
+    // jsonOutput → emit a single result JSON object so the orchestrator can
+    // recover session_id (to resume/inspect later) and the final summary.
+    return [
+      '--output-format', options.jsonOutput ? 'json' : 'text',
+      '--model', options.model || 'claude-sonnet-4-6',
+      '--add-dir', options.cwd,
+      '--dangerously-skip-permissions',
+      '-p',
+    ];
+  }
+
+  /** Parse the JSON result object emitted by `--output-format json`. Claude
+   *  prints one object: { type, subtype, session_id, result, total_cost_usd, … }.
+   *  `result` is the agent's final assistant message. */
+  parseHeadlessResult(stdout: string): { sessionId?: string; summary?: string } | null {
+    const tryParse = (s: string): { sessionId?: string; summary?: string } | null => {
+      try {
+        const obj = JSON.parse(s);
+        if (obj && (typeof obj.session_id === 'string' || typeof obj.result === 'string')) {
+          return {
+            sessionId: typeof obj.session_id === 'string' ? obj.session_id : undefined,
+            summary: typeof obj.result === 'string' ? obj.result.trim() : undefined,
+          };
+        }
+      } catch { /* not JSON — fall through */ }
+      return null;
+    };
+    const trimmed = stdout.trim();
+    const direct = tryParse(trimmed);
+    if (direct) return direct;
+    // Defensive: pull the largest {...} block out of any surrounding noise.
+    const first = trimmed.indexOf('{');
+    const last = trimmed.lastIndexOf('}');
+    if (first >= 0 && last > first) return tryParse(trimmed.slice(first, last + 1));
+    return null;
+  }
+
   parseUsageFromOutput(data: string): AgentUsageData | null {
     const costMatch = data.match(COST_PATTERN);
     const inputMatch = data.match(INPUT_TOKENS_PATTERN);
@@ -94,6 +136,7 @@ export class ClaudeAgentProvider implements IAgentProvider {
       { id: 'opus', label: 'Opus (latest)' },
       { id: 'sonnet', label: 'Sonnet (latest)' },
       { id: 'haiku', label: 'Haiku (latest)' },
+      { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
       { id: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },

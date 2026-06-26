@@ -60,7 +60,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           onClick={() => onViewChange(id)}
           title={`${label}  (${shortcut})`}
           className={cn(
-            'w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200',
+            'w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 relative',
             'hover:bg-[var(--bg-tertiary)]',
             activeView === id
               ? 'bg-[var(--accent)]/20 text-[var(--accent)]'

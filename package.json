@@ -1,6 +1,6 @@
 {
   "name": "agent-terminal",
-  "version": "1.24.9",
+  "version": "1.26.5",
   "description": "Agent Terminal - AI-powered terminal with ClickUp integration",
   "author": {
     "name": "tomdekkpro",
@@ -9,6 +9,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "start": "electron-vite build && electron-vite preview",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",

@@ -1,5 +1,6 @@
 import * as pty from '@lydell/node-pty';
 import * as os from 'os';
+import * as fs from 'fs';
 import { execFile } from 'child_process';
 import type { TerminalProcess, WindowGetter } from './types';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -31,6 +32,28 @@ function detectShellType(shellPath: string): 'cmd' | 'powershell' | 'bash' {
 export interface SpawnPtyResult {
   pty: pty.IPty;
   shellType?: 'cmd' | 'powershell' | 'bash';
+  /** The directory the PTY was actually spawned in. Differs from the requested
+   *  cwd when that path was missing/invalid and we fell back to the home dir. */
+  cwd: string;
+}
+
+/**
+ * Resolve a usable spawn directory. node-pty throws (Windows error 267 —
+ * "The directory name is invalid") when handed a cwd that doesn't exist, which
+ * happens routinely for deleted worktrees or renamed/removed project folders.
+ * Validate the path up front and fall back to the home directory so terminal
+ * creation degrades gracefully instead of crashing.
+ */
+function resolveSpawnCwd(cwd: string | undefined): string {
+  const home = os.homedir();
+  if (!cwd) return home;
+  try {
+    if (fs.statSync(cwd).isDirectory()) return cwd;
+    debugError('[PtyManager] cwd is not a directory, falling back to home:', cwd);
+  } catch {
+    debugError('[PtyManager] cwd does not exist, falling back to home:', cwd);
+  }
+  return home;
 }
 
 export function spawnPtyProcess(
@@ -52,12 +75,13 @@ export function spawnPtyProcess(
 
   const shellArgs = isWindows() ? [] : ['-l'];
   const { DEBUG: _DEBUG, ...cleanEnv } = process.env;
+  const spawnCwd = resolveSpawnCwd(cwd);
 
   const ptyProcess = pty.spawn(shell, shellArgs, {
     name: 'xterm-256color',
     cols,
     rows,
-    cwd: cwd || os.homedir(),
+    cwd: spawnCwd,
     env: {
       ...cleanEnv,
       ...profileEnv,
@@ -67,7 +91,7 @@ export function spawnPtyProcess(
     },
   });
 
-  return { pty: ptyProcess, shellType };
+  return { pty: ptyProcess, shellType, cwd: spawnCwd };
 }
 
 export function setupPtyHandlers(

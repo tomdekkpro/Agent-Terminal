@@ -1,53 +1,62 @@
 import type { BrowserWindow, IpcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { debugLog } from '../../shared/utils';
-import { autoFixOrchestrator } from '../orchestrator/auto-fix-orchestrator';
+import { autoCodeOrchestrator } from '../orchestrator/auto-code-orchestrator';
 import { getSettings } from './settings-handlers';
 
-export function registerAutoFixHandlers(
+export function registerAutoCodeHandlers(
   ipcMain: IpcMain,
   getWindow: () => BrowserWindow | null,
 ): void {
-  autoFixOrchestrator.init(getWindow);
+  autoCodeOrchestrator.init(getWindow);
 
   // Auto-start if enabled — small delay so the app finishes initializing first
   setTimeout(() => {
     const settings = getSettings();
-    if (settings.autoFixEnabled) {
-      debugLog('[AutoFix] Auto-starting orchestrator from settings');
-      autoFixOrchestrator.start();
+    if (settings.autoCodeEnabled) {
+      debugLog('[AutoCode] Auto-starting orchestrator from settings');
+      autoCodeOrchestrator.start();
     }
   }, 5000);
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_FIX_STATUS, async () => {
-    return { success: true, data: autoFixOrchestrator.getStatus() };
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_STATUS, async () => {
+    return { success: true, data: autoCodeOrchestrator.getStatus() };
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_FIX_START, async () => {
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_START, async () => {
     try {
-      autoFixOrchestrator.start();
-      return { success: true, data: autoFixOrchestrator.getStatus() };
+      autoCodeOrchestrator.start();
+      return { success: true, data: autoCodeOrchestrator.getStatus() };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to start' };
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_FIX_STOP, async () => {
-    autoFixOrchestrator.stop();
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_STOP, async () => {
+    autoCodeOrchestrator.stop();
     return { success: true };
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_FIX_RUN_NOW, async () => {
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_RUN_NOW, async () => {
     try {
-      await autoFixOrchestrator.runNow();
+      await autoCodeOrchestrator.runNow();
       return { success: true };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to run cycle' };
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.AUTO_FIX_REQUEUE, async (_event, kanbanTaskId: string) => {
-    const record = autoFixOrchestrator.requeueTask(kanbanTaskId);
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_RUN_TASK, async (_event, kanbanTaskId: string) => {
+    try {
+      const result = await autoCodeOrchestrator.runTaskNow(kanbanTaskId);
+      return { success: result.ran, data: result, error: result.ran ? undefined : result.message };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to run task' };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.AUTO_CODE_REQUEUE, async (_event, kanbanTaskId: string) => {
+    const record = autoCodeOrchestrator.requeueTask(kanbanTaskId);
     if (!record) return { success: false, error: 'Task not found' };
     return { success: true, data: record };
   });
@@ -55,7 +64,7 @@ export function registerAutoFixHandlers(
   // Per-task auto-merge override now goes through KANBAN_UPDATE directly —
   // kept as an alias for backward-compat with the old preload method.
   ipcMain.handle(
-    IPC_CHANNELS.AUTO_FIX_SET_TASK_AUTOMERGE,
+    IPC_CHANNELS.AUTO_CODE_SET_TASK_AUTOMERGE,
     async (_event, kanbanTaskId: string, override: boolean | null) => {
       const { updateKanbanTask } = await import('../kanban/kanban-task-store');
       const { broadcastKanbanEvent } = await import('./kanban-handlers');
@@ -67,6 +76,6 @@ export function registerAutoFixHandlers(
   );
 }
 
-export function stopAutoFixOrchestrator(): void {
-  autoFixOrchestrator.stop();
+export function stopAutoCodeOrchestrator(): void {
+  autoCodeOrchestrator.stop();
 }

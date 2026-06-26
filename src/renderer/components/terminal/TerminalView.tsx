@@ -986,7 +986,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         // If this ClickUp task is already on the Kanban board, honor the
         // baseBranch the user picked at import time. Otherwise the worktree
         // falls through to origin/HEAD inside the IPC handler, which produces
-        // a worktree forked from the wrong branch (and the eventual auto-fix
+        // a worktree forked from the wrong branch (and the eventual auto-code
         // PR ends up full of unrelated commits — see DP2-24681).
         const kanbanTask = useKanbanStore.getState().tasks.find((t) => t.clickupTaskId === task.id);
         const taskBaseBranch = kanbanTask?.baseBranch || undefined;

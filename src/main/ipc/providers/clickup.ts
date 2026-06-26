@@ -1,4 +1,4 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList } from '../../../shared/types';
+import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './types';
 
 const CLICKUP_API_BASE = 'https://api.clickup.com/api/v2';
@@ -161,7 +161,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
   async searchTasks(
     settings: AppSettings,
     query: string,
-    filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+    filters?: TaskSearchFilters,
     listId?: string,
     page: number = 0,
   ): Promise<ProviderResult<TaskManagerTask[]>> {
@@ -179,6 +179,10 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (filters?.assignees?.length) {
         for (const a of filters.assignees) params.append('assignees[]', a);
       }
+      // Server-side ordering so paged fetches return the right subset first.
+      // These also become part of the cache key via params.toString().
+      if (filters?.orderBy) params.set('order_by', filters.orderBy);
+      if (filters?.reverse) params.set('reverse', 'true');
 
       const hasQuery = !!query.trim();
 

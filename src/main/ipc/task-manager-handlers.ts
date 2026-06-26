@@ -1,5 +1,6 @@
 import type { IpcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
+import type { TaskSearchFilters } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { ClickUpProvider, JiraProvider, type ITaskManagerProvider } from './providers';
 
@@ -39,7 +40,7 @@ export function registerTaskManagerHandlers(ipcMain: IpcMain): void {
     async (
       _event,
       query: string,
-      filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+      filters?: TaskSearchFilters,
       listId?: string,
       page?: number,
     ) => {

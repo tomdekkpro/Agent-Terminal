@@ -10,6 +10,7 @@ import { getSession, saveSession } from '../insights/session-storage';
 import { DEFAULT_PERSONAS } from '../../shared/types';
 import { agentRegistry } from '../ipc/providers/agent-registry';
 import { loadPersonas } from '../insights/persona-storage';
+import { getSettings } from '../ipc/settings-handlers';
 
 /** Get or create a directory for QC screenshots */
 function getScreenshotDir(sessionId: string): string {
@@ -125,7 +126,7 @@ Generate 3-8 test cases covering:
 - Navigation and routing
 - Responsive behavior`;
 
-  const modelId = model === 'opus' ? 'claude-opus-4-6' : model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
+  const modelId = model === 'opus' ? 'claude-opus-4-8' : model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
 
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
@@ -265,6 +266,21 @@ export async function runTestCase(
 
   const screenshotDir = getScreenshotDir(sessionId);
 
+  const captureDiagnostics = getSettings().qcCaptureDiagnostics !== false;
+  const diagnosticsInstructions = captureDiagnostics
+    ? `
+
+DIAGNOSTICS CAPTURE (REQUIRED):
+- Before finishing, call browser_console_messages to read the browser console, and browser_network_requests to list network activity.
+- Collect any console messages of type error/warning and any network requests that failed or returned a 4xx/5xx status.
+- Report them in the JSON fields "consoleErrors" and "networkErrors" (arrays of short strings). Use empty arrays if there are none.`
+    : '';
+  const diagnosticsJsonFields = captureDiagnostics
+    ? `,
+  "consoleErrors": ["text of each console error/warning, if any"],
+  "networkErrors": ["METHOD URL -> STATUS for each failed/4xx/5xx request, if any"]`
+    : '';
+
   const prompt = `${personaPrompt}
 
 You are executing a manual test case using a real browser.
@@ -290,6 +306,7 @@ SCREENSHOT REQUIREMENTS:
 - You MUST take a screenshot after EVERY step for evidence
 - Use browser_take_screenshot after each action
 - This is critical for QC documentation
+${diagnosticsInstructions}
 
 RESPOND WITH ONLY valid JSON (no markdown):
 {
@@ -302,12 +319,12 @@ RESPOND WITH ONLY valid JSON (no markdown):
     }
   ],
   "overallStatus": "passed" or "failed",
-  "summary": "Brief summary of test execution"
+  "summary": "Brief summary of test execution"${diagnosticsJsonFields}
 }
 
 IMPORTANT: Actually use the browser tools to navigate and interact with the page. Do NOT just imagine the results. Use browser_navigate, browser_click, browser_type, browser_take_screenshot, browser_snapshot, etc.`;
 
-  const modelId = model === 'opus' ? 'claude-opus-4-6' : model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
+  const modelId = model === 'opus' ? 'claude-opus-4-8' : model === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
 
   // Record start time so we can find screenshots created during this test
   const testStartTime = Date.now();
@@ -611,6 +628,8 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
           steps: Array<{ order: number; actual: string; status: string; screenshot?: string }>;
           overallStatus: string;
           summary: string;
+          consoleErrors?: string[];
+          networkErrors?: string[];
         } | null = null;
 
         for (const candidate of candidates) {
@@ -692,6 +711,12 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
           completedAt: tcCompletedAt,
           durationMs: testCase.startedAt
             ? new Date(tcCompletedAt).getTime() - new Date(testCase.startedAt).getTime()
+            : undefined,
+          consoleErrors: Array.isArray(result.consoleErrors)
+            ? result.consoleErrors.filter((s) => typeof s === 'string' && s.trim()).slice(0, 50)
+            : undefined,
+          networkErrors: Array.isArray(result.networkErrors)
+            ? result.networkErrors.filter((s) => typeof s === 'string' && s.trim()).slice(0, 50)
             : undefined,
         };
 

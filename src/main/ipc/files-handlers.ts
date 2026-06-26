@@ -181,6 +181,20 @@ export function registerFilesHandlers(ipcMain: IpcMain): void {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.FILES_PATH_EXISTS,
+    async (_event, targetPath: string) => {
+      try {
+        if (!targetPath) return { success: true, data: { exists: false, isDirectory: false } };
+        const s = await stat(targetPath);
+        return { success: true, data: { exists: true, isDirectory: s.isDirectory() } };
+      } catch {
+        // ENOENT and friends → path simply isn't there
+        return { success: true, data: { exists: false, isDirectory: false } };
+      }
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL,
     async (_event, projectPath: string, skillName: string, content: string) => {
       try {

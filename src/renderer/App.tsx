@@ -12,6 +12,7 @@ import { InsightsView } from './components/insights';
 import { QCView } from './components/qc';
 import { CodeReviewView } from './components/code-review';
 import { KanbanView } from './components/kanban';
+import { useActivityStore, subscribeActivityEvents } from './stores/activity-store';
 import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
@@ -26,6 +27,13 @@ export default function App() {
   const restoreState = useTerminalStore((s) => s.restoreState);
 
   useGlobalTerminalListeners();
+
+  // Activity feed: load history once and keep the live subscription open at the
+  // app root so the unread badge stays current even when the view is closed.
+  useEffect(() => {
+    void useActivityStore.getState().load();
+    return subscribeActivityEvents();
+  }, []);
 
   // Keyboard shortcuts
   const openProjectIds = useProjectStore((s) => s.openProjectIds);
@@ -55,6 +63,13 @@ export default function App() {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
       const key = e.key.toLowerCase();
+
+      // Ctrl+B — toggle the notifications popover
+      if (key === 'b') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('agent-terminal:toggle-notifications'));
+        return;
+      }
 
       // Ctrl+T/K/S — switch views
       const view = viewKeys[key];
@@ -121,8 +136,8 @@ export default function App() {
 
       if (cancelled) return;
 
-      // Start the periodic snapshot refresh. Runs independent of the auto-fix
-      // orchestrator so the board stays fresh even when auto-fix is disabled.
+      // Start the periodic snapshot refresh. Runs independent of the auto-code
+      // orchestrator so the board stays fresh even when auto-code is disabled.
       const scheduleRefresh = () => {
         const intervalMinutes = useSettingsStore.getState().settings.kanbanSnapshotIntervalMinutes ?? 5;
         if (snapshotTimer) {

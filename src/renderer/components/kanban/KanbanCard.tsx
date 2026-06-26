@@ -15,8 +15,9 @@ import {
   Trash2,
   Play,
   FolderOpen,
+  Zap,
 } from 'lucide-react';
-import type { KanbanTask, AutoFixTaskState } from '../../../shared/types';
+import type { KanbanTask, AutoCodeTaskState } from '../../../shared/types';
 import type { Terminal } from '../../stores/terminal-store';
 import { cn } from '../../../shared/utils';
 
@@ -25,7 +26,7 @@ interface KanbanCardProps {
   terminal?: Terminal;
   maxIterations: number;
   autoMergeGlobal: boolean;
-  autoFixGlobal: boolean;
+  autoCodeGlobal: boolean;
   /** When a filter is active, non-matching cards get dimmed */
   dimmed?: boolean;
   /** When a filter is active, matching cards get a strong highlight ring */
@@ -40,22 +41,23 @@ interface KanbanCardProps {
   onDropOnCard?: (targetTaskId: string, position: 'before' | 'after') => void;
   onClick: () => void;
   onRequeue: (taskId: string) => void;
+  onRunNow: (taskId: string) => void;
   onToggleAutoMerge: (taskId: string, override: boolean | null) => void;
-  onToggleAutoFix: (taskId: string, override: boolean | null) => void;
+  onToggleAutoCode: (taskId: string, enabled: boolean) => void;
   onDelete: (taskId: string) => void;
 }
 
-function autoFixBadge(state: AutoFixTaskState): {
+function autoCodeBadge(state: AutoCodeTaskState): {
   label: string;
   icon: typeof Wrench;
   className: string;
   spin?: boolean;
 } | null {
   switch (state) {
-    case 'fixing':
-      return { label: 'Fixing', icon: Loader2, className: 'bg-blue-500/10 text-blue-400', spin: true };
-    case 'awaiting-qc':
-      return { label: 'Awaiting QC', icon: Clock, className: 'bg-yellow-500/10 text-yellow-400' };
+    case 'coding':
+      return { label: 'Coding', icon: Loader2, className: 'bg-blue-500/10 text-blue-400', spin: true };
+    case 'awaiting-review':
+      return { label: 'In Review', icon: Clock, className: 'bg-yellow-500/10 text-yellow-400' };
     case 'escalated':
       return { label: 'Escalated', icon: AlertTriangle, className: 'bg-red-500/10 text-red-400' };
     case 'merging':
@@ -86,7 +88,7 @@ export function KanbanCard({
   terminal,
   maxIterations,
   autoMergeGlobal,
-  autoFixGlobal,
+  autoCodeGlobal,
   dimmed,
   highlighted,
   isDragging,
@@ -96,23 +98,26 @@ export function KanbanCard({
   onDropOnCard,
   onClick,
   onRequeue,
+  onRunNow,
   onToggleAutoMerge,
-  onToggleAutoFix,
+  onToggleAutoCode,
   onDelete,
 }: KanbanCardProps) {
   /** Drop indicator state — set during dragover, cleared on dragleave/drop.
    *  Renders a thin highlighted line above ('before') or below ('after')
    *  the card so the user sees where the released item will land. */
   const [insertHint, setInsertHint] = useState<'before' | 'after' | null>(null);
-  const badge = autoFixBadge(task.autoFixState);
+  const badge = autoCodeBadge(task.autoCodeState);
   const iteration = task.iterationCount || 0;
-  const isEscalated = task.autoFixState === 'escalated';
+  const isEscalated = task.autoCodeState === 'escalated';
   const override = task.autoMergeOverride;
   const effectiveAutoMerge = override === true || override === false ? override : autoMergeGlobal;
   const hasSession = !!task.agentSessionId;
 
-  const fixOverride = task.autoFixOverride;
-  const effectiveAutoFix = fixOverride === true || fixOverride === false ? fixOverride : autoFixGlobal;
+  // Strict opt-in: auto-code only follows tasks explicitly enabled (default off).
+  // Local tasks have no ClickUp QC signal, so the toggle is hidden for them.
+  const autoCodeOn = task.autoCodeEnabled === true;
+  const canAutoCode = task.provider !== 'local';
 
   // "Active" = something is happening on this task right now. Three sources:
   //  1. agent is actively processing a prompt (terminal.isClaudeBusy)
@@ -120,7 +125,7 @@ export function KanbanCard({
   //  3. orchestrator is mid-fix for this task
   const agentBusy = !!terminal?.isClaudeBusy;
   const agentActive = terminal?.status === 'claude-active';
-  const fixing = task.autoFixState === 'fixing';
+  const fixing = task.autoCodeState === 'coding';
   const isActive = agentBusy || agentActive || fixing;
 
   const handleAutoMergeToggle = () => {
@@ -131,12 +136,8 @@ export function KanbanCard({
     onToggleAutoMerge(task.id, next);
   };
 
-  const handleAutoFixToggle = () => {
-    let next: boolean | null;
-    if (fixOverride === null || fixOverride === undefined) next = autoFixGlobal ? false : true;
-    else if (fixOverride === true) next = false;
-    else next = null;
-    onToggleAutoFix(task.id, next);
+  const handleAutoCodeToggle = () => {
+    onToggleAutoCode(task.id, !autoCodeOn);
   };
 
   const terminalStatusColor: Record<string, string> = {
@@ -231,35 +232,45 @@ export function KanbanCard({
           )}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              handleAutoFixToggle();
-            }}
-            title={
-              fixOverride === true
-                ? 'Auto-Fix FORCED ON for this task (click to disable, then clear)'
-                : fixOverride === false
-                  ? 'Auto-Fix DISABLED for this task (click to clear override)'
-                  : autoFixGlobal
-                    ? 'Auto-Fix follows global (on). Click to override OFF for this task.'
-                    : 'Auto-Fix follows global (off). Click to override ON for this task.'
-            }
-            className={cn(
-              'opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-all relative',
-              fixOverride === true && 'opacity-100 text-green-400',
-              fixOverride === false && 'opacity-100 text-red-400',
-              fixOverride == null && 'text-[var(--text-muted)]',
-            )}
-          >
-            <Wrench className="w-3 h-3" />
-            {!effectiveAutoFix && (
-              // Strike-through slash to signal "turned off"
-              <span className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <span className="block w-[14px] h-[1.5px] bg-current rotate-45 rounded-full" />
-              </span>
-            )}
-          </button>
+          {canAutoCode && task.autoCodeState !== 'coding' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRunNow(task.id);
+              }}
+              title="Run Auto Code now — implement or fix this task immediately (if its ClickUp status allows), without waiting for the next poll"
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--accent)]/10 text-[var(--text-muted)] hover:text-[var(--accent)] transition-all"
+            >
+              <Zap className="w-3 h-3" />
+            </button>
+          )}
+          {canAutoCode && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleAutoCodeToggle();
+              }}
+              title={
+                autoCodeOn
+                  ? autoCodeGlobal
+                    ? 'Auto Code ENABLED for this task — it implements from the description and fixes QC feedback automatically (click to disable)'
+                    : 'Auto Code enabled for this task, but the global Auto Code switch is OFF in Settings — nothing will run until it\'s turned on'
+                  : 'Auto Code off (default). Click to enroll this task in the auto-code loop.'
+              }
+              className={cn(
+                'opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-all relative',
+                autoCodeOn ? 'opacity-100 text-green-400' : 'text-[var(--text-muted)]',
+              )}
+            >
+              <Wrench className="w-3 h-3" />
+              {!autoCodeOn && (
+                // Strike-through slash to signal "turned off"
+                <span className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <span className="block w-[14px] h-[1.5px] bg-current rotate-45 rounded-full" />
+                </span>
+              )}
+            </button>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -406,7 +417,7 @@ export function KanbanCard({
             <>
               {isActive ? (
                 <>
-                  <span className="relative flex w-2 h-2 shrink-0" title={agentBusy ? 'Agent processing…' : fixing ? 'Auto-fix running…' : 'Agent active'}>
+                  <span className="relative flex w-2 h-2 shrink-0" title={agentBusy ? 'Agent processing…' : fixing ? 'Auto Code running…' : 'Agent active'}>
                     <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--accent)] opacity-60 animate-ping" />
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--accent)]" />
                   </span>

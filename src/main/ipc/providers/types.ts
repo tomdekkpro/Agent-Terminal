@@ -1,4 +1,4 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList } from '../../../shared/types';
+import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 
 export type ProviderResult<T> =
   | { success: true; data: T }
@@ -14,7 +14,7 @@ export interface ITaskManagerProvider {
   searchTasks(
     settings: AppSettings,
     query: string,
-    filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+    filters?: TaskSearchFilters,
     listId?: string,
     page?: number,
   ): Promise<ProviderResult<TaskManagerTask[]>>;

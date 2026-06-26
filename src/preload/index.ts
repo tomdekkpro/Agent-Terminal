@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC_CHANNELS } from '../shared/constants';
+import type { TaskSearchFilters } from '../shared/types';
 
 const electronAPI = {
   // Terminal
@@ -48,6 +49,11 @@ const electronAPI = {
     ipcRenderer.on(IPC_CHANNELS.TERMINAL_AGENT_SESSION, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_AGENT_SESSION, handler);
   },
+  onTerminalResumeFailed: (callback: (id: string, info: { reason: string; cwd?: string }) => void) => {
+    const handler = (_event: any, id: string, info: { reason: string; cwd?: string }) => callback(id, info);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_RESUME_FAILED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_RESUME_FAILED, handler);
+  },
   // Legacy event listeners (still fired for backward compat)
   onTerminalClaudeBusy: (callback: (id: string, isBusy: boolean) => void) => {
     const handler = (_event: any, id: string, isBusy: boolean) => callback(id, isBusy);
@@ -64,7 +70,7 @@ const electronAPI = {
   checkTaskManagerConnection: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_CHECK_CONNECTION),
   getTaskManagerLists: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_LISTS),
   getTaskManagerTasks: (listId?: string, page?: number) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASKS, listId, page),
-  searchTaskManagerTasks: (query: string, filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean }, listId?: string, page?: number) =>
+  searchTaskManagerTasks: (query: string, filters?: TaskSearchFilters, listId?: string, page?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_SEARCH_TASKS, query, filters, listId, page),
   getTaskManagerTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK, taskId),
   createTaskManagerTask: (listId: string, data: any) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_CREATE_TASK, listId, data),
@@ -115,6 +121,8 @@ const electronAPI = {
   loadClaudeSkills: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LOAD_CLAUDE_SKILLS, projectPath),
   readFile: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_READ_FILE, filePath),
   saveClaudeSkill: (projectPath: string, skillName: string, content: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL, projectPath, skillName, content),
+  pathExists: (targetPath: string): Promise<{ success: boolean; data?: { exists: boolean; isDirectory: boolean }; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.FILES_PATH_EXISTS, targetPath),
 
   // Git
   createTaskWorktree: (projectPath: string, taskId: string, baseBranch?: string) =>
@@ -294,18 +302,30 @@ const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.KANBAN_EVENT, handler);
   },
 
-  // Auto-Fix Loop
-  autoFixStatus: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_STATUS),
-  autoFixStart: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_START),
-  autoFixStop: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_STOP),
-  autoFixRunNow: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_RUN_NOW),
-  autoFixRequeue: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_REQUEUE, taskId),
-  autoFixSetTaskAutoMerge: (taskId: string, override: boolean | null) =>
-    ipcRenderer.invoke(IPC_CHANNELS.AUTO_FIX_SET_TASK_AUTOMERGE, taskId, override),
-  onAutoFixEvent: (callback: (event: any) => void) => {
+  // Auto Code Loop
+  autoCodeStatus: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_STATUS),
+  autoCodeStart: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_START),
+  autoCodeStop: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_STOP),
+  autoCodeRunNow: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_RUN_NOW),
+  autoCodeRunTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_RUN_TASK, taskId),
+  autoCodeRequeue: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_REQUEUE, taskId),
+  autoCodeSetTaskAutoMerge: (taskId: string, override: boolean | null) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_SET_TASK_AUTOMERGE, taskId, override),
+  onAutoCodeEvent: (callback: (event: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);
-    ipcRenderer.on(IPC_CHANNELS.AUTO_FIX_EVENT, handler);
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.AUTO_FIX_EVENT, handler);
+    ipcRenderer.on(IPC_CHANNELS.AUTO_CODE_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.AUTO_CODE_EVENT, handler);
+  },
+
+  // Activity Feed
+  activityList: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_LIST),
+  markActivityRead: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_MARK_READ, id),
+  markAllActivityRead: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_MARK_ALL_READ),
+  clearActivity: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_CLEAR),
+  onActivityEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.ACTIVITY_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTIVITY_EVENT, handler);
   },
 
   // Claude Sessions Browser

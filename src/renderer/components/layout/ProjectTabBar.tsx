@@ -7,6 +7,7 @@ import { cn } from '../../../shared/utils';
 import type { AgentProviderMeta, DevServerType } from '../../../shared/types';
 import { ProjectSettingsModal } from '../project/ProjectSettingsModal';
 import { ProjectDevServerActions } from '../shared/ProjectDevServerActions';
+import { NotificationBell } from '../activity/NotificationBell';
 
 export function ProjectTabBar() {
   const projects = useProjectStore((s) => s.projects);
@@ -267,6 +268,11 @@ export function ProjectTabBar() {
             </button>
           </div>
         )}
+      </div>
+
+      {/* Notifications */}
+      <div className="border-l border-[var(--border)] pl-1.5 ml-1 shrink-0">
+        <NotificationBell />
       </div>
 
       {/* Project settings modal */}

@@ -51,6 +51,27 @@ export function getSettings(): AppSettings {
         raw.agentConfig = {};
       }
 
+      // Migrate Auto-Fix → Auto Code settings (renamed in the Auto Code refactor).
+      // Copy any legacy autoFix* key into its autoCode* counterpart, then drop
+      // the old key. autoFixRetestStatus became autoCodeReviewStatus.
+      const autoCodeKeyMap: Record<string, string> = {
+        autoFixEnabled: 'autoCodeEnabled',
+        autoFixMaxIterations: 'autoCodeMaxIterations',
+        autoFixPollIntervalMinutes: 'autoCodePollIntervalMinutes',
+        autoFixFailedStatus: 'autoCodeFailedStatus',
+        autoFixRetestStatus: 'autoCodeReviewStatus',
+        autoFixDoneStatus: 'autoCodeDoneStatus',
+        autoFixProjectPath: 'autoCodeProjectPath',
+        autoFixAutoMerge: 'autoCodeAutoMerge',
+        autoFixReviewGate: 'autoCodeReviewGate',
+      };
+      for (const [oldKey, newKey] of Object.entries(autoCodeKeyMap)) {
+        if (raw[oldKey] !== undefined) {
+          if (raw[newKey] === undefined) raw[newKey] = raw[oldKey];
+          delete raw[oldKey];
+        }
+      }
+
       // Clean up deprecated fields from persisted data
       delete raw.defaultCopilotProvider;
       delete raw.defaultCopilotModel;

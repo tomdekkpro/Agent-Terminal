@@ -165,6 +165,39 @@ export function useGlobalTerminalListeners() {
       );
     }
 
+    // Resume aborted because its working directory was gone (e.g. a deleted
+    // worktree). Reset the terminal to idle so the Start button shows, and drop
+    // the stale session/worktree pointers on the matching KanbanTask so its
+    // card flips from "Resume session" back to "Click to start".
+    if (window.electronAPI.onTerminalResumeFailed) {
+      cleanups.push(
+        window.electronAPI.onTerminalResumeFailed((id, info) => {
+          updateTerminal(id, {
+            isClaudeMode: false,
+            isClaudeBusy: false,
+            agentSessionId: undefined,
+          });
+          setTerminalStatus(id, 'idle');
+          if (info?.reason !== 'cwd-missing') return;
+          const terminal = useTerminalStore.getState().terminals.find((t) => t.id === id);
+          const clickupTaskId = terminal?.task?.id;
+          if (!clickupTaskId) return;
+          window.electronAPI.kanbanList?.().then((result: any) => {
+            if (!result?.success || !Array.isArray(result.data)) return;
+            const match = result.data.find((k: any) => k.clickupTaskId === clickupTaskId);
+            if (!match) return;
+            window.electronAPI.kanbanUpdate?.(match.id, {
+              agentSessionId: undefined,
+              agentProvider: undefined,
+              agentCwd: undefined,
+              worktreePath: undefined,
+              worktreeBranch: undefined,
+            });
+          }).catch(() => { /* non-critical */ });
+        })
+      );
+    }
+
     // Legacy listeners (still fired for backward compat)
     cleanups.push(
       window.electronAPI.onTerminalClaudeBusy((id, isBusy) => {

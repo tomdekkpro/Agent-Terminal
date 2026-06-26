@@ -103,7 +103,7 @@ export class TerminalManager {
     }
 
     try {
-      const { pty: ptyProcess, shellType } = PtyManager.spawnPtyProcess(
+      const { pty: ptyProcess, shellType, cwd: spawnedCwd } = PtyManager.spawnPtyProcess(
         cwd || os.homedir(),
         cols,
         rows,
@@ -115,7 +115,10 @@ export class TerminalManager {
         pty: ptyProcess,
         isAgentMode: false,
         hasExited: false,
-        cwd: cwd || os.homedir(),
+        // Use the directory the PTY actually started in — spawnPtyProcess falls
+        // back to the home dir when the requested cwd is missing/invalid, and
+        // resume logic derives the Claude project dir from terminal.cwd.
+        cwd: spawnedCwd,
         outputBuffer: '',
         title: `Terminal ${this.terminals.size + 1}`,
         shellType,
@@ -324,12 +327,31 @@ export class TerminalManager {
       return;
     }
 
+    const dir = options.cwd || terminal.agentCwd || terminal.cwd;
+
+    // Guard: the resume cd's into `dir` then runs the agent's --resume command.
+    // If that directory no longer exists (e.g. a worktree deleted after merge),
+    // the shell only prints "The system cannot find the path specified" and
+    // nothing resumes — leaving a dead prompt and no Start button. Bail out,
+    // keep the terminal idle, and tell the renderer so it shows Start and drops
+    // the stale session pointer.
+    if (dir && !existsSync(dir)) {
+      debugError('[ResumeAgent] Working directory no longer exists, aborting resume:', dir);
+      terminal.isAgentMode = false;
+      terminal.isClaudeMode = false;
+      const win = this.getWindow();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send(IPC_CHANNELS.TERMINAL_RESUME_FAILED, id, { reason: 'cwd-missing', cwd: dir });
+        win.webContents.send(IPC_CHANNELS.TERMINAL_CLAUDE_BUSY, id, false);
+        win.webContents.send(IPC_CHANNELS.TERMINAL_AGENT_BUSY, id, false);
+      }
+      return;
+    }
+
     terminal.isAgentMode = true;
     terminal.agentProvider = agentId;
     terminal.isClaudeMode = true;
     terminal.copilotProvider = agentId;
-
-    const dir = options.cwd || terminal.agentCwd || terminal.cwd;
     terminal.agentCwd = dir;
     terminal.claudeCwd = dir;
 

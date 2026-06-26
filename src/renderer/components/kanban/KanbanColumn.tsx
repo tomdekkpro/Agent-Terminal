@@ -1,9 +1,19 @@
-import { useState, useMemo } from 'react';
-import { Loader2 } from 'lucide-react';
-import type { KanbanTask, KanbanTaskStatus } from '../../../shared/types';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { Loader2, Settings2, Check } from 'lucide-react';
+import type { AppSettings, KanbanTask, KanbanTaskStatus } from '../../../shared/types';
 import type { Terminal } from '../../stores/terminal-store';
+import { useSettingsStore } from '../../stores/settings-store';
 import { KanbanCard } from './KanbanCard';
 import { cn } from '../../../shared/utils';
+
+/** Which settings field holds the ClickUp status list mapped to each column. */
+const COLUMN_SETTING_KEY: Record<KanbanTaskStatus, keyof AppSettings> = {
+  'todo': 'kanbanBacklogStatuses',
+  'in-progress': 'kanbanInProgressStatuses',
+  'review': 'kanbanReviewStatuses',
+  'failed': 'kanbanFailedStatuses',
+  'done': 'kanbanDoneStatuses',
+};
 
 interface KanbanColumnProps {
   status: KanbanTaskStatus;
@@ -13,8 +23,8 @@ interface KanbanColumnProps {
   terminalsByTaskId: Map<string, Terminal>;
   maxIterations: number;
   autoMergeGlobal: boolean;
-  autoFixGlobal: boolean;
-  autoFixFilter: 'fixing' | 'awaiting-qc' | 'escalated' | null;
+  autoCodeGlobal: boolean;
+  autoCodeFilter: 'coding' | 'awaiting-review' | 'escalated' | null;
   pendingMoves: Record<string, KanbanTaskStatus>;
   draggingTaskId: string | null;
   onDragStart: (taskId: string) => void;
@@ -27,8 +37,9 @@ interface KanbanColumnProps {
   onDropOnCard: (targetTaskId: string, position: 'before' | 'after', status: KanbanTaskStatus) => void;
   onCardClick: (task: KanbanTask) => void;
   onRequeue: (taskId: string) => void;
+  onRunNow: (taskId: string) => void;
   onToggleAutoMerge: (taskId: string, override: boolean | null) => void;
-  onToggleAutoFix: (taskId: string, override: boolean | null) => void;
+  onToggleAutoCode: (taskId: string, enabled: boolean) => void;
   onDelete: (taskId: string) => void;
 }
 
@@ -40,8 +51,8 @@ export function KanbanColumn({
   terminalsByTaskId,
   maxIterations,
   autoMergeGlobal,
-  autoFixGlobal,
-  autoFixFilter,
+  autoCodeGlobal,
+  autoCodeFilter,
   pendingMoves,
   draggingTaskId,
   onDragStart,
@@ -50,17 +61,50 @@ export function KanbanColumn({
   onDropOnCard,
   onCardClick,
   onRequeue,
+  onRunNow,
   onToggleAutoMerge,
-  onToggleAutoFix,
+  onToggleAutoCode,
   onDelete,
 }: KanbanColumnProps) {
   const [isOver, setIsOver] = useState(false);
+
+  const settingKey = COLUMN_SETTING_KEY[status];
+  const mappedStatuses = useSettingsStore((s) => s.settings[settingKey] as string);
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
+  const [showSettings, setShowSettings] = useState(false);
+  const [draft, setDraft] = useState('');
+  const settingsRef = useRef<HTMLDivElement>(null);
+
+  // Close the mapping popover on outside click / Escape
+  useEffect(() => {
+    if (!showSettings) return;
+    const onClick = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) setShowSettings(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowSettings(false); };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showSettings]);
+
+  const openSettings = () => {
+    setDraft(mappedStatuses || '');
+    setShowSettings(true);
+  };
+
+  const saveMapping = () => {
+    void updateSettings({ [settingKey]: draft.trim() });
+    setShowSettings(false);
+  };
 
   const activeCount = useMemo(() => {
     let n = 0;
     for (const task of tasks) {
       const term = terminalsByTaskId.get(task.clickupTaskId);
-      if (term?.isClaudeBusy || term?.status === 'claude-active' || task.autoFixState === 'fixing') {
+      if (term?.isClaudeBusy || term?.status === 'claude-active' || task.autoCodeState === 'coding') {
         n++;
       }
     }
@@ -107,6 +151,57 @@ export function KanbanColumn({
             </span>
           )}
         </div>
+
+        {/* Per-column status mapping */}
+        <div className="relative shrink-0" ref={settingsRef}>
+          <button
+            onClick={() => (showSettings ? setShowSettings(false) : openSettings())}
+            title={`Edit which ClickUp statuses map to "${label}"`}
+            className={cn(
+              'p-1 rounded transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]',
+              showSettings && 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]',
+            )}
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+          </button>
+          {showSettings && (
+            <div className="absolute z-50 top-full right-0 mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl p-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                <span className="text-xs font-medium text-[var(--text-primary)]">{label} — ClickUp statuses</span>
+              </div>
+              <p className="text-[10px] text-[var(--text-muted)] mb-2">
+                Comma-separated, case-insensitive. Tasks with these ClickUp statuses land in this column.
+              </p>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveMapping();
+                }}
+                rows={3}
+                placeholder="e.g. in progress, developing"
+                autoFocus
+                className="w-full px-2 py-1.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none"
+              />
+              <div className="flex items-center justify-end gap-2 mt-2">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="px-2 py-1 rounded text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={saveMapping}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
+                >
+                  <Check className="w-3 h-3" />
+                  Save
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-2 min-h-24">
@@ -116,7 +211,13 @@ export function KanbanColumn({
           </div>
         )}
         {tasks.map((task) => {
-          const matchesFilter = autoFixFilter ? task.autoFixState === autoFixFilter : true;
+          // The "awaiting QC" badge counts both awaiting-review and merging
+          // (waiting + not done), so its filter must highlight both too.
+          const matchesFilter = autoCodeFilter
+            ? autoCodeFilter === 'awaiting-review'
+              ? task.autoCodeState === 'awaiting-review' || task.autoCodeState === 'merging'
+              : task.autoCodeState === autoCodeFilter
+            : true;
           return (
             <KanbanCard
               key={task.id}
@@ -124,9 +225,9 @@ export function KanbanColumn({
               terminal={terminalsByTaskId.get(task.clickupTaskId)}
               maxIterations={maxIterations}
               autoMergeGlobal={autoMergeGlobal}
-              autoFixGlobal={autoFixGlobal}
-              dimmed={!!autoFixFilter && !matchesFilter}
-              highlighted={!!autoFixFilter && matchesFilter}
+              autoCodeGlobal={autoCodeGlobal}
+              dimmed={!!autoCodeFilter && !matchesFilter}
+              highlighted={!!autoCodeFilter && matchesFilter}
               isDragging={draggingTaskId === task.id}
               isPending={task.id in pendingMoves}
               onDragStart={onDragStart}
@@ -134,8 +235,9 @@ export function KanbanColumn({
               onDropOnCard={(targetId, position) => onDropOnCard(targetId, position, status)}
               onClick={() => onCardClick(task)}
               onRequeue={onRequeue}
+              onRunNow={onRunNow}
               onToggleAutoMerge={onToggleAutoMerge}
-              onToggleAutoFix={onToggleAutoFix}
+              onToggleAutoCode={onToggleAutoCode}
               onDelete={onDelete}
             />
           );

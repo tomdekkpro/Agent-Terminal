@@ -380,7 +380,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                         type="text"
                         value={agentModel}
                         onChange={(e) => setAgentModel(e.target.value)}
-                        placeholder="e.g. claude-opus-4-7"
+                        placeholder="e.g. claude-opus-4-8"
                         className="mt-2 w-full text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)] font-mono placeholder:text-[var(--text-muted)]"
                       />
                     )}

@@ -45,6 +45,27 @@ function load(): StoreData {
       for (const t of tasks) {
         if (typeof t.useWorktree !== 'boolean') t.useWorktree = true;
       }
+      // v1.25: auto-fix became strict per-task opt-in (default off). Drop the
+      // old tri-state autoFixOverride — all tasks reset to off.
+      for (const t of tasks) {
+        delete (t as unknown as Record<string, unknown>).autoFixOverride;
+      }
+      // Auto Code refactor: rename the per-task auto-fix fields/values to their
+      // auto-code counterparts on records persisted before the rename.
+      for (const t of tasks) {
+        const rec = t as unknown as Record<string, unknown>;
+        if (rec.autoCodeState === undefined && rec.autoFixState !== undefined) {
+          const v = rec.autoFixState;
+          rec.autoCodeState = v === 'fixing' ? 'coding'
+            : v === 'awaiting-qc' ? 'awaiting-review'
+            : v;
+          delete rec.autoFixState;
+        }
+        if (rec.autoCodeEnabled === undefined && rec.autoFixEnabled !== undefined) {
+          rec.autoCodeEnabled = rec.autoFixEnabled;
+          delete rec.autoFixEnabled;
+        }
+      }
       cached = { tasks };
       debugLog('[KanbanStore] Loaded', cached.tasks.length, 'kanban task(s)');
       return cached;
@@ -153,7 +174,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     baseBranch: input.baseBranch || undefined,
     useWorktree: input.useWorktree === false ? false : true,
     orderIndex: nextOrderIndex(data.tasks),
-    autoFixState: 'idle',
+    autoCodeState: 'idle',
     iterationCount: 0,
     lastSeenFailureCommentId: null,
     createdAt: now,
@@ -215,7 +236,7 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     baseBranch: input.baseBranch || undefined,
     useWorktree: input.useWorktree === false ? false : true,
     orderIndex: nextOrderIndex(data.tasks),
-    autoFixState: 'idle',
+    autoCodeState: 'idle',
     iterationCount: 0,
     lastSeenFailureCommentId: null,
     createdAt: now,
@@ -244,7 +265,7 @@ export interface LinkLocalToClickupInput {
 }
 
 /** Convert a local-only kanban task into a ClickUp-linked one. Preserves
- *  the local workflow state (kanbanStatus, worktree info, session id, auto-fix
+ *  the local workflow state (kanbanStatus, worktree info, session id, auto-code
  *  iteration count, etc.) so the existing terminal/worktree keeps working. */
 export function linkKanbanTaskToClickup(input: LinkLocalToClickupInput): KanbanTask | null {
   const data = load();

@@ -1,8 +1,22 @@
 import { create } from 'zustand';
-import type { KanbanTask, KanbanTaskStatus, TaskManagerTask } from '../../shared/types';
+import type { KanbanTask, KanbanTaskStatus, TaskManagerTask, TaskSearchFilters } from '../../shared/types';
+import { BACKLOG_SORT_API_PARAMS } from '../../shared/types';
 import { useSettingsStore } from './settings-store';
 import { useTerminalStore } from './terminal-store';
 import { useProjectStore } from './project-store';
+
+/** A single Auto Code orchestrator progress line, buffered per task so the
+ *  task detail modal can show "what's happening" live while a headless run is
+ *  in flight (the run isn't a viewable PTY). */
+export interface AutoCodeLogEntry {
+  at: number;
+  message: string;
+  level: 'info' | 'warn' | 'error';
+}
+
+/** Keep the per-task log bounded — these are progress breadcrumbs, not a full
+ *  transcript (the agent's real output lands in its resumable session). */
+const AUTO_CODE_LOG_CAP = 200;
 
 export const KANBAN_COLUMN_ORDER: KanbanTaskStatus[] = [
   'todo',
@@ -37,7 +51,7 @@ export interface WorkspaceMember {
   profilePicture?: string;
 }
 
-export interface AutoFixStatusPayload {
+export interface AutoCodeStatusPayload {
   active: boolean;
   running: boolean;
   lastRun: string | null;
@@ -51,7 +65,14 @@ interface KanbanState {
   /** ClickUp tasks that match the backlog criteria but aren't imported yet */
   backlog: TaskManagerTask[];
   backlogLoading: boolean;
+  /** True while an append-fetch (infinite scroll) is in flight. Kept separate
+   *  from backlogLoading so the new-task notification diff isn't disturbed. */
+  backlogLoadingMore: boolean;
   backlogError: string | null;
+  /** Last backlog page fetched (0-based). */
+  backlogPage: number;
+  /** True when the last fetched page was full — more pages likely exist. */
+  backlogHasMore: boolean;
   members: WorkspaceMember[];
   membersLoading: boolean;
   membersError: string | null;
@@ -59,11 +80,20 @@ interface KanbanState {
   error: string | null;
   /** Optimistic status overrides keyed by local kanban task id */
   pendingMoves: Record<string, KanbanTaskStatus>;
-  autoFix: AutoFixStatusPayload | null;
+  autoCode: AutoCodeStatusPayload | null;
+  /** Auto Code progress lines keyed by local kanban task id. Populated from the
+   *  orchestrator's `log` events so the detail modal can stream progress for a
+   *  task that's actively coding. */
+  autoCodeLogs: Record<string, AutoCodeLogEntry[]>;
 
   loadTasks: () => Promise<void>;
   loadMembers: () => Promise<void>;
-  loadBacklog: () => Promise<void>;
+  /** Load the backlog from the provider. Re-fetches every page the user has
+   *  already scrolled through (so the 60s poll doesn't collapse a lazily-grown
+   *  list); pass `reset: true` (sort/assignee change) to start over at page 0. */
+  loadBacklog: (opts?: { reset?: boolean }) => Promise<void>;
+  /** Fetch the next backlog page and append (infinite scroll). */
+  loadMoreBacklog: () => Promise<void>;
   /** One-shot: import any task-linked terminal that doesn't have a matching KanbanTask yet.
    *  Returns the number of orphans migrated. Safe to call repeatedly — idempotent. */
   migrateOrphanTerminals: () => Promise<number>;
@@ -86,7 +116,7 @@ interface KanbanState {
   }) => Promise<KanbanTask | null>;
   /** Convert a local kanban task into a ClickUp-linked one by attaching a
    *  ClickUp task the user picked. Preserves the local workflow state
-   *  (column, worktree, session, auto-fix counters). */
+   *  (column, worktree, session, auto-code counters). */
   linkLocalToClickup: (localId: string, clickupTask: TaskManagerTask) => Promise<KanbanTask | null>;
   /** Move a task to a different column. If `orderIndex` is supplied, the
    *  task lands at that position; otherwise the main side bumps it to the
@@ -109,10 +139,16 @@ interface KanbanState {
   setAssigneeFilter: (assigneeId: string) => Promise<void>;
   setProjectFilter: (projectId: string) => Promise<void>;
   clearError: () => void;
-  refreshAutoFix: () => Promise<void>;
-  setAutoFixStatus: (payload: AutoFixStatusPayload) => void;
+  refreshAutoCode: () => Promise<void>;
+  setAutoCodeStatus: (payload: AutoCodeStatusPayload) => void;
   requeueTask: (taskId: string) => Promise<void>;
+  runTaskNow: (taskId: string) => Promise<void>;
   setTaskAutoMerge: (taskId: string, override: boolean | null) => Promise<void>;
+  /** Append an orchestrator progress line for a task (called from the global
+   *  Auto Code event subscription). */
+  appendAutoCodeLog: (taskId: string, entry: AutoCodeLogEntry) => void;
+  /** Drop the buffered progress lines for a task (e.g. when a fresh run starts). */
+  clearAutoCodeLog: (taskId: string) => void;
 }
 
 function upsertTask(tasks: KanbanTask[], task: KanbanTask): KanbanTask[] {
@@ -123,18 +159,51 @@ function upsertTask(tasks: KanbanTask[], task: KanbanTask): KanbanTask[] {
   return copy;
 }
 
+/** ClickUp returns fixed 100-task pages; a short page means we hit the end. */
+const BACKLOG_PAGE_SIZE = 100;
+
+/** Resolve list id + search filters for a backlog fetch from current settings.
+ *  `error: null` means the provider isn't ClickUp — clear the backlog silently. */
+function buildBacklogQuery():
+  | { ok: true; listId: string; filters: TaskSearchFilters }
+  | { ok: false; error: string | null } {
+  const settings = useSettingsStore.getState().settings;
+  if (settings.taskManagerProvider !== 'clickup') return { ok: false, error: null };
+  const listId = settings.kanbanBacklogListId || settings.clickupListId;
+  if (!listId) return { ok: false, error: 'No ClickUp list configured — set Tasks → List in Settings.' };
+  const statuses = (settings.kanbanBacklogStatuses || 'to do, open, backlog, planning, ready')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const assigneeId = settings.kanbanFilterAssigneeId?.trim();
+  const sort = BACKLOG_SORT_API_PARAMS[settings.kanbanBacklogSortBy] || BACKLOG_SORT_API_PARAMS['priority'];
+  return {
+    ok: true,
+    listId,
+    filters: {
+      statuses,
+      assignees: assigneeId ? [assigneeId] : undefined,
+      includeClosed: false,
+      orderBy: sort.orderBy,
+      reverse: sort.reverse,
+    },
+  };
+}
+
 export const useKanbanStore = create<KanbanState>((set, get) => ({
   tasks: [],
   backlog: [],
   backlogLoading: false,
+  backlogLoadingMore: false,
   backlogError: null,
+  backlogPage: 0,
+  backlogHasMore: false,
   members: [],
   membersLoading: false,
   membersError: null,
   loading: false,
   error: null,
   pendingMoves: {},
-  autoFix: null,
+  autoCode: null,
+  autoCodeLogs: {},
 
   loadTasks: async () => {
     set({ loading: true, error: null });
@@ -220,40 +289,74 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     return processed;
   },
 
-  loadBacklog: async () => {
-    const settings = useSettingsStore.getState().settings;
-    if (settings.taskManagerProvider !== 'clickup') {
-      set({ backlog: [], backlogError: null });
+  loadBacklog: async (opts) => {
+    const q = buildBacklogQuery();
+    if (!q.ok) {
+      set({ backlog: [], backlogError: q.error, backlogPage: 0, backlogHasMore: false });
       return;
     }
-    const listId = settings.kanbanBacklogListId || settings.clickupListId;
-    if (!listId) {
-      set({ backlog: [], backlogError: 'No ClickUp list configured — set Tasks → List in Settings.' });
-      return;
-    }
-    const statuses = (settings.kanbanBacklogStatuses || 'to do, open, backlog, planning, ready')
-      .split(',').map((s) => s.trim()).filter(Boolean);
-    const assigneeId = settings.kanbanFilterAssigneeId?.trim();
+    const depth = opts?.reset ? 1 : get().backlogPage + 1;
 
     set({ backlogLoading: true, backlogError: null });
     try {
-      const result = await window.electronAPI.searchTaskManagerTasks(
-        '',
-        {
-          statuses,
-          assignees: assigneeId ? [assigneeId] : undefined,
-          includeClosed: false,
-        },
-        listId,
-        0,
-      );
-      if (!result.success) {
-        set({ backlogLoading: false, backlogError: result.error || 'Failed to load backlog' });
-        return;
+      const all: TaskManagerTask[] = [];
+      let lastFetched = 0;
+      let hasMore = false;
+      for (let p = 0; p < depth; p++) {
+        const result = await window.electronAPI.searchTaskManagerTasks('', q.filters, q.listId, p);
+        if (!result.success) {
+          if (p === 0) {
+            set({ backlogLoading: false, backlogError: result.error || 'Failed to load backlog' });
+            return;
+          }
+          break; // keep the pages we got — the rest can re-load on scroll
+        }
+        const pageTasks = result.data || [];
+        all.push(...pageTasks);
+        lastFetched = p;
+        hasMore = pageTasks.length >= BACKLOG_PAGE_SIZE;
+        if (!hasMore) break;
       }
-      set({ backlog: result.data || [], backlogLoading: false });
+      // Dedupe across pages — server-side order can shift between fetches.
+      const seen = new Set<string>();
+      const deduped = all.filter((t) => !seen.has(t.id) && (seen.add(t.id), true));
+      set({
+        backlog: deduped,
+        backlogLoading: false,
+        backlogPage: lastFetched,
+        backlogHasMore: hasMore,
+      });
     } catch (err) {
       set({ backlogLoading: false, backlogError: err instanceof Error ? err.message : 'Failed to load backlog' });
+    }
+  },
+
+  loadMoreBacklog: async () => {
+    const { backlogHasMore, backlogLoading, backlogLoadingMore, backlogPage } = get();
+    if (!backlogHasMore || backlogLoading || backlogLoadingMore) return;
+    const q = buildBacklogQuery();
+    if (!q.ok) return;
+    const nextPage = backlogPage + 1;
+
+    set({ backlogLoadingMore: true });
+    try {
+      const result = await window.electronAPI.searchTaskManagerTasks('', q.filters, q.listId, nextPage);
+      if (!result.success) {
+        set({ backlogLoadingMore: false, backlogError: result.error || 'Failed to load more backlog tasks' });
+        return;
+      }
+      const pageTasks: TaskManagerTask[] = result.data || [];
+      set((state) => {
+        const seen = new Set(state.backlog.map((t) => t.id));
+        return {
+          backlog: [...state.backlog, ...pageTasks.filter((t) => !seen.has(t.id))],
+          backlogLoadingMore: false,
+          backlogPage: nextPage,
+          backlogHasMore: pageTasks.length >= BACKLOG_PAGE_SIZE,
+        };
+      });
+    } catch (err) {
+      set({ backlogLoadingMore: false, backlogError: err instanceof Error ? err.message : 'Failed to load more backlog tasks' });
     }
   },
 
@@ -432,9 +535,22 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
 
   deleteTask: async (taskId: string) => {
     try {
+      // Capture the record before removal — we need clickupTaskId to unlink terminals.
+      const deleted = get().tasks.find((t) => t.id === taskId);
       const result = await window.electronAPI.kanbanDelete(taskId);
       if (result.success) {
         set((state) => ({ tasks: state.tasks.filter((t) => t.id !== taskId) }));
+        // Unlink any terminals still pointing at this task. Without this, the
+        // boot-time migrateOrphanTerminals() sees a task-linked terminal with
+        // no KanbanTask and re-imports the deleted task on next launch.
+        if (deleted) {
+          const termStore = useTerminalStore.getState();
+          for (const term of termStore.terminals) {
+            if (term.task?.id === deleted.clickupTaskId) {
+              termStore.updateTerminal(term.id, { task: undefined });
+            }
+          }
+        }
       } else {
         set({ error: result.error || 'Failed to delete task' });
       }
@@ -464,24 +580,24 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 
-  refreshAutoFix: async () => {
+  refreshAutoCode: async () => {
     try {
-      const result = await window.electronAPI.autoFixStatus();
+      const result = await window.electronAPI.autoCodeStatus();
       if (result.success && result.data) {
         // Strip the tasks field since per-task state now lives on KanbanTask
         const { tasks: _drop, ...status } = result.data;
-        set({ autoFix: status as AutoFixStatusPayload });
+        set({ autoCode: status as AutoCodeStatusPayload });
       }
     } catch { /* non-critical */ }
   },
 
-  setAutoFixStatus: (payload: AutoFixStatusPayload) => {
-    set({ autoFix: payload });
+  setAutoCodeStatus: (payload: AutoCodeStatusPayload) => {
+    set({ autoCode: payload });
   },
 
   requeueTask: async (taskId: string) => {
     try {
-      const result = await window.electronAPI.autoFixRequeue(taskId);
+      const result = await window.electronAPI.autoCodeRequeue(taskId);
       if (result.success && result.data) {
         set((state) => ({ tasks: upsertTask(state.tasks, result.data) }));
       } else if (!result.success) {
@@ -492,8 +608,39 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
+  runTaskNow: async (taskId: string) => {
+    try {
+      const result = await window.electronAPI.autoCodeRunTask(taskId);
+      // Backend resolved the mode + launched the dispatch; the card updates via
+      // task-updated events. Surface the reason when there was nothing to run.
+      if (!result.success) {
+        set({ error: result.error || 'Auto Code could not run this task.' });
+      }
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to run Auto Code' });
+    }
+  },
+
   setTaskAutoMerge: async (taskId: string, override: boolean | null) => {
     await get().updateTask(taskId, { autoMergeOverride: override });
+  },
+
+  appendAutoCodeLog: (taskId: string, entry: AutoCodeLogEntry) => {
+    set((state) => {
+      const prev = state.autoCodeLogs[taskId] || [];
+      const next = [...prev, entry];
+      // Bound the buffer — drop the oldest lines past the cap.
+      if (next.length > AUTO_CODE_LOG_CAP) next.splice(0, next.length - AUTO_CODE_LOG_CAP);
+      return { autoCodeLogs: { ...state.autoCodeLogs, [taskId]: next } };
+    });
+  },
+
+  clearAutoCodeLog: (taskId: string) => {
+    set((state) => {
+      if (!state.autoCodeLogs[taskId]) return {} as Partial<KanbanState>;
+      const { [taskId]: _drop, ...rest } = state.autoCodeLogs;
+      return { autoCodeLogs: rest };
+    });
   },
 }));
 

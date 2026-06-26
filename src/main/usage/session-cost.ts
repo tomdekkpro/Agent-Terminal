@@ -27,7 +27,8 @@ export interface ModelPricing {
 }
 
 const PRICING: Record<string, ModelPricing> = {
-  // Opus 4.6 / 4.7 — current generation
+  // Opus 4.6 / 4.7 / 4.8 — current generation
+  'claude-opus-4-8': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   'claude-opus-4-7': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   'claude-opus-4-6': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   // Opus 4 (legacy — 3x more expensive than 4.6/4.7)
@@ -56,7 +57,7 @@ export function getModelPricing(model?: string | null): ModelPricing {
     if (model.startsWith(k)) return PRICING[k];
   }
   // Family fallback
-  if (/opus-4(?:-[67])\b/.test(model)) return PRICING['claude-opus-4-6'];
+  if (/opus-4(?:-[678])\b/.test(model)) return PRICING['claude-opus-4-6'];
   if (model.includes('opus')) return PRICING['claude-opus-4'];
   if (model.includes('haiku')) return PRICING['claude-haiku-4-5'];
   if (model.includes('sonnet')) return PRICING['claude-sonnet-4-6'];

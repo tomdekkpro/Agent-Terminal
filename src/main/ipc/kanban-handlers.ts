@@ -16,7 +16,7 @@ import {
 } from '../kanban/kanban-task-store';
 import { ClickUpProvider } from './providers/clickup';
 import { getSettings } from './settings-handlers';
-import { mapClickupStatusToKanban } from '../../shared/kanban-status-mapper';
+import { mapClickupStatusToKanban, statusMatchesAny } from '../../shared/kanban-status-mapper';
 import { computeDailyCostBreakdown } from '../usage/daily-cost-aggregator';
 
 const clickUpProvider = new ClickUpProvider();
@@ -83,17 +83,20 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
           }
         }
 
-        // Drop a stale 'awaiting-qc'/'fixing' badge if QC has moved the task
-        // out of the failed → retest → done auto-fix loop. Mirrors the same
-        // logic in auto-fix-orchestrator.refreshSnapshots so renderer-triggered
+        // Drop a stale 'awaiting-review'/'coding' badge if QC has moved the task
+        // out of the failed → retest → done auto-code loop. Mirrors the same
+        // logic in auto-code-orchestrator.refreshSnapshots so renderer-triggered
         // refreshes also reconcile the badge.
-        if (task.autoFixState === 'awaiting-qc' || task.autoFixState === 'fixing') {
-          const lower = (fresh.status.name || '').toLowerCase();
-          const retestStatus = (settings.autoFixRetestStatus || 'ready for review').toLowerCase();
-          const failedStatus = (settings.autoFixFailedStatus || 'failed').toLowerCase();
-          const doneStatus = (settings.autoFixDoneStatus || 'done').toLowerCase();
-          if (lower !== retestStatus && lower !== failedStatus && lower !== doneStatus) {
-            patch.autoFixState = 'idle';
+        if (task.autoCodeState === 'awaiting-review' || task.autoCodeState === 'coding') {
+          const name = fresh.status.name || '';
+          const inLoop =
+            statusMatchesAny(name, settings.autoCodeReviewStatus, 'ready for review') ||
+            statusMatchesAny(name, settings.autoCodeFailedStatus, 'failed') ||
+            statusMatchesAny(name, settings.autoCodeReviewFailedStatus, 'review failed') ||
+            statusMatchesAny(name, settings.codeReviewStatuses, 'ready for review') ||
+            statusMatchesAny(name, settings.autoCodeDoneStatus, 'done');
+          if (!inLoop) {
+            patch.autoCodeState = 'idle';
           }
         }
 

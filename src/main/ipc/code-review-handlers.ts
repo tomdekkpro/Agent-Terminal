@@ -6,6 +6,7 @@ import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem } from '../../shared/types';
 import { getSettings } from './settings-handlers';
+import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
 import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from './providers/agent-registry';
@@ -331,11 +332,13 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
   title: string;
   url: string;
   branch: string;
+  baseBranch: string;
+  author: string;
   state: string;
   mergeable: string;
 }> {
   const infoJson = await ghExec(
-    `gh pr view ${prNumber} --json title,url,headRefName,state,mergeable`,
+    `gh pr view ${prNumber} --json title,url,headRefName,baseRefName,author,state,mergeable`,
     projectPath,
   );
   const info = JSON.parse(infoJson);
@@ -343,9 +346,37 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
     title: info.title,
     url: info.url,
     branch: info.headRefName,
+    baseBranch: info.baseRefName || '',
+    author: info.author?.login || '',
     state: (info.state || '').toUpperCase(),
     mergeable: (info.mergeable || '').toUpperCase(),
   };
+}
+
+/** PR metadata shown in the review list (branch, base branch, author, title) */
+type PRMetadata = { url?: string; branch?: string; baseBranch?: string; author?: string; title?: string };
+
+/** Fetch metadata for all open PRs in one gh call, keyed by PR number */
+async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRMetadata>> {
+  const map = new Map<number, PRMetadata>();
+  try {
+    const json = await ghExec(
+      `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit 200`,
+      projectPath,
+    );
+    for (const pr of JSON.parse(json)) {
+      map.set(pr.number, {
+        url: pr.url,
+        branch: pr.headRefName,
+        baseBranch: pr.baseRefName,
+        author: pr.author?.login,
+        title: pr.title,
+      });
+    }
+  } catch {
+    // gh CLI not available or not in a repo — list will just lack metadata
+  }
+  return map;
 }
 
 /** Run AI code review on a PR diff using Claude CLI */
@@ -876,6 +907,17 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
               // Non-critical
             }
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} FAILED with ${result.findings.length} findings`);
+            const crit = result.findings.filter((f) => f.severity === 'critical').length;
+            recordActivity({
+              source: 'code-review',
+              kind: 'review-failed',
+              level: 'error',
+              title: `Code review failed: ${task.name || `PR #${prNumber}`}`,
+              message: `${result.findings.length} finding(s)${crit ? `, ${crit} critical` : ''} on PR #${prNumber}.`,
+              clickupTaskId: task.id,
+              taskName: task.name,
+              url: prInfo.url,
+            });
           }
 
           sendReviewEvent(getWindow, {
@@ -1001,6 +1043,12 @@ export function registerCodeReviewHandlers(
         // Resolve PR info for each task (checks description, comments, and branch matching)
         // Each task contains a prs array with all its open PRs
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
+
+        // Fetch metadata (branch, base branch, author) for all open PRs in one gh call
+        const prMeta = effectiveProjectPath
+          ? await fetchOpenPRMetadata(effectiveProjectPath)
+          : new Map();
+
         const items: CodeReviewItem[] = [];
         for (const task of filteredTasks) {
           const foundPRs = await findPRsForTask(task, effectiveProjectPath);
@@ -1013,12 +1061,19 @@ export function registerCodeReviewHandlers(
             prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
             status: 'pending' as const,
             findings: [],
-            prs: foundPRs.map((pr) => ({
-              prNumber: pr.prNumber,
-              prUrl: pr.prUrl ?? undefined,
-              status: 'pending' as const,
-              findings: [],
-            })),
+            prs: foundPRs.map((pr) => {
+              const meta = prMeta.get(pr.prNumber);
+              return {
+                prNumber: pr.prNumber,
+                prUrl: pr.prUrl ?? meta?.url ?? undefined,
+                prTitle: meta?.title,
+                prBranch: meta?.branch,
+                prBaseBranch: meta?.baseBranch,
+                prAuthor: meta?.author,
+                status: 'pending' as const,
+                findings: [],
+              };
+            }),
           });
         }
 
@@ -1075,7 +1130,7 @@ export function registerCodeReviewHandlers(
         if (prInfo.state !== 'OPEN') {
           const msg = `PR #${prNumber} is ${prInfo.state.toLowerCase()}, skipped.`;
           sendReviewEvent(getWindow, { type: 'done', taskId, status: 'skipped', message: msg });
-          return { success: true, data: { passed: false, findings: [], prTitle: prInfo.title, prUrl: prInfo.url, prBranch: prInfo.branch, skipped: true } };
+          return { success: true, data: { passed: false, findings: [], prTitle: prInfo.title, prUrl: prInfo.url, prBranch: prInfo.branch, prBaseBranch: prInfo.baseBranch, prAuthor: prInfo.author, skipped: true } };
         }
 
         sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing PR #${prNumber}...` });
@@ -1119,6 +1174,8 @@ export function registerCodeReviewHandlers(
             prTitle: prInfo.title,
             prUrl: prInfo.url,
             prBranch: prInfo.branch,
+            prBaseBranch: prInfo.baseBranch,
+            prAuthor: prInfo.author,
           },
         };
       } catch (error) {
@@ -1258,6 +1315,8 @@ export function registerCodeReviewHandlers(
             prNumber,
             prUrl: info.url,
             prBranch: info.branch,
+            prBaseBranch: info.baseBranch,
+            prAuthor: info.author,
             prTitle: info.title,
             state: info.state,
           },

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -47,16 +47,22 @@ interface TerminalPanelProps {
   onDragHandleStart?: (e: React.DragEvent) => void;
   onDragHandleEnd?: (e: React.DragEvent) => void;
   isDraggedOver?: boolean;
+  /** Hide the built-in toolbar — used when an outer surface (the Kanban task
+   *  modal) renders its own unified action row above the terminal. */
+  hideToolbar?: boolean;
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico']);
 
 /** Actions dropdown — sends prompt-based actions to the agent terminal */
-function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteControl }: {
+export function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteControl, align = 'right' }: {
   terminal: Terminal;
   isSplit?: boolean;
   onMergeComplete?: () => void;
   onMobileRemoteControl?: () => void;
+  /** Which edge the menu aligns to. Right by default (toolbar lives at the
+   *  right); pass 'left' when the trigger sits at the left of its row. */
+  align?: 'left' | 'right';
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -172,7 +178,10 @@ function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteCon
         <ChevronDown className="w-3 h-3 opacity-60" />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-30 py-1 overflow-hidden">
+        <div className={cn(
+          'absolute top-full mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-30 py-1 overflow-hidden',
+          align === 'left' ? 'left-0' : 'right-0',
+        )}>
           {visibleActions.map((a, i) => (
             <button
               key={i}
@@ -363,7 +372,7 @@ const TERMINAL_THEME = {
   brightWhite: '#f8fafc',
 };
 
-export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onBaseBranchChange, availableBranches, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver }: TerminalPanelProps) {
+export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onBaseBranchChange, availableBranches, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver, hideToolbar }: TerminalPanelProps) {
   const currentProvider = agentProviders.find((p) => p.id === terminal.agentProvider) || agentProviders[0];
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -458,7 +467,13 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
 
   // Base branch picker state
   const [showBaseBranchMenu, setShowBaseBranchMenu] = useState(false);
+  const [baseBranchQuery, setBaseBranchQuery] = useState('');
   const baseBranchMenuRef = useRef<HTMLDivElement>(null);
+
+  // Reset the branch search box each time the dropdown opens
+  useEffect(() => {
+    if (showBaseBranchMenu) setBaseBranchQuery('');
+  }, [showBaseBranchMenu]);
 
   // Close provider dropdown on outside click
   useEffect(() => {
@@ -862,7 +877,9 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
 
   return (
     <div ref={panelRef} className="flex flex-col h-full relative" onClick={onFocus}>
-      {/* Terminal toolbar */}
+      {/* Terminal toolbar — hidden when embedded in the Kanban task modal,
+          which renders its own unified action row above the terminal. */}
+      {!hideToolbar && (
       <div className={cn(
         'h-9 bg-[var(--bg-card)] border-b border-[var(--border)] flex items-center px-3 justify-between shrink-0',
         isSplit && isActive && 'border-b-[var(--accent)]',
@@ -1009,29 +1026,60 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 <span className="font-mono">{terminal.baseBranch}</span>
                 <ChevronDown className="w-2.5 h-2.5 opacity-50" />
               </button>
-              {showBaseBranchMenu && availableBranches && (
-                <div className="absolute top-full left-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-20 max-h-[200px] overflow-y-auto min-w-[140px]">
-                  {availableBranches.map((branch) => (
-                    <button
-                      key={branch}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onBaseBranchChange?.(branch);
-                        setShowBaseBranchMenu(false);
-                      }}
-                      className={cn(
-                        'w-full text-left px-3 py-1.5 text-xs font-mono transition-colors flex items-center gap-1.5',
-                        branch === terminal.baseBranch
-                          ? 'bg-emerald-500/10 text-emerald-400'
-                          : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+              {showBaseBranchMenu && availableBranches && (() => {
+                const q = baseBranchQuery.trim().toLowerCase();
+                const filtered = q ? availableBranches.filter((b) => b.toLowerCase().includes(q)) : availableBranches;
+                return (
+                  <div className="absolute top-full left-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-20 min-w-[200px] overflow-hidden">
+                    <div className="p-1.5 border-b border-[var(--border)]">
+                      <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)]">
+                        <Search className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
+                        <input
+                          type="text"
+                          autoFocus
+                          value={baseBranchQuery}
+                          onChange={(e) => setBaseBranchQuery(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { setShowBaseBranchMenu(false); }
+                            if (e.key === 'Enter' && filtered.length > 0) {
+                              onBaseBranchChange?.(filtered[0]);
+                              setShowBaseBranchMenu(false);
+                            }
+                          }}
+                          placeholder="Search branches…"
+                          className="flex-1 min-w-0 bg-transparent text-xs text-[var(--text-primary)] focus:outline-none placeholder:text-[var(--text-muted)]"
+                        />
+                      </div>
+                    </div>
+                    <div className="max-h-[200px] overflow-y-auto">
+                      {filtered.length === 0 && (
+                        <div className="px-3 py-2.5 text-xs text-[var(--text-muted)]">No branches match “{baseBranchQuery.trim()}”.</div>
                       )}
-                    >
-                      <GitBranch className="w-2.5 h-2.5 shrink-0 text-[var(--text-muted)]" />
-                      {branch}
-                    </button>
-                  ))}
-                </div>
-              )}
+                      {filtered.map((branch) => (
+                        <button
+                          key={branch}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onBaseBranchChange?.(branch);
+                            setShowBaseBranchMenu(false);
+                          }}
+                          className={cn(
+                            'w-full text-left px-3 py-1.5 text-xs font-mono transition-colors flex items-center gap-1.5',
+                            branch === terminal.baseBranch
+                              ? 'bg-emerald-500/10 text-emerald-400'
+                              : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                          )}
+                        >
+                          <GitBranch className="w-2.5 h-2.5 shrink-0 text-[var(--text-muted)]" />
+                          {branch}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
           {!terminal.task && !terminal.worktreePath && isSplit && (
@@ -1214,6 +1262,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
         </div>
       </div>
+      )}
 
       {/* Remote control dialog */}
       {remoteUrl && (

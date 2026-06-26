@@ -3,6 +3,7 @@ import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
   FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
+  GitBranch, ArrowRight, User,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -144,7 +145,6 @@ function PRRow({
             <StatusIcon className={cn('w-3.5 h-3.5 shrink-0', status.color, isReviewing && 'animate-spin')} />
             <span className="text-xs font-medium text-[var(--text-primary)]">PR #{pr.prNumber}</span>
             {pr.prTitle && <span className="text-xs text-[var(--text-muted)] truncate">{pr.prTitle}</span>}
-            {pr.prBranch && <code className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded">{pr.prBranch}</code>}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -192,6 +192,32 @@ function PRRow({
             )}
           </div>
         </div>
+
+        {/* Branch flow + author */}
+        {(pr.prBranch || pr.prBaseBranch || pr.prAuthor) && (
+          <div className="flex items-center gap-3 mt-2 flex-wrap">
+            {(pr.prBranch || pr.prBaseBranch) && (
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" title="Source branch → target branch">
+                <GitBranch className="w-3 h-3 shrink-0" />
+                {pr.prBranch && (
+                  <code className="text-[10px] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded text-[var(--text-secondary)]">{pr.prBranch}</code>
+                )}
+                {pr.prBaseBranch && (
+                  <>
+                    <ArrowRight className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
+                    <code className="text-[10px] bg-[var(--accent)]/10 text-[var(--accent)] px-1.5 py-0.5 rounded font-medium">{pr.prBaseBranch}</code>
+                  </>
+                )}
+              </div>
+            )}
+            {pr.prAuthor && (
+              <div className="flex items-center gap-1 text-[11px] text-[var(--text-muted)]" title="PR author">
+                <User className="w-3 h-3 shrink-0" />
+                <span>{pr.prAuthor}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {pr.findings.length > 0 && (
           <div className="flex items-center gap-3 mt-2">

@@ -57,9 +57,9 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     try {
       const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber);
       if (result.success) {
-        const { passed, findings, prTitle, prUrl, prBranch, skipped } = result.data;
+        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, skipped } = result.data;
         if (skipped) {
-          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prTitle });
+          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle });
           return;
         }
         get().updatePR(taskId, prNumber, {
@@ -67,6 +67,8 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           findings,
           prUrl,
           prBranch,
+          prBaseBranch,
+          prAuthor,
           prTitle,
           reviewedAt: new Date().toISOString(),
         });
@@ -142,7 +144,7 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       if (!result.success) {
         return { success: false, error: result.error };
       }
-      const { prNumber, prUrl, prBranch, prTitle } = result.data;
+      const { prNumber, prUrl, prBranch, prBaseBranch, prAuthor, prTitle } = result.data;
       const item = get().items.find((i) => i.taskId === taskId);
       if (!item) return { success: false, error: 'Task not found' };
       if (item.prs.some((p) => p.prNumber === prNumber)) {
@@ -152,6 +154,8 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
         prNumber,
         prUrl,
         prBranch,
+        prBaseBranch,
+        prAuthor,
         prTitle,
         status: 'pending',
         findings: [],

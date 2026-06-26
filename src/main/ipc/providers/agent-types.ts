@@ -39,6 +39,22 @@ export interface IAgentProvider {
   /** Build the shell command string to resume / continue a session */
   buildResumeCommand(options: AgentInvokeOptions): string;
 
+  /** (Optional) Build the argv for a non-interactive, single-shot "headless"
+   *  run used by the auto-code orchestrator. The fix prompt is piped to stdin;
+   *  `cwd` is the isolated worktree the agent runs in. Return null if the
+   *  agent has no headless mode (the orchestrator escalates the task).
+   *  Implement this iff capabilities.headless is true.
+   *  `jsonOutput` asks the agent to emit a single machine-readable result
+   *  object (parsed by parseHeadlessResult) instead of plain text — used so
+   *  the orchestrator can recover the session id + final summary. */
+  buildHeadlessArgs?(options: { model?: string; cwd: string; jsonOutput?: boolean }): string[] | null;
+
+  /** (Optional) Parse the stdout of a headless run that was launched with
+   *  `jsonOutput: true`. Returns the resumable session id and the agent's
+   *  final summary message when available. Returns null if stdout couldn't be
+   *  parsed (the orchestrator then falls back to git-derived facts). */
+  parseHeadlessResult?(stdout: string): { sessionId?: string; summary?: string } | null;
+
   /** Extract usage / cost data from a chunk of terminal output */
   parseUsageFromOutput(data: string): AgentUsageData | null;
 

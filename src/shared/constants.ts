@@ -12,6 +12,8 @@ export const IPC_CHANNELS = {
   TERMINAL_AGENT_SESSION: 'terminal:agent-session',
   TERMINAL_AGENT_BUSY: 'terminal:agent-busy',
   TERMINAL_AGENT_LIST: 'terminal:agent-list',
+  /** Emitted when a resume can't run because its working dir is gone */
+  TERMINAL_RESUME_FAILED: 'terminal:resume-failed',
   // Legacy aliases (delegate to generic)
   TERMINAL_INVOKE_CLAUDE: 'terminal:invoke-claude',
   TERMINAL_INVOKE_COPILOT: 'terminal:invoke-copilot',
@@ -154,14 +156,21 @@ export const IPC_CHANNELS = {
   KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',
   KANBAN_EVENT: 'kanban:event',
   KANBAN_DAILY_COST: 'kanban:daily-cost',
-  // Auto-Fix Loop
-  AUTO_FIX_STATUS: 'auto-fix:status',
-  AUTO_FIX_START: 'auto-fix:start',
-  AUTO_FIX_STOP: 'auto-fix:stop',
-  AUTO_FIX_RUN_NOW: 'auto-fix:run-now',
-  AUTO_FIX_REQUEUE: 'auto-fix:requeue',
-  AUTO_FIX_SET_TASK_AUTOMERGE: 'auto-fix:set-task-automerge',
-  AUTO_FIX_EVENT: 'auto-fix:event',
+  // Auto Code Loop
+  AUTO_CODE_STATUS: 'auto-code:status',
+  AUTO_CODE_START: 'auto-code:start',
+  AUTO_CODE_STOP: 'auto-code:stop',
+  AUTO_CODE_RUN_NOW: 'auto-code:run-now',
+  AUTO_CODE_RUN_TASK: 'auto-code:run-task',
+  AUTO_CODE_REQUEUE: 'auto-code:requeue',
+  AUTO_CODE_SET_TASK_AUTOMERGE: 'auto-code:set-task-automerge',
+  AUTO_CODE_EVENT: 'auto-code:event',
+  // Activity Feed (cross-project autonomous-loop timeline + notifications)
+  ACTIVITY_LIST: 'activity:list',
+  ACTIVITY_MARK_READ: 'activity:mark-read',
+  ACTIVITY_MARK_ALL_READ: 'activity:mark-all-read',
+  ACTIVITY_CLEAR: 'activity:clear',
+  ACTIVITY_EVENT: 'activity:event',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
   CLAUDE_SESSION_EXISTS: 'claude-sessions:exists',
@@ -179,6 +188,7 @@ export const IPC_CHANNELS = {
   FILES_LOAD_CLAUDE_SKILLS: 'files:load-claude-skills',
   FILES_READ_FILE: 'files:read-file',
   FILES_SAVE_CLAUDE_SKILL: 'files:save-claude-skill',
+  FILES_PATH_EXISTS: 'files:path-exists',
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',
