@@ -16,18 +16,17 @@ import {
   Folder,
   FolderOpen,
   Bell,
+  Columns3,
+  Check,
 } from 'lucide-react';
 import {
   useKanbanStore,
   subscribeKanbanEvents,
-  KANBAN_COLUMN_ORDER,
-  KANBAN_COLUMN_LABELS,
-  KANBAN_COLUMN_COLORS,
 } from '../../stores/kanban-store';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import type { KanbanTask, KanbanTaskStatus } from '../../../shared/types';
-import { cn, parseTimestamp } from '../../../shared/utils';
+import type { KanbanTask } from '../../../shared/types';
+import { cn, parseTimestamp, csvToLowerSet, toggleInCsv } from '../../../shared/utils';
 import { KanbanColumn } from './KanbanColumn';
 import { BacklogColumn } from './BacklogColumn';
 import { ImportTaskModal } from './ImportTaskModal';
@@ -76,6 +75,7 @@ interface KanbanViewProps {
 export function KanbanView(_props: KanbanViewProps) {
   const {
     tasks,
+    statuses,
     backlog,
     backlogLoading,
     backlogLoadingMore,
@@ -89,6 +89,7 @@ export function KanbanView(_props: KanbanViewProps) {
     pendingMoves,
     autoCode,
     loadTasks,
+    loadStatuses,
     loadMembers,
     loadBacklog,
     loadMoreBacklog,
@@ -117,6 +118,8 @@ export function KanbanView(_props: KanbanViewProps) {
   const assigneeFilter = useSettingsStore((s) => s.settings.kanbanFilterAssigneeId);
   const projectFilter = useSettingsStore((s) => s.settings.kanbanFilterProjectId);
   const backlogSortBy = useSettingsStore((s) => s.settings.kanbanBacklogSortBy);
+  const hiddenStatusesCsv = useSettingsStore((s) => s.settings.kanbanHiddenStatuses);
+  const collapsedStatusesCsv = useSettingsStore((s) => s.settings.kanbanCollapsedStatuses);
   const updateSettings = useSettingsStore((s) => s.updateSettings);
 
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -124,6 +127,8 @@ export function KanbanView(_props: KanbanViewProps) {
   const [showProjectDropdown, setShowProjectDropdown] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showCreateLocal, setShowCreateLocal] = useState(false);
+  const [showColumnsMenu, setShowColumnsMenu] = useState(false);
+  const columnsMenuRef = useRef<HTMLDivElement>(null);
   const [importingBacklogIds, setImportingBacklogIds] = useState<Set<string>>(new Set());
   const [activeTaskModalId, setActiveTaskModalId] = useState<string | null>(null);
   const [autoCodeFilter, setAutoCodeFilter] = useState<'coding' | 'awaiting-review' | 'escalated' | null>(null);
@@ -143,10 +148,11 @@ export function KanbanView(_props: KanbanViewProps) {
   useEffect(() => {
     loadTasks();
     if (taskManagerProvider !== 'none') {
+      loadStatuses();
       loadMembers();
       loadBacklog();
     }
-  }, [taskManagerProvider, loadTasks, loadMembers, loadBacklog]);
+  }, [taskManagerProvider, loadTasks, loadStatuses, loadMembers, loadBacklog]);
 
   // Reload the backlog when the assignee filter changes (driven by settings).
   // Re-seed the "seen" set so switching assignees re-populates silently instead
@@ -206,6 +212,9 @@ export function KanbanView(_props: KanbanViewProps) {
       }
       if (projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
         setShowProjectDropdown(false);
+      }
+      if (columnsMenuRef.current && !columnsMenuRef.current.contains(e.target as Node)) {
+        setShowColumnsMenu(false);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -310,32 +319,68 @@ export function KanbanView(_props: KanbanViewProps) {
     visibleBacklog.forEach((t) => seenBacklogIds.current!.add(t.id));
   }, [backlogLoadingMore, visibleBacklog]);
 
-  // Group tasks by their local kanbanStatus, honouring optimistic moves.
-  // Within each column we sort by orderIndex (ascending) so the order is
-  // stable across refreshes and only changes when the user drags+drops.
-  // Backfill: tasks missing orderIndex sort to the bottom of their column,
-  // ordered amongst themselves by createdAt to stay deterministic.
+  // Build the board columns: the configured list's ClickUp statuses (in
+  // ClickUp's own order), then any statuses present on tasks but not in that
+  // set (tasks from other lists, or local "Local" tasks) appended so a task is
+  // never hidden just because its status isn't in the primary list.
+  const columns = useMemo(() => {
+    const cols: { name: string; color: string }[] = [];
+    const seen = new Set<string>();
+    for (const s of statuses) {
+      const key = s.name.trim().toLowerCase();
+      if (key && !seen.has(key)) { seen.add(key); cols.push({ name: s.name, color: s.color }); }
+    }
+    for (const t of visibleTasks) {
+      const name = (pendingMoves[t.id] || t.clickupStatus || '').trim();
+      const key = name.toLowerCase();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        cols.push({ name, color: t.clickupStatusColor || '#94a3b8' });
+      }
+    }
+    return cols;
+  }, [statuses, visibleTasks, pendingMoves]);
+
+  // Group tasks into columns by their (effective) ClickUp status — matched
+  // case-insensitively, honouring optimistic moves. Within each column we sort
+  // by orderIndex (ascending) so order is stable across refreshes and only
+  // changes when the user drags+drops. Tasks missing orderIndex sort to the
+  // bottom by createdAt to stay deterministic.
   const tasksByStatus = useMemo(() => {
-    const by: Record<KanbanTaskStatus, KanbanTask[]> = {
-      'todo': [],
-      'in-progress': [],
-      'review': [],
-      'failed': [],
-      'done': [],
-    };
+    const by: Record<string, KanbanTask[]> = {};
+    for (const c of columns) by[c.name.toLowerCase()] = [];
     for (const task of visibleTasks) {
-      const effective = pendingMoves[task.id] || task.kanbanStatus;
-      by[effective]?.push(task);
+      const key = (pendingMoves[task.id] || task.clickupStatus || '').trim().toLowerCase();
+      if (!key) continue;
+      (by[key] ||= []).push(task);
     }
     const orderKey = (t: KanbanTask) =>
       typeof t.orderIndex === 'number'
         ? t.orderIndex
         : Date.parse(t.createdAt || '') || Number.MAX_SAFE_INTEGER;
-    for (const status of Object.keys(by) as KanbanTaskStatus[]) {
-      by[status].sort((a, b) => orderKey(a) - orderKey(b));
+    for (const key of Object.keys(by)) {
+      by[key].sort((a, b) => orderKey(a) - orderKey(b));
     }
     return by;
-  }, [visibleTasks, pendingMoves]);
+  }, [visibleTasks, pendingMoves, columns]);
+
+  // Per-column visibility + collapse, persisted as CSV in settings. Hidden
+  // columns aren't rendered at all (their cards never mount); collapsed columns
+  // render as a thin rail. Both are full user control over the board.
+  const hiddenSet = useMemo(() => csvToLowerSet(hiddenStatusesCsv), [hiddenStatusesCsv]);
+  const collapsedSet = useMemo(() => csvToLowerSet(collapsedStatusesCsv), [collapsedStatusesCsv]);
+  const visibleColumns = useMemo(
+    () => columns.filter((c) => !hiddenSet.has(c.name.toLowerCase())),
+    [columns, hiddenSet],
+  );
+  const toggleColumnHidden = useCallback(
+    (name: string) => void updateSettings({ kanbanHiddenStatuses: toggleInCsv(hiddenStatusesCsv, name) }),
+    [hiddenStatusesCsv, updateSettings],
+  );
+  const toggleColumnCollapsed = useCallback(
+    (name: string) => void updateSettings({ kanbanCollapsedStatuses: toggleInCsv(collapsedStatusesCsv, name) }),
+    [collapsedStatusesCsv, updateSettings],
+  );
 
   const selectedMember = members.find((m) => m.id === assigneeFilter);
   const selectedProject = projects.find((p) => p.id === projectFilter);
@@ -348,7 +393,7 @@ export function KanbanView(_props: KanbanViewProps) {
   );
 
   const handleDrop = useCallback(
-    (to: KanbanTaskStatus) => {
+    (to: string) => {
       if (!draggingTaskId) return;
       moveTask(draggingTaskId, to);
       setDraggingTaskId(null);
@@ -361,7 +406,7 @@ export function KanbanView(_props: KanbanViewProps) {
    *  user released — not always at the bottom. The dragged task is excluded
    *  from neighbor lookup so same-column reorders work too. */
   const handleDropOnCard = useCallback(
-    (targetTaskId: string, position: 'before' | 'after', status: KanbanTaskStatus) => {
+    (targetTaskId: string, position: 'before' | 'after', status: string) => {
       if (!draggingTaskId || draggingTaskId === targetTaskId) {
         setDraggingTaskId(null);
         return;
@@ -371,11 +416,12 @@ export function KanbanView(_props: KanbanViewProps) {
         typeof t.orderIndex === 'number'
           ? t.orderIndex
           : Date.parse(t.createdAt || '') || Number.MAX_SAFE_INTEGER;
+      const statusKey = status.trim().toLowerCase();
       const colTasks = tasks
         .filter((t) => {
           if (t.id === draggingTaskId) return false;
-          const eff = pendingMoves[t.id] || t.kanbanStatus;
-          return eff === status;
+          const eff = (pendingMoves[t.id] || t.clickupStatus || '').trim().toLowerCase();
+          return eff === statusKey;
         })
         .sort((a, b) => orderKey(a) - orderKey(b));
 
@@ -481,13 +527,15 @@ export function KanbanView(_props: KanbanViewProps) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="border-b border-[var(--border)] bg-[var(--bg-secondary)] px-6 py-4">
+      <div className="border-b border-[var(--border)] glass px-6 py-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
-            <Kanban className="w-5 h-5 text-blue-400" />
-            <h1 className="text-lg font-semibold text-[var(--text-primary)]">Kanban Board</h1>
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] shadow-[var(--glow-accent)]">
+              <Kanban className="w-[18px] h-[18px]" />
+            </span>
+            <h1 className="font-display text-lg font-semibold tracking-tight text-[var(--text-primary)]">Kanban Board</h1>
             {visibleTasks.length > 0 && (
-              <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">
+              <span className="font-mono-ui text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/80 border border-[var(--border)] px-2 py-0.5 rounded-full">
                 {visibleTasks.length}
                 {assigneeFilter && tasks.length !== visibleTasks.length ? ` of ${tasks.length}` : ''}
               </span>
@@ -511,6 +559,58 @@ export function KanbanView(_props: KanbanViewProps) {
               <Plus className="w-4 h-4" />
               Import from ClickUp
             </button>
+            {/* Column visibility control */}
+            <div className="relative" ref={columnsMenuRef}>
+              <button
+                onClick={() => setShowColumnsMenu((s) => !s)}
+                title="Show or hide status columns"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium bg-[var(--bg-tertiary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/80 transition-colors',
+                  hiddenSet.size > 0 && 'text-[var(--accent)]',
+                )}
+              >
+                <Columns3 className="w-4 h-4" />
+                Columns
+                {hiddenSet.size > 0 && (
+                  <span className="font-mono-ui text-[10px] bg-[var(--accent-soft)] text-[var(--accent)] rounded-full px-1.5">
+                    {hiddenSet.size} hidden
+                  </span>
+                )}
+                <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] transition-transform', showColumnsMenu && 'rotate-180')} />
+              </button>
+              {showColumnsMenu && (
+                <div className="absolute z-50 top-full right-0 mt-1 min-w-[260px] max-h-[70vh] overflow-y-auto glass-card border border-[var(--border)] rounded-xl shadow-xl py-1.5">
+                  <div className="px-3 py-1.5 text-[10px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+                    Show columns
+                  </div>
+                  {columns.length === 0 && (
+                    <div className="px-3 py-2 text-xs text-[var(--text-muted)]">No statuses loaded yet.</div>
+                  )}
+                  {columns.map((col) => {
+                    const visible = !hiddenSet.has(col.name.toLowerCase());
+                    return (
+                      <button
+                        key={col.name}
+                        onClick={() => toggleColumnHidden(col.name)}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-[var(--bg-tertiary)] transition-colors"
+                      >
+                        <span className={cn(
+                          'w-4 h-4 rounded-md border flex items-center justify-center shrink-0',
+                          visible ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--border)]',
+                        )}>
+                          {visible && <Check className="w-3 h-3 text-white" />}
+                        </span>
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: col.color }} />
+                        <span className={cn('truncate flex-1 text-left', !visible && 'text-[var(--text-muted)]')}>{col.name}</span>
+                        <span className="font-mono-ui text-[10px] text-[var(--text-muted)] shrink-0">
+                          {(tasksByStatus[col.name.toLowerCase()] || []).length}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             <button
               onClick={() => refreshClickupSnapshots()}
               disabled={loading}
@@ -821,19 +921,21 @@ export function KanbanView(_props: KanbanViewProps) {
               onLoadMore={() => void loadMoreBacklog()}
               onStart={handleStartFromBacklog}
             />
-            {KANBAN_COLUMN_ORDER.map((status) => (
+            {visibleColumns.map((col) => (
               <KanbanColumn
-                key={status}
-                status={status}
-                label={KANBAN_COLUMN_LABELS[status]}
-                color={KANBAN_COLUMN_COLORS[status]}
-                tasks={tasksByStatus[status]}
+                key={col.name}
+                status={col.name}
+                label={col.name}
+                color={col.color}
+                tasks={tasksByStatus[col.name.toLowerCase()] || []}
                 terminalsByTaskId={terminalsByClickupId}
                 maxIterations={autoCodeMaxIterations || 3}
                 autoMergeGlobal={autoCodeAutoMerge}
                 autoCodeGlobal={autoCodeEnabled}
                 autoCodeFilter={autoCodeFilter}
                 pendingMoves={pendingMoves}
+                collapsed={collapsedSet.has(col.name.toLowerCase())}
+                onToggleCollapse={toggleColumnCollapsed}
                 draggingTaskId={draggingTaskId}
                 onDragStart={setDraggingTaskId}
                 onDragEnd={() => setDraggingTaskId(null)}

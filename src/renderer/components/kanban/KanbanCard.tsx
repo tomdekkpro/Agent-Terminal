@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ExternalLink,
   Terminal as TerminalIcon,
@@ -16,9 +17,13 @@ import {
   Play,
   FolderOpen,
   Zap,
+  ChevronDown,
+  Check,
+  Rocket,
 } from 'lucide-react';
 import type { KanbanTask, AutoCodeTaskState } from '../../../shared/types';
 import type { Terminal } from '../../stores/terminal-store';
+import { useKanbanStore } from '../../stores/kanban-store';
 import { cn } from '../../../shared/utils';
 
 interface KanbanCardProps {
@@ -107,6 +112,47 @@ export function KanbanCard({
    *  Renders a thin highlighted line above ('before') or below ('after')
    *  the card so the user sees where the released item will land. */
   const [insertHint, setInsertHint] = useState<'before' | 'after' | null>(null);
+
+  // Inline status dropdown — change ClickUp status straight from the card.
+  // Rendered through a portal (fixed position) so the column's scroll doesn't
+  // clip it. Reads the board's statuses + write-back action from the store.
+  const statuses = useKanbanStore((s) => s.statuses);
+  const moveTask = useKanbanStore((s) => s.moveTask);
+  const [statusMenu, setStatusMenu] = useState<{ top: number; left: number } | null>(null);
+  const statusBtnRef = useRef<HTMLButtonElement>(null);
+  const statusMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!statusMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (statusMenuRef.current?.contains(e.target as Node)) return;
+      setStatusMenu(null);
+    };
+    const onScroll = () => setStatusMenu(null);
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [statusMenu]);
+
+  const openStatusMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const r = statusBtnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setStatusMenu({ top: r.bottom + 4, left: r.left });
+  };
+  const pickStatus = (e: React.MouseEvent, name: string) => {
+    e.stopPropagation();
+    setStatusMenu(null);
+    if (name.trim().toLowerCase() !== (task.clickupStatus || '').trim().toLowerCase()) {
+      void moveTask(task.id, name);
+    }
+  };
+
   const badge = autoCodeBadge(task.autoCodeState);
   const iteration = task.iterationCount || 0;
   const isEscalated = task.autoCodeState === 'escalated';
@@ -185,10 +231,10 @@ export function KanbanCard({
       }}
       onClick={onClick}
       className={cn(
-        'group relative border rounded-lg bg-[var(--bg-primary)] p-3 cursor-grab active:cursor-grabbing transition-all',
-        'hover:border-[var(--accent)]/50',
+        'group lift relative border rounded-xl bg-[var(--bg-card)] p-3 cursor-grab active:cursor-grabbing shadow-[var(--shadow-card)]',
+        'hover:border-[var(--accent)]/50 hover:shadow-[var(--shadow-float)]',
         isActive
-          ? 'border-[var(--accent)]/60 ring-1 ring-[var(--accent)]/30 shadow-[0_0_0_3px_rgba(99,102,241,0.12)]'
+          ? 'border-[var(--accent)]/60 ring-1 ring-[var(--accent)]/30 shadow-[0_0_0_3px_rgba(124,140,255,0.14)]'
           : 'border-[var(--border)]',
         isDragging && 'opacity-50',
         isPending && 'ring-1 ring-[var(--accent)]/50',
@@ -208,21 +254,37 @@ export function KanbanCard({
       <div className="flex items-start justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
           {task.clickupCustomId && (
-            <code className="text-[10px] font-mono text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded shrink-0">
+            <code className="font-mono-ui text-[10px] text-[var(--accent)] bg-[var(--accent-soft)] px-1.5 py-0.5 rounded shrink-0">
               {task.clickupCustomId}
             </code>
           )}
           {task.clickupStatus && (
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide"
-              style={{
-                backgroundColor: `${task.clickupStatusColor || '#94a3b8'}20`,
-                color: task.clickupStatusColor || '#94a3b8',
-              }}
-              title={`ClickUp status: ${task.clickupStatus}`}
-            >
-              {task.clickupStatus}
-            </span>
+            statuses.length > 0 ? (
+              <button
+                ref={statusBtnRef}
+                onClick={openStatusMenu}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide hover:brightness-125 transition"
+                style={{
+                  backgroundColor: `${task.clickupStatusColor || '#94a3b8'}20`,
+                  color: task.clickupStatusColor || '#94a3b8',
+                }}
+                title={`Status: ${task.clickupStatus} — click to change`}
+              >
+                {task.clickupStatus}
+                <ChevronDown className="w-2.5 h-2.5 opacity-70" />
+              </button>
+            ) : (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide"
+                style={{
+                  backgroundColor: `${task.clickupStatusColor || '#94a3b8'}20`,
+                  color: task.clickupStatusColor || '#94a3b8',
+                }}
+                title={`ClickUp status: ${task.clickupStatus}`}
+              >
+                {task.clickupStatus}
+              </span>
+            )
           )}
           {isPending && (
             <span className="text-[10px] text-[var(--accent)] flex items-center gap-1">
@@ -337,7 +399,7 @@ export function KanbanCard({
       </div>
 
       {/* Title */}
-      <h3 className="text-sm text-[var(--text-primary)] leading-snug mb-2 line-clamp-3">
+      <h3 className="font-display text-sm font-medium text-[var(--text-primary)] leading-snug mb-2 line-clamp-3">
         {task.clickupName}
       </h3>
 
@@ -387,9 +449,19 @@ export function KanbanCard({
         </div>
       )}
 
-      {/* Priority / tags row */}
-      {(task.clickupPriority || (task.clickupTags && task.clickupTags.length > 0)) && (
+      {/* Priority / release / tags row */}
+      {(task.clickupPriority || task.clickupReleaseVersion || (task.clickupTags && task.clickupTags.length > 0)) && (
         <div className="flex items-center gap-1 flex-wrap mb-2">
+          {task.clickupReleaseVersion && (
+            <span
+              className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono-ui font-medium"
+              style={{ backgroundColor: 'rgba(34, 211, 238, 0.12)', color: 'var(--accent-2)' }}
+              title={`Release version: ${task.clickupReleaseVersion}`}
+            >
+              <Rocket className="w-2.5 h-2.5" />
+              {task.clickupReleaseVersion}
+            </span>
+          )}
           {task.clickupPriority && (
             <span
               className="text-[10px] px-1.5 py-0.5 rounded font-medium"
@@ -501,6 +573,37 @@ export function KanbanCard({
           <span className="text-[10px] text-[var(--text-muted)] ml-1">{formatRelative(task.clickupUpdatedAt || task.updatedAt)}</span>
         </div>
       </div>
+
+      {/* Status dropdown — portal so it floats above the column's scroll clip */}
+      {statusMenu && createPortal(
+        <div
+          ref={statusMenuRef}
+          className="fixed z-[100] min-w-[180px] max-h-72 overflow-y-auto glass-card border border-[var(--border)] rounded-lg shadow-xl py-1"
+          style={{ top: statusMenu.top, left: statusMenu.left }}
+        >
+          <div className="px-3 py-1 text-[9px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+            Set status
+          </div>
+          {statuses.map((s) => {
+            const active = s.name.trim().toLowerCase() === (task.clickupStatus || '').trim().toLowerCase();
+            return (
+              <button
+                key={s.name}
+                onClick={(e) => pickStatus(e, s.name)}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors',
+                  active && 'bg-[var(--accent-soft)]',
+                )}
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px 0 ${s.color}` }} />
+                <span className="truncate flex-1 text-left text-[var(--text-primary)]">{s.name}</span>
+                {active && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

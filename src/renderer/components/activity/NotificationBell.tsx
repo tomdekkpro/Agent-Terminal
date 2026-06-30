@@ -8,6 +8,7 @@ import {
   CheckCheck,
   Trash2,
   ExternalLink,
+  LayoutDashboard,
 } from 'lucide-react';
 import type { ActivityEvent, ActivitySource, ActivityLevel } from '../../../shared/types';
 import { useActivityStore } from '../../stores/activity-store';
@@ -17,12 +18,14 @@ const SOURCE_ICON: Record<ActivitySource, typeof Wrench> = {
   'auto-code': Wrench,
   qc: ShieldCheck,
   'code-review': GitPullRequestDraft,
+  dashboard: LayoutDashboard,
 };
 
 const SOURCE_LABEL: Record<ActivitySource, string> = {
   'auto-code': 'Auto Code',
   qc: 'QC',
   'code-review': 'Code Review',
+  dashboard: 'Dashboard',
 };
 
 const LEVEL_DOT: Record<ActivityLevel, string> = {

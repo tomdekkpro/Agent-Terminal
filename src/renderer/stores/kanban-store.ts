@@ -60,8 +60,17 @@ export interface AutoCodeStatusPayload {
   maxIterations: number;
 }
 
+/** A ClickUp status that becomes a board column, in ClickUp's own order. */
+export interface BoardStatus {
+  name: string;
+  color: string;
+}
+
 interface KanbanState {
   tasks: KanbanTask[];
+  /** ClickUp statuses for the configured kanban list — the board's columns,
+   *  in ClickUp's own order. Empty until loaded (or when provider isn't ClickUp). */
+  statuses: BoardStatus[];
   /** ClickUp tasks that match the backlog criteria but aren't imported yet */
   backlog: TaskManagerTask[];
   backlogLoading: boolean;
@@ -78,8 +87,9 @@ interface KanbanState {
   membersError: string | null;
   loading: boolean;
   error: string | null;
-  /** Optimistic status overrides keyed by local kanban task id */
-  pendingMoves: Record<string, KanbanTaskStatus>;
+  /** Optimistic status overrides keyed by local kanban task id. The value is
+   *  the target ClickUp status NAME (1-1 with the board columns). */
+  pendingMoves: Record<string, string>;
   autoCode: AutoCodeStatusPayload | null;
   /** Auto Code progress lines keyed by local kanban task id. Populated from the
    *  orchestrator's `log` events so the detail modal can stream progress for a
@@ -87,6 +97,8 @@ interface KanbanState {
   autoCodeLogs: Record<string, AutoCodeLogEntry[]>;
 
   loadTasks: () => Promise<void>;
+  /** Fetch the configured kanban list's ClickUp statuses → board columns. */
+  loadStatuses: () => Promise<void>;
   loadMembers: () => Promise<void>;
   /** Load the backlog from the provider. Re-fetches every page the user has
    *  already scrolled through (so the 60s poll doesn't collapse a lazily-grown
@@ -122,7 +134,7 @@ interface KanbanState {
    *  task lands at that position; otherwise the main side bumps it to the
    *  bottom of the destination column. Same-column reorders also use this
    *  by passing the same status with a new `orderIndex`. */
-  moveTask: (taskId: string, to: KanbanTaskStatus, orderIndex?: number) => Promise<void>;
+  moveTask: (taskId: string, to: string, orderIndex?: number) => Promise<void>;
   updateTask: (taskId: string, patch: Partial<KanbanTask>) => Promise<void>;
   /** Clear worktree fields on the KanbanTask whose clickupTaskId matches.
    *  Called after a successful merge / PR flow that removed the worktree,
@@ -190,6 +202,7 @@ function buildBacklogQuery():
 
 export const useKanbanStore = create<KanbanState>((set, get) => ({
   tasks: [],
+  statuses: [],
   backlog: [],
   backlogLoading: false,
   backlogLoadingMore: false,
@@ -217,6 +230,25 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : 'Failed to load kanban tasks' });
     }
+  },
+
+  loadStatuses: async () => {
+    const settings = useSettingsStore.getState().settings;
+    if (settings.taskManagerProvider !== 'clickup') {
+      set({ statuses: [] });
+      return;
+    }
+    const listId = settings.kanbanBacklogListId || settings.clickupListId;
+    if (!listId) {
+      set({ statuses: [] });
+      return;
+    }
+    try {
+      const res = await window.electronAPI.getListStatuses(listId);
+      if (res?.success && Array.isArray(res.data)) {
+        set({ statuses: res.data });
+      }
+    } catch { /* keep whatever columns we already have */ }
   },
 
   migrateOrphanTerminals: async () => {
@@ -394,6 +426,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
         })),
         clickupPriority: clickupTask.priority,
         clickupTags: clickupTask.tags,
+        clickupReleaseVersion: clickupTask.releaseVersion,
         clickupUpdatedAt: clickupTask.updatedAt,
         projectPath,
         projectId,
@@ -430,6 +463,7 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
         })),
         clickupPriority: clickupTask.priority,
         clickupTags: clickupTask.tags,
+        clickupReleaseVersion: clickupTask.releaseVersion,
         clickupUpdatedAt: clickupTask.updatedAt,
       });
       if (result.success && result.data) {
@@ -467,36 +501,41 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
-  moveTask: async (taskId: string, to: KanbanTaskStatus, orderIndex?: number) => {
+  moveTask: async (taskId: string, to: string, orderIndex?: number) => {
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task) return;
+    const from = (task.clickupStatus || '').trim();
+    const sameStatus = from.toLowerCase() === to.trim().toLowerCase();
     // Same column with no reorder request → no-op.
-    if (task.kanbanStatus === to && orderIndex === undefined) return;
+    if (sameStatus && orderIndex === undefined) return;
 
-    // Optimistic update — only mark pendingMoves when the column actually changes
-    if (task.kanbanStatus !== to) {
-      set((state) => ({ pendingMoves: { ...state.pendingMoves, [taskId]: to } }));
+    // Pure reorder within a column — no status change, so no ClickUp write.
+    if (sameStatus) {
+      try {
+        const result = await window.electronAPI.kanbanUpdate(taskId, { orderIndex });
+        if (result.success && result.data) {
+          set((state) => ({ tasks: upsertTask(state.tasks, result.data) }));
+        }
+      } catch { /* reorder is best-effort */ }
+      return;
     }
 
+    // Column move → 1-1 write-back to ClickUp. Optimistically show the card in
+    // the destination column; on failure we clear the override so it snaps back.
+    set((state) => ({ pendingMoves: { ...state.pendingMoves, [taskId]: to } }));
     try {
-      const patch: Partial<KanbanTask> = { kanbanStatus: to };
-      if (orderIndex !== undefined) patch.orderIndex = orderIndex;
-      const result = await window.electronAPI.kanbanUpdate(taskId, patch);
-      if (result.success && result.data) {
-        set((state) => {
-          const { [taskId]: _drop, ...rest } = state.pendingMoves;
+      const result = await window.electronAPI.kanbanSetStatus(taskId, to, orderIndex);
+      set((state) => {
+        const { [taskId]: _drop, ...rest } = state.pendingMoves;
+        if (result.success && result.data) {
           return { tasks: upsertTask(state.tasks, result.data), pendingMoves: rest };
-        });
-      } else {
-        set((state) => {
-          const { [taskId]: _drop, ...rest } = state.pendingMoves;
-          return { pendingMoves: rest, error: result.error || 'Failed to move task' };
-        });
-      }
+        }
+        return { pendingMoves: rest, error: result.error || 'ClickUp rejected the status change' };
+      });
     } catch (err) {
       set((state) => {
         const { [taskId]: _drop, ...rest } = state.pendingMoves;
-        return { pendingMoves: rest, error: err instanceof Error ? err.message : 'Failed to move task' };
+        return { pendingMoves: rest, error: err instanceof Error ? err.message : 'Failed to update status' };
       });
     }
   },

@@ -3,7 +3,7 @@ import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
   FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
-  GitBranch, ArrowRight, User,
+  GitBranch, ArrowRight, User, Check,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -649,9 +649,9 @@ export function CodeReviewView() {
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
   const [customStatuses, setCustomStatuses] = useState('ready for review, in review, review');
 
-  // List dropdown state
+  // List dropdown state — multi-select (review across all selected lists)
   const [lists, setLists] = useState<TaskManagerList[]>([]);
-  const [selectedListId, setSelectedListId] = useState<string>('');
+  const [selectedListIds, setSelectedListIds] = useState<string[]>([]);
   const [showListDropdown, setShowListDropdown] = useState(false);
   const listDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -663,7 +663,21 @@ export function CodeReviewView() {
     return acc;
   }, {});
 
-  const selectedList = lists.find((l) => l.id === selectedListId);
+  const toggleList = (id: string) => {
+    setSelectedListIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const allListsSelected = lists.length > 0 && selectedListIds.length === lists.length;
+  const toggleAllLists = () => {
+    setSelectedListIds(allListsSelected ? [] : lists.map((l) => l.id));
+  };
+  const listButtonLabel =
+    selectedListIds.length === 0
+      ? 'Select lists...'
+      : allListsSelected
+        ? `All lists (${lists.length})`
+        : selectedListIds.length === 1
+          ? lists.find((l) => l.id === selectedListIds[0])?.name || '1 list'
+          : `${selectedListIds.length} lists`;
 
   // Close list dropdown on outside click
   useEffect(() => {
@@ -682,12 +696,8 @@ export function CodeReviewView() {
     window.electronAPI.getTaskManagerLists().then((result: any) => {
       if (result.success && result.data) {
         setLists(result.data);
-        if (result.data.length > 0) {
-          const settings = useSettingsStore.getState().settings;
-          const defaultId = settings.clickupListId || result.data[0].id;
-          const exists = result.data.some((l: TaskManagerList) => l.id === defaultId);
-          setSelectedListId(exists ? defaultId : result.data[0].id);
-        }
+        // Select ALL lists by default so review covers every list at once
+        setSelectedListIds(result.data.map((l: TaskManagerList) => l.id));
       }
     });
   }, [taskManagerProvider]);
@@ -709,16 +719,16 @@ export function CodeReviewView() {
 
   // Auto-load tasks when the view is opened and a project + list are selected
   useEffect(() => {
-    if (selectedProjectPath && selectedListId && taskManagerProvider !== 'none' && items.length === 0 && !loading) {
+    if (selectedProjectPath && selectedListIds.length > 0 && taskManagerProvider !== 'none' && items.length === 0 && !loading) {
       const statuses = customStatuses.split(',').map((s) => s.trim()).filter(Boolean);
-      loadTasks(statuses, selectedProjectPath, selectedListId);
+      loadTasks(statuses, selectedProjectPath, selectedListIds);
     }
-  }, [selectedProjectPath, selectedListId, taskManagerProvider]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedProjectPath, selectedListIds, taskManagerProvider]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLoadTasks = useCallback(() => {
     const statuses = customStatuses.split(',').map((s) => s.trim()).filter(Boolean);
-    loadTasks(statuses, selectedProjectPath || undefined, selectedListId || undefined);
-  }, [customStatuses, selectedProjectPath, selectedListId, loadTasks]);
+    loadTasks(statuses, selectedProjectPath || undefined, selectedListIds.length ? selectedListIds : undefined);
+  }, [customStatuses, selectedProjectPath, selectedListIds, loadTasks]);
 
   const handleReview = useCallback((taskId: string, prNumber: number) => {
     if (!selectedProjectPath) return;
@@ -773,13 +783,15 @@ export function CodeReviewView() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="border-b border-[var(--border)] bg-[var(--bg-secondary)] px-6 py-4">
+      <div className="border-b border-[var(--border)] glass px-6 py-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
-            <GitPullRequestDraft className="w-5 h-5 text-purple-400" />
-            <h1 className="text-lg font-semibold text-[var(--text-primary)]">Code Review</h1>
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--clickup-purple)]/15 text-[var(--clickup-purple)] shadow-[0_0_16px_-2px_var(--clickup-purple)]">
+              <GitPullRequestDraft className="w-[18px] h-[18px]" />
+            </span>
+            <h1 className="font-display text-lg font-semibold tracking-tight text-[var(--text-primary)]">Code Review</h1>
             {items.length > 0 && (
-              <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">
+              <span className="font-mono-ui text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/80 border border-[var(--border)] px-2 py-0.5 rounded-full">
                 {items.length} task{items.length !== 1 ? 's' : ''}
               </span>
             )}
@@ -854,39 +866,57 @@ export function CodeReviewView() {
                 className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors min-w-[160px]"
               >
                 <List className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
-                <span className="truncate max-w-[200px]">
-                  {selectedList ? selectedList.name : 'Select list...'}
-                </span>
+                <span className="truncate max-w-[200px]">{listButtonLabel}</span>
                 <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] shrink-0 transition-transform ml-auto', showListDropdown && 'rotate-180')} />
               </button>
 
               {showListDropdown && (
-                <div className="absolute z-50 top-full left-0 mt-1 min-w-[240px] max-h-64 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                <div className="absolute z-50 top-full left-0 mt-1 min-w-[240px] max-h-72 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                  {/* Select all / Clear header */}
+                  <button
+                    onClick={toggleAllLists}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card)]"
+                  >
+                    <span className={cn(
+                      'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                      allListsSelected ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--border)]',
+                    )}>
+                      {allListsSelected && <Check className="w-3 h-3 text-white" />}
+                    </span>
+                    {allListsSelected ? 'Clear all' : 'Select all'}
+                  </button>
+
                   {Object.entries(listsBySpace).map(([space, spaceLists]) => (
                     <div key={space}>
                       {Object.keys(listsBySpace).length > 1 && (
-                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] bg-[var(--bg-secondary)] sticky top-0">
+                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] bg-[var(--bg-secondary)]">
                           {space}
                         </div>
                       )}
-                      {spaceLists.map((list) => (
-                        <button
-                          key={list.id}
-                          onClick={() => {
-                            setSelectedListId(list.id);
-                            setShowListDropdown(false);
-                          }}
-                          className={cn(
-                            'w-full text-left px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-tertiary)]',
-                            list.id === selectedListId && 'bg-[var(--accent)]/10 text-[var(--accent)]',
-                          )}
-                        >
-                          <span>{list.name}</span>
-                          {list.folder && (
-                            <span className="text-[10px] text-[var(--text-muted)] ml-2">{list.folder}</span>
-                          )}
-                        </button>
-                      ))}
+                      {spaceLists.map((list) => {
+                        const checked = selectedListIds.includes(list.id);
+                        return (
+                          <button
+                            key={list.id}
+                            onClick={() => toggleList(list.id)}
+                            className={cn(
+                              'w-full flex items-center gap-2 text-left px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-tertiary)]',
+                              checked && 'text-[var(--accent)]',
+                            )}
+                          >
+                            <span className={cn(
+                              'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                              checked ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--border)]',
+                            )}>
+                              {checked && <Check className="w-3 h-3 text-white" />}
+                            </span>
+                            <span className="truncate">{list.name}</span>
+                            {list.folder && (
+                              <span className="text-[10px] text-[var(--text-muted)] ml-auto shrink-0">{list.folder}</span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   ))}
                 </div>

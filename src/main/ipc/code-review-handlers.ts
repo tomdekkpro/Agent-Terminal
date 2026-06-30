@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem } from '../../shared/types';
+import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, TaskManagerTask } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
@@ -745,6 +745,36 @@ function formatReviewComment(prTitle: string, findings: CodeReviewFinding[], pas
   return lines.join('\n');
 }
 
+/**
+ * Fetch ALL tasks matching the given statuses across pages.
+ * `searchTasks` returns only a single page (max 100) when there's no text query,
+ * so a list with >100 tasks in review statuses would silently drop the rest.
+ */
+async function fetchAllReviewTasks(
+  settings: AppSettings,
+  statuses: string[],
+  listId: string,
+): Promise<TaskManagerTask[]> {
+  const all: TaskManagerTask[] = [];
+  const PAGE_SIZE = 100; // ClickUp returns up to 100 tasks per page
+  const MAX_PAGES = 30; // safety cap (3000 tasks)
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const result = await clickUpProvider.searchTasks(settings, '', { statuses }, listId, page);
+    if (!result.success) {
+      // Surface the error if even the first page fails; otherwise keep what we have
+      if (page === 0) throw new Error(result.error || 'Failed to fetch review tasks');
+      break;
+    }
+    const tasks = result.data || [];
+    all.push(...tasks);
+    if (tasks.length < PAGE_SIZE) break; // last page reached
+  }
+
+  debugLog(`[CodeReview] Fetched ${all.length} task(s) across pages for list ${listId}`);
+  return all;
+}
+
 // ─── Auto-review: run a full cycle ───────────────────────────
 async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promise<void> {
   if (schedulerRunning) {
@@ -775,15 +805,19 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
   });
 
   try {
-    // 1. Fetch reviewable tasks
-    const taskResult = await clickUpProvider.searchTasks(settings, '', { statuses }, settings.clickupListId);
-    if (!taskResult.success || !taskResult.data?.length) {
+    // 1. Fetch ALL reviewable tasks across pages (a single page caps at 100)
+    let tasks: TaskManagerTask[];
+    try {
+      tasks = await fetchAllReviewTasks(settings, statuses, settings.clickupListId);
+    } catch (err) {
+      debugError('[CodeReview] Scheduler: failed to fetch tasks:', err);
+      return; // `finally` resets schedulerRunning
+    }
+    if (!tasks.length) {
       debugLog('[CodeReview] Scheduler: no tasks found for review');
-      schedulerRunning = false;
       return;
     }
 
-    const tasks = taskResult.data;
     debugLog(`[CodeReview] Scheduler: found ${tasks.length} tasks`);
 
     // 2. Review each task
@@ -1010,24 +1044,37 @@ export function registerCodeReviewHandlers(
   // ─── Task fetching ───────────────────────────────────────────
   ipcMain.handle(
     IPC_CHANNELS.CODE_REVIEW_GET_TASKS,
-    async (_event, reviewStatuses?: string[], projectPath?: string, listId?: string) => {
+    async (_event, reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => {
       try {
         const settings = getSettings();
         if (settings.taskManagerProvider !== 'clickup') {
           return { success: false, error: 'Code Review requires ClickUp integration. Configure it in Settings.' };
         }
 
-        const targetListId = listId || settings.clickupListId;
-        if (!targetListId) return { success: false, error: 'No ClickUp list configured' };
+        const targetListIds = (listIds && listIds.length)
+          ? listIds
+          : (settings.clickupListId ? [settings.clickupListId] : []);
+        if (targetListIds.length === 0) return { success: false, error: 'No ClickUp list configured' };
 
         const statuses = reviewStatuses || ['ready for review', 'in review', 'review'];
-        const result = await clickUpProvider.searchTasks(settings, '', { statuses }, targetListId);
 
-        if (!result.success) return result;
+        // Fetch tasks across every selected list, de-duplicating by task id
+        // (ClickUp allows a task to live in multiple lists).
+        const seen = new Set<string>();
+        const allTasks: TaskManagerTask[] = [];
+        for (const lid of targetListIds) {
+          const listTasks = await fetchAllReviewTasks(settings, statuses, lid);
+          for (const task of listTasks) {
+            if (!seen.has(task.id)) {
+              seen.add(task.id);
+              allTasks.push(task);
+            }
+          }
+        }
 
         // Filter out tasks that already have the reviewpass tag, or are flagged for manual review
         const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();
-        const filteredTasks = (result.data || []).filter((task) => {
+        const filteredTasks = allTasks.filter((task) => {
           const hasTag = task.tags?.some((t) => t.name.toLowerCase() === tagName);
           if (hasTag) {
             debugLog(`[CodeReview] Skipping task ${task.id} — already has "${tagName}" tag`);

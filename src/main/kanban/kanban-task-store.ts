@@ -115,6 +115,7 @@ export interface ImportTaskInput {
   clickupAssignees?: KanbanTask['clickupAssignees'];
   clickupPriority?: KanbanTask['clickupPriority'];
   clickupTags?: KanbanTask['clickupTags'];
+  clickupReleaseVersion?: string;
   clickupUpdatedAt?: string;
   projectPath: string;
   projectId?: string;
@@ -140,6 +141,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
       clickupAssignees: input.clickupAssignees,
       clickupPriority: input.clickupPriority,
       clickupTags: input.clickupTags,
+      clickupReleaseVersion: input.clickupReleaseVersion,
       clickupUpdatedAt: input.clickupUpdatedAt,
       projectPath: input.projectPath || existing.projectPath,
       projectId: input.projectId ?? existing.projectId,
@@ -167,6 +169,7 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     clickupAssignees: input.clickupAssignees,
     clickupPriority: input.clickupPriority,
     clickupTags: input.clickupTags,
+    clickupReleaseVersion: input.clickupReleaseVersion,
     clickupUpdatedAt: input.clickupUpdatedAt,
     projectPath: input.projectPath,
     projectId: input.projectId,
@@ -261,6 +264,7 @@ export interface LinkLocalToClickupInput {
   clickupAssignees?: KanbanTask['clickupAssignees'];
   clickupPriority?: KanbanTask['clickupPriority'];
   clickupTags?: KanbanTask['clickupTags'];
+  clickupReleaseVersion?: string;
   clickupUpdatedAt?: string;
 }
 
@@ -298,6 +302,7 @@ export function linkKanbanTaskToClickup(input: LinkLocalToClickupInput): KanbanT
     clickupAssignees: input.clickupAssignees,
     clickupPriority: input.clickupPriority,
     clickupTags: input.clickupTags,
+    clickupReleaseVersion: input.clickupReleaseVersion,
     clickupUpdatedAt: input.clickupUpdatedAt,
     // Description was the local task's prompt body — drop it now that the
     // ClickUp description is the source of truth (fetched live via the API).

@@ -1,4 +1,4 @@
-import { Terminal, Kanban, ShieldCheck, Sparkles, GitPullRequestDraft, Settings } from 'lucide-react';
+import { Terminal, Kanban, ShieldCheck, Sparkles, GitPullRequestDraft, Settings, LayoutDashboard } from 'lucide-react';
 import type { ViewType } from '../../App';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
@@ -9,6 +9,7 @@ interface SidebarProps {
 }
 
 const navItems: { id: ViewType; icon: typeof Terminal; label: string; shortcut: string }[] = [
+  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', shortcut: 'Ctrl+D' },
   { id: 'terminals', icon: Terminal, label: 'Terminals', shortcut: 'Ctrl+T' },
   { id: 'kanban', icon: Kanban, label: 'Kanban Board', shortcut: 'Ctrl+K' },
   { id: 'qc', icon: ShieldCheck, label: 'QC Testing', shortcut: 'Ctrl+Q' },

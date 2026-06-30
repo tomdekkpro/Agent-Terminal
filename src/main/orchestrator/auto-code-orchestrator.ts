@@ -503,6 +503,7 @@ class AutoCodeOrchestrator {
             })),
             clickupPriority: fresh.priority,
             clickupTags: fresh.tags,
+            clickupReleaseVersion: fresh.releaseVersion,
             clickupUpdatedAt: fresh.updatedAt,
           };
 

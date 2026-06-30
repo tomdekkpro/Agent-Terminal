@@ -5,6 +5,20 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Parse a comma-separated list into a lowercased, trimmed Set (drops empties). */
+export function csvToLowerSet(csv: string | undefined): Set<string> {
+  return new Set((csv || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+}
+
+/** Toggle a name in a comma-separated list (case-insensitive); returns the new CSV. */
+export function toggleInCsv(csv: string | undefined, name: string): string {
+  const set = csvToLowerSet(csv);
+  const key = name.trim().toLowerCase();
+  if (set.has(key)) set.delete(key);
+  else set.add(key);
+  return Array.from(set).join(', ');
+}
+
 export function debugLog(...args: unknown[]): void {
   if (process.env.NODE_ENV === 'development') {
     console.log(...args);

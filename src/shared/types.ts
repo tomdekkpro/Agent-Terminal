@@ -92,11 +92,46 @@ export interface TaskManagerTask {
   priority?: { id?: string; name: string; color: string };
   assignees: Array<{ id: string; username: string; email?: string; initials?: string }>;
   tags: Array<{ name: string; bgColor: string; fgColor: string }>;
+  /** Selected "Release version" custom-field value (resolved to its option name), if set. */
+  releaseVersion?: string;
   url: string;
   createdAt: string;
   updatedAt: string;
   providerTaskId: string;
   provider: TaskManagerProvider;
+}
+
+/** Data sources a Dashboard Notice's AI run is allowed to use. */
+export type NoticeSource = 'clickup' | 'github' | 'web';
+
+/** A scheduled AI "Notice" on the Dashboard: a saved prompt that runs daily at
+ *  a chosen local time (and on demand), producing a Markdown digest. */
+export interface DashboardNotice {
+  id: string;
+  title: string;
+  /** Natural-language prompt, e.g. "all tasks that need priority today". */
+  prompt: string;
+  /** Local time-of-day "HH:mm" to auto-run daily. Empty = manual only. */
+  scheduleTime: string;
+  enabled: boolean;
+  /** Optional project path used as the Claude CLI working directory (needed for GitHub/gh). */
+  projectPath?: string;
+  /** ClickUp list id to pull tasks from (falls back to the configured list). */
+  listId?: string;
+  /** Which data sources/tools this notice may use. Undefined = legacy ClickUp-only. */
+  sources?: NoticeSource[];
+  /** Websites to consult when the 'web' source is enabled. */
+  urls?: string[];
+  status: 'idle' | 'running' | 'done' | 'error';
+  /** Latest result, Markdown. */
+  lastResult?: string;
+  /** ISO timestamp of the last run. */
+  lastRunAt?: string;
+  /** Local YYYY-MM-DD of the last run — guards the once-per-day auto-trigger. */
+  lastRunDate?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** List/container that holds tasks (ClickUp list, Jira project, etc.) */
@@ -114,6 +149,8 @@ export interface TerminalTask {
   name: string;
   status: string;
   statusColor: string;
+  /** Selected "Release version" custom-field value, if set. */
+  releaseVersion?: string;
   url: string;
   provider: TaskManagerProvider;
 }
@@ -217,6 +254,10 @@ export interface AppSettings {
   kanbanDoneStatuses: string;
   /** How often (in minutes) to auto-refresh ClickUp snapshots for imported tasks. Set to 0 to disable. */
   kanbanSnapshotIntervalMinutes: number;
+  /** ClickUp status names (comma-separated, case-insensitive) whose board columns are hidden — their cards aren't rendered. */
+  kanbanHiddenStatuses: string;
+  /** ClickUp status names (comma-separated, case-insensitive) whose board columns are collapsed to a thin rail. */
+  kanbanCollapsedStatuses: string;
   // Auto Code Loop — autonomously implements tasks from their description and
   // fixes them from QC feedback: watches trigger statuses, dispatches the agent,
   // pushes, opens a PR, re-requests QC, and (optionally) auto-merges.
@@ -649,6 +690,8 @@ export interface KanbanTask {
   clickupAssignees?: Array<{ id: string; username: string; initials?: string; color?: string }>;
   clickupPriority?: { name: string; color: string };
   clickupTags?: Array<{ name: string; bgColor: string; fgColor: string }>;
+  /** Selected "Release version" custom-field value (snapshot), if set. */
+  clickupReleaseVersion?: string;
   clickupUpdatedAt?: string;
 
   /** Local project path for worktree + gh CLI */
@@ -728,7 +771,7 @@ export interface KanbanTask {
 // ─── Activity Feed ────────────────────────────────────────────
 
 /** Which autonomous subsystem produced an activity event. */
-export type ActivitySource = 'auto-code' | 'qc' | 'code-review';
+export type ActivitySource = 'auto-code' | 'qc' | 'code-review' | 'dashboard';
 export type ActivityLevel = 'info' | 'success' | 'warn' | 'error';
 
 /** A single entry in the cross-project activity timeline. Emitted by the
@@ -974,6 +1017,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   kanbanFailedStatuses: 'failed',
   kanbanDoneStatuses: 'done, complete, closed',
   kanbanSnapshotIntervalMinutes: 5,
+  kanbanHiddenStatuses: '',
+  kanbanCollapsedStatuses: '',
   autoCodeEnabled: false,
   autoCodeMaxIterations: 3,
   autoCodePollIntervalMinutes: 30,

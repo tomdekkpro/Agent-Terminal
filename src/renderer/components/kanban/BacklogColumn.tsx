@@ -59,14 +59,14 @@ export function BacklogColumn({
   }, [showSort]);
 
   return (
-    <div className="flex flex-col w-72 shrink-0 rounded-xl border border-dashed border-[var(--border)] bg-[var(--bg-secondary)]/50">
+    <div className="flex flex-col w-72 shrink-0 rounded-2xl border border-dashed border-[var(--border)] overflow-hidden glass-card">
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--border)]">
         <div className="flex items-center gap-2 min-w-0">
           <Inbox className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
-          <h2 className="text-sm font-medium text-[var(--text-primary)] uppercase tracking-wide truncate">
+          <h2 className="font-display text-xs font-semibold text-[var(--text-primary)] uppercase tracking-[0.08em] truncate">
             Backlog
           </h2>
-          <span className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] rounded-full px-1.5 py-0.5 shrink-0">
+          <span className="font-mono-ui text-[10px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/80 rounded-full px-1.5 py-0.5 shrink-0">
             {tasks.length}{hasMore ? '+' : ''}
           </span>
         </div>

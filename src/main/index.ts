@@ -18,7 +18,9 @@ import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
 import { registerAutoCodeHandlers, stopAutoCodeOrchestrator } from './ipc/auto-code-handlers';
 import { registerKanbanHandlers } from './ipc/kanban-handlers';
 import { registerActivityHandlers } from './ipc/activity-handlers';
+import { registerDashboardHandlers, stopDashboardScheduler } from './ipc/dashboard-handlers';
 import { flushKanbanTasks } from './kanban/kanban-task-store';
+import { flushNotices } from './dashboard/notice-store';
 import { registerClaudeSessionsHandlers } from './ipc/claude-sessions-handlers';
 import { registerDevServerHandlers } from './ipc/dev-server-handlers';
 import { registerFilesHandlers } from './ipc/files-handlers';
@@ -128,6 +130,7 @@ app.whenReady().then(() => {
   registerCodeReviewHandlers(ipcMain, getWindow);
   registerKanbanHandlers(ipcMain, getWindow);
   registerActivityHandlers(ipcMain, getWindow);
+  registerDashboardHandlers(ipcMain, getWindow);
   registerAutoCodeHandlers(ipcMain, getWindow);
   registerClaudeSessionsHandlers(ipcMain);
   registerDevServerHandlers(ipcMain, getWindow);
@@ -165,7 +168,9 @@ app.on('before-quit', () => {
   stopServiceStatusPolling();
   stopSystemMonitorPolling();
   stopAutoCodeOrchestrator();
+  stopDashboardScheduler();
   flushKanbanTasks();
+  flushNotices();
   if (terminalManager) {
     // Save output buffers while terminals are still alive
     // (terminals are killed later in will-quit, after renderer has saved state)

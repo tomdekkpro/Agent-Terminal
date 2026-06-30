@@ -71,6 +71,7 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
           })),
           clickupPriority: fresh.priority,
           clickupTags: fresh.tags,
+          clickupReleaseVersion: fresh.releaseVersion,
           clickupUpdatedAt: fresh.updatedAt,
         };
 
@@ -193,6 +194,49 @@ export function registerKanbanHandlers(
       if (!next) return { success: false, error: 'Task not found' };
       emitKanbanEvent({ type: 'task-updated', task: next });
       return { success: true, data: next };
+    },
+  );
+
+  // Set a task's status with 1-1 write-back to the task manager. For ClickUp
+  // tasks this PUTs the exact status name to ClickUp first — if ClickUp rejects
+  // it (invalid transition / status not on the task's list), we DON'T touch the
+  // local record so the board can revert. Local tasks update locally only.
+  ipcMain.handle(
+    IPC_CHANNELS.KANBAN_SET_STATUS,
+    async (_event, id: string, status: string, orderIndex?: number) => {
+      try {
+        const task = getKanbanTask(id);
+        if (!task) return { success: false, error: 'Task not found' };
+
+        const trimmed = (status || '').trim();
+        if (!trimmed) return { success: false, error: 'Status is required' };
+
+        const settings = getSettings();
+        if (task.provider !== 'local' && settings.taskManagerProvider === 'clickup') {
+          const res = await clickUpProvider.updateStatus(settings, task.clickupTaskId, trimmed);
+          if (!res.success) {
+            return { success: false, error: res.error || `Couldn't set status to "${trimmed}" in ClickUp` };
+          }
+        }
+
+        const patch: Partial<KanbanTask> = { clickupStatus: trimmed };
+        // Keep the derived kanbanStatus in sync so Auto Code's status logic and
+        // any legacy consumers stay consistent with the new ClickUp status.
+        const mapped = mapClickupStatusToKanban(trimmed, settings);
+        if (mapped) patch.kanbanStatus = mapped;
+        if (typeof orderIndex === 'number') patch.orderIndex = orderIndex;
+
+        const next = updateKanbanTask(id, patch);
+        if (!next) return { success: false, error: 'Task not found' };
+        emitKanbanEvent({ type: 'task-updated', task: next });
+        debugLog(`[Kanban] Set status of ${task.clickupCustomId || task.clickupTaskId} → "${trimmed}"`);
+        return { success: true, data: next };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set status',
+        };
+      }
     },
   );
 

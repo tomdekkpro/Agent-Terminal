@@ -1,21 +1,14 @@
-import { useCallback, useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, ChevronRight, GitBranch,
   ArrowLeft, FolderGit2, Folder, Download, RefreshCw, List,
-  Filter, Loader2, GripVertical, Zap, FolderOpen,
+  Filter, Loader2, GripVertical, Zap, FolderOpen, Rocket,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
-import {
-  useKanbanStore,
-  KANBAN_COLUMN_ORDER,
-  KANBAN_COLUMN_LABELS,
-  KANBAN_COLUMN_COLORS,
-} from '../../stores/kanban-store';
+import { useKanbanStore } from '../../stores/kanban-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import { mapClickupStatusToKanban } from '../../../shared/kanban-status-mapper';
-import type { KanbanTaskStatus } from '../../../shared/types';
 import { useProjectStore } from '../../stores/project-store';
 import { TerminalPanel } from './TerminalPanel';
 import { ChangesPanel } from './ChangesPanel';
@@ -24,7 +17,7 @@ import { SkillsPanel } from './SkillsPanel';
 import { UsageIndicator } from '../usage/UsageIndicator';
 import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
 import { SystemMonitor } from '../status/SystemMonitor';
-import { cn } from '../../../shared/utils';
+import { cn, csvToLowerSet, toggleInCsv } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
@@ -682,6 +675,27 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const canAddTerminal = useTerminalStore((s) => s.canAddTerminal);
   const settings = useSettingsStore((s) => s.settings);
 
+  // ClickUp statuses (board columns) drive the sidebar grouping order so the
+  // Terminal tree mirrors the Kanban board 1-1. Load once; the Kanban view
+  // refreshes them too, so this just covers opening Terminal first.
+  const kanbanStatuses = useKanbanStore((s) => s.statuses);
+  useEffect(() => {
+    if (settings.taskManagerProvider !== 'none') {
+      void useKanbanStore.getState().loadStatuses();
+    }
+  }, [settings.taskManagerProvider]);
+
+  // Mirror the Kanban board's column controls: hidden statuses are dropped from
+  // the tree, collapsed statuses start collapsed, and toggling a status group
+  // updates the same persisted setting so both views stay in sync.
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
+  const hiddenStatusSet = useMemo(() => csvToLowerSet(settings.kanbanHiddenStatuses), [settings.kanbanHiddenStatuses]);
+  const collapsedStatusSet = useMemo(() => csvToLowerSet(settings.kanbanCollapsedStatuses), [settings.kanbanCollapsedStatuses]);
+  const toggleStatusCollapsed = useCallback(
+    (name: string) => void updateSettings({ kanbanCollapsedStatuses: toggleInCsv(settings.kanbanCollapsedStatuses, name) }),
+    [settings.kanbanCollapsedStatuses, updateSettings],
+  );
+
   // Agent providers from registry
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   useEffect(() => {
@@ -703,9 +717,10 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           const task = res.data;
           const newStatus = task.status.name;
           const newColor = task.status.color;
-          if (newStatus !== t.task!.status || newColor !== t.task!.statusColor) {
+          const newRelease = task.releaseVersion;
+          if (newStatus !== t.task!.status || newColor !== t.task!.statusColor || newRelease !== t.task!.releaseVersion) {
             useTerminalStore.getState().updateTerminal(t.id, {
-              task: { ...t.task!, status: newStatus, statusColor: newColor },
+              task: { ...t.task!, status: newStatus, statusColor: newColor, releaseVersion: newRelease },
             });
           }
         }).catch(() => {});
@@ -979,6 +994,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           name: task.name,
           status: task.status.name,
           statusColor: task.status.color,
+          releaseVersion: task.releaseVersion,
           url: task.url,
           provider: task.provider,
         };
@@ -1099,6 +1115,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         name: task.name,
         status: task.status.name,
         statusColor: task.status.color,
+        releaseVersion: task.releaseVersion,
         url: task.url,
         provider: task.provider,
       };
@@ -1484,12 +1501,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
     settings.taskManagerProvider !== 'none',
   );
 
-  // Derive sidebar categories using the same status mapping as the Kanban board:
-  // raw task.status → one of KANBAN_COLUMN_ORDER (todo / in-progress / review / failed / done).
-  // Statuses that don't map fall into "Other"; terminals without a task fall into "No task".
-  // Order matches the Kanban columns; "Other" and "No task" pin to the end.
-  const OTHER_KEY = '__other__';
+  // Derive sidebar categories from the raw ClickUp status (1-1 with the Kanban
+  // board columns). Each distinct status becomes a group; terminals without a
+  // task fall into "No task". Order follows the board's ClickUp status order
+  // (kanbanStatuses); statuses not in that list sort after the known ones, with
+  // "No task" pinned to the very end.
   const NO_TASK_KEY = '__no_task__';
+  const statusOrder = useMemo(() => {
+    const m = new Map<string, number>();
+    kanbanStatuses.forEach((s, i) => m.set(s.name.trim().toLowerCase(), i));
+    return m;
+  }, [kanbanStatuses]);
   const treeQuery = treeSearch.trim().toLowerCase();
   const categories = (() => {
     type Entry = { key: string; name: string; color?: string; groupIds: string[] };
@@ -1506,20 +1528,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       let key: string;
       let name: string;
       let color: string | undefined;
-      if (!first.task) {
+      const rawStatus = (first.task?.status || '').trim();
+      if (!first.task || !rawStatus) {
         key = NO_TASK_KEY;
         name = 'No task';
       } else {
-        const kanban: KanbanTaskStatus | null = mapClickupStatusToKanban(first.task.status, settings);
-        if (kanban) {
-          key = kanban;
-          name = KANBAN_COLUMN_LABELS[kanban];
-          color = KANBAN_COLUMN_COLORS[kanban];
-        } else {
-          key = OTHER_KEY;
-          name = 'Other';
-          color = first.task.statusColor;
-        }
+        key = rawStatus.toLowerCase();
+        name = rawStatus;
+        color = first.task.statusColor;
       }
 
       let entry = map.get(key);
@@ -1530,14 +1546,15 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       entry.groupIds.push(groupId);
     }
 
+    const UNKNOWN = statusOrder.size + 1000; // unknown statuses after known ones
     const orderIndex = (key: string): number => {
-      const i = (KANBAN_COLUMN_ORDER as readonly string[]).indexOf(key);
-      if (i !== -1) return i;
-      if (key === OTHER_KEY) return KANBAN_COLUMN_ORDER.length;
-      if (key === NO_TASK_KEY) return KANBAN_COLUMN_ORDER.length + 1;
-      return KANBAN_COLUMN_ORDER.length + 2;
+      if (key === NO_TASK_KEY) return Number.MAX_SAFE_INTEGER;
+      const i = statusOrder.get(key);
+      return i !== undefined ? i : UNKNOWN;
     };
-    return Array.from(map.values()).sort((a, b) => orderIndex(a.key) - orderIndex(b.key));
+    return Array.from(map.values())
+      .filter((c) => c.key === NO_TASK_KEY || !hiddenStatusSet.has(c.key))
+      .sort((a, b) => orderIndex(a.key) - orderIndex(b.key) || a.name.localeCompare(b.name));
   })();
 
   return (
@@ -1742,11 +1759,17 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             </div>
           ) : (
             categories.map((cat) => {
-              const collapsed = collapsedCategories.has(cat.key);
+              // Status groups share the Kanban board's collapse setting; the
+              // "No task" group keeps its own local (localStorage) collapse.
+              const isStatusCat = cat.key !== NO_TASK_KEY;
+              const collapsed = isStatusCat
+                ? collapsedStatusSet.has(cat.key)
+                : collapsedCategories.has(cat.key);
+              const onToggle = () => (isStatusCat ? toggleStatusCollapsed(cat.name) : toggleCategory(cat.key));
               return (
                 <div key={cat.key} className="mb-0.5">
                   <button
-                    onClick={() => toggleCategory(cat.key)}
+                    onClick={onToggle}
                     className="w-full flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wide font-medium text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
                   >
                     {collapsed
@@ -1837,6 +1860,16 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                         {firstTerminal.task?.customId && (
                           <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">
                             {firstTerminal.task.customId}
+                          </span>
+                        )}
+                        {firstTerminal.task?.releaseVersion && (
+                          <span
+                            className="font-mono-ui text-[9px] px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5"
+                            style={{ backgroundColor: 'rgba(34, 211, 238, 0.12)', color: 'var(--accent-2)' }}
+                            title={`Release version: ${firstTerminal.task.releaseVersion}`}
+                          >
+                            <Rocket className="w-2.5 h-2.5" />
+                            {firstTerminal.task.releaseVersion}
                           </span>
                         )}
                         {editingGroupId === groupId ? (

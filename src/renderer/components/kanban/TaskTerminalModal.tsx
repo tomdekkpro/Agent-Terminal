@@ -19,6 +19,7 @@ import {
   Eraser,
   GitCommitVertical,
   Search,
+  Rocket,
 } from 'lucide-react';
 import type { KanbanTask, AgentProviderMeta, AgentProviderId, TaskManagerTask, TerminalTask } from '../../../shared/types';
 import { useTerminalStore, type Terminal } from '../../stores/terminal-store';
@@ -918,6 +919,16 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   style={{ backgroundColor: `${task.clickupPriority.color}20`, color: task.clickupPriority.color }}
                 >
                   {task.clickupPriority.name}
+                </span>
+              )}
+              {task.clickupReleaseVersion && (
+                <span
+                  className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono-ui font-medium"
+                  style={{ backgroundColor: 'rgba(34, 211, 238, 0.12)', color: 'var(--accent-2)' }}
+                  title={`Release version: ${task.clickupReleaseVersion}`}
+                >
+                  <Rocket className="w-2.5 h-2.5" />
+                  {task.clickupReleaseVersion}
                 </span>
               )}
               {task.provider === 'local' ? (

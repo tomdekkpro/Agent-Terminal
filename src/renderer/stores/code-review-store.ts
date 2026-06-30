@@ -7,7 +7,7 @@ interface CodeReviewState {
   error: string | null;
   reviewingAll: boolean;
   // Actions
-  loadTasks: (statuses?: string[], projectPath?: string, listId?: string) => Promise<void>;
+  loadTasks: (statuses?: string[], projectPath?: string, listIds?: string[]) => Promise<void>;
   runReview: (projectPath: string, taskId: string, prNumber: number) => Promise<void>;
   runAllReviews: (projectPath: string) => Promise<void>;
   stopReview: (taskId: string, prNumber?: number) => Promise<void>;
@@ -38,10 +38,10 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
   error: null,
   reviewingAll: false,
 
-  loadTasks: async (statuses, projectPath, listId) => {
+  loadTasks: async (statuses, projectPath, listIds) => {
     set({ loading: true, error: null });
     try {
-      const result = await window.electronAPI.codeReviewGetTasks(statuses, projectPath, listId);
+      const result = await window.electronAPI.codeReviewGetTasks(statuses, projectPath, listIds);
       if (result.success) {
         set({ items: result.data, loading: false });
       } else {

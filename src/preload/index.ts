@@ -266,7 +266,7 @@ const electronAPI = {
   removeTaskTag: (taskId: string, tagName: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_REMOVE_TAG, taskId, tagName),
 
   // Code Review
-  codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listId?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listId),
+  codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listIds),
   codeReviewGetPRInfo: (projectPath: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_PR_INFO, projectPath, prNumber),
   codeReviewRun: (projectPath: string, taskId: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RUN, projectPath, taskId, prNumber),
   codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string) =>
@@ -293,6 +293,7 @@ const electronAPI = {
   kanbanCreateLocal: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_CREATE_LOCAL, input),
   kanbanLinkClickup: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_LINK_CLICKUP, input),
   kanbanUpdate: (id: string, patch: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_UPDATE, id, patch),
+  kanbanSetStatus: (id: string, status: string, orderIndex?: number) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_SET_STATUS, id, status, orderIndex),
   kanbanDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DELETE, id),
   kanbanRefreshClickup: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP),
   kanbanDailyCost: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DAILY_COST),
@@ -300,6 +301,17 @@ const electronAPI = {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on(IPC_CHANNELS.KANBAN_EVENT, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.KANBAN_EVENT, handler);
+  },
+
+  // Dashboard — scheduled AI "Notices"
+  dashboardList: () => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_LIST),
+  dashboardSave: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_SAVE, input),
+  dashboardDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_DELETE, id),
+  dashboardRun: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_RUN, id),
+  onDashboardEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.DASHBOARD_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.DASHBOARD_EVENT, handler);
   },
 
   // Auto Code Loop

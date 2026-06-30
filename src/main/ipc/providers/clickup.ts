@@ -31,6 +31,29 @@ async function clickUpFetch(apiKey: string, endpoint: string, options: RequestIn
   return response.json();
 }
 
+/** Resolve the "Release version" custom field to its display value. Handles
+ *  dropdown fields (value is the option id for new_drop_down, or the orderindex
+ *  for legacy) and plain text fields. Returns undefined when unset/not present. */
+function extractReleaseVersion(raw: any): string | undefined {
+  const fields = raw.custom_fields;
+  if (!Array.isArray(fields)) return undefined;
+  const field = fields.find((f: any) => (f?.name || '').toLowerCase().includes('release version'));
+  if (!field) return undefined;
+  const value = field.value;
+  if (value === undefined || value === null || value === '') return undefined;
+
+  const options = field.type_config?.options;
+  if (Array.isArray(options) && options.length > 0) {
+    const match = options.find(
+      (o: any) => String(o.id) === String(value) || o.orderindex === value,
+    );
+    if (match) return match.name || match.label || undefined;
+  }
+  // Plain text / short_text custom field
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return undefined;
+}
+
 function normalizeClickUpTask(raw: any): TaskManagerTask {
   return {
     id: raw.id,
@@ -52,6 +75,7 @@ function normalizeClickUpTask(raw: any): TaskManagerTask {
       bgColor: t.tag_bg,
       fgColor: t.tag_fg,
     })),
+    releaseVersion: extractReleaseVersion(raw),
     url: raw.url,
     createdAt: raw.date_created,
     updatedAt: raw.date_updated,

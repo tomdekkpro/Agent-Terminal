@@ -152,10 +152,17 @@ export const IPC_CHANNELS = {
   KANBAN_CREATE_LOCAL: 'kanban:create-local',
   KANBAN_LINK_CLICKUP: 'kanban:link-clickup',
   KANBAN_UPDATE: 'kanban:update',
+  KANBAN_SET_STATUS: 'kanban:set-status',
   KANBAN_DELETE: 'kanban:delete',
   KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',
   KANBAN_EVENT: 'kanban:event',
   KANBAN_DAILY_COST: 'kanban:daily-cost',
+  // Dashboard — scheduled AI "Notices"
+  DASHBOARD_LIST: 'dashboard:list',
+  DASHBOARD_SAVE: 'dashboard:save',
+  DASHBOARD_DELETE: 'dashboard:delete',
+  DASHBOARD_RUN: 'dashboard:run',
+  DASHBOARD_EVENT: 'dashboard:event',
   // Auto Code Loop
   AUTO_CODE_STATUS: 'auto-code:status',
   AUTO_CODE_START: 'auto-code:start',

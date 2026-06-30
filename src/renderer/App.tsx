@@ -12,15 +12,16 @@ import { InsightsView } from './components/insights';
 import { QCView } from './components/qc';
 import { CodeReviewView } from './components/code-review';
 import { KanbanView } from './components/kanban';
+import { DashboardView } from './components/dashboard';
 import { useActivityStore, subscribeActivityEvents } from './stores/activity-store';
 import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
 
-export type ViewType = 'terminals' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
+export type ViewType = 'dashboard' | 'terminals' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
 
 export default function App() {
-  const [activeView, setActiveView] = useState<ViewType>('terminals');
+  const [activeView, setActiveView] = useState<ViewType>('dashboard');
   const loadProjects = useProjectStore((s) => s.loadProjects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const loadSettings = useSettingsStore((s) => s.loadSettings);
@@ -53,6 +54,7 @@ export default function App() {
 
   useEffect(() => {
     const viewKeys: Record<string, ViewType> = {
+      d: 'dashboard',
       t: 'terminals',
       k: 'kanban',
       q: 'qc',
@@ -178,6 +180,7 @@ export default function App() {
     <div className="flex h-screen bg-[var(--bg-primary)]">
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
       <main className="flex-1 flex flex-col overflow-hidden">
+        {activeView === 'dashboard' && <DashboardView />}
         {activeView === 'terminals' && (
           <>
             <ProjectTabBar />

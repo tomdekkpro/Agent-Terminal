@@ -1,4 +1,4 @@
-import { ExternalLink, Play, Loader2, Flag, Clock } from 'lucide-react';
+import { ExternalLink, Play, Loader2, Flag, Clock, Rocket } from 'lucide-react';
 import type { TaskManagerTask } from '../../../shared/types';
 import { cn, formatRelativeTime, parseTimestamp } from '../../../shared/utils';
 
@@ -60,6 +60,16 @@ export function BacklogCard({ task, importing, canStart, onStart }: BacklogCardP
           >
             {task.status.name}
           </span>
+          {task.releaseVersion && (
+            <span
+              className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono-ui font-medium"
+              style={{ backgroundColor: 'rgba(34, 211, 238, 0.12)', color: 'var(--accent-2)' }}
+              title={`Release version: ${task.releaseVersion}`}
+            >
+              <Rocket className="w-2.5 h-2.5" />
+              {task.releaseVersion}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
           <button
