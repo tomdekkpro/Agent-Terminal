@@ -5,7 +5,7 @@
 <h1 align="center">Agent Terminal</h1>
 
 <p align="center">
-  AI-powered terminal with multi-agent support, task management (ClickUp &amp; Jira), Insights chat, and git worktree workflows.
+  AI-powered terminal with multi-agent support, a Kanban board with two-way ClickUp/Jira status sync, scheduled AI dashboard briefings, automated code review, Insights chat, and git worktree workflows.
 </p>
 
 <p align="center">
@@ -23,10 +23,12 @@
 
 ## Features
 
-- **Multi-project terminals** — Organize terminals by project with tabbed navigation and split panes
+- **Dashboard** — The default landing view. Create scheduled AI **Notices**: write a prompt (e.g. _"tasks that need priority today"_ or _"news & trends about Vietnam"_), pick a daily local time, and it auto-generates a Markdown briefing. Each Notice chooses its own data sources/tools — **ClickUp**, **GitHub** (`gh`), or **Web** (with optional URLs) — plus Run-now and enable/pause.
+- **Kanban board** — Columns are your task manager's **actual statuses**, kept in **two-way 1-1 sync** with ClickUp: drag a card (or use the per-card status dropdown) to write the exact status back; external changes flow back via polling. **Hide/collapse** any column, see per-task **Release Version** chips, and drive Auto Code from card state.
+- **Multi-project terminals** — Organize terminals by project with tabbed navigation and split panes; the sidebar tree mirrors the board's statuses, hide/collapse settings, and Release Version
 - **Multi-agent support** — Plug-in architecture for AI agents: Claude, GitHub Copilot, Gemini, Aider, and Qwen — each with model selection and usage tracking
 - **Insights (AI Chat)** — Chat with any supported agent from a dedicated view with session history and model selection
-- **Code Review** — Automated PR code review with severity ratings, findings grouped by file, and configurable review intervals
+- **Code Review** — Automated PR code review across multiple lists with severity ratings, findings grouped by file, and configurable review intervals
 - **QC Testing** — Quality check view for running and tracking test results
 - **Task management** — Unified provider system supporting **ClickUp** and **Jira** — pick tasks, create branches, track status, and post comments
 - **Time tracking** — Start/stop timer per terminal, automatically synced to your task manager
@@ -69,8 +71,9 @@ Alternatively: right-click the app → **Open** → click **Open** in the dialog
 
 | Action | Shortcut |
 |--------|----------|
+| Dashboard view | `Ctrl+D` |
 | Terminals view | `Ctrl+T` |
-| Sessions view | `Ctrl+K` |
+| Kanban Board view | `Ctrl+K` |
 | QC Testing view | `Ctrl+Q` |
 | Insights (Chat) view | `Ctrl+I` |
 | Code Review view | `Ctrl+R` |
@@ -129,7 +132,27 @@ The GitHub Actions workflow builds for all platforms and publishes to [Releases]
 2. Select a provider — **ClickUp** or **Jira**
 3. Enter the required credentials (API token, Team/Project ID, etc.)
 4. Test the connection
-5. Tasks will appear in the Tasks view (`Ctrl+K`)
+5. Tasks appear on the **Kanban board** (`Ctrl+K`)
+
+### Dashboard (Scheduled AI Notices)
+
+1. Open the **Dashboard** (`Ctrl+D`) — the default view
+2. Click **New Notice** and write a prompt (e.g. _"list tasks that need priority today and why"_)
+3. Choose the **sources** the AI may use:
+   - **ClickUp** — your tasks from the configured list
+   - **GitHub** — the `gh` CLI + a selected project's repo (PRs, issues, CI)
+   - **Web** — web search/fetch, with optional pinned URLs (e.g. _"news & trends about Vietnam"_)
+4. Set a daily run time (e.g. `08:00`) and enable the schedule
+5. The Notice auto-generates a Markdown briefing at that time — or hit **Run now** anytime
+
+> Tools are pre-approved per source so runs work unattended; a Web notice gets web tools but **not** shell access. Requires the `claude` CLI.
+
+### Kanban Board
+
+1. Open the **Kanban Board** (`Ctrl+K`)
+2. Import tasks from the backlog, then drag cards between columns — each column **is** a ClickUp status, and moving a card writes that status back to ClickUp (reverts with an error if ClickUp rejects it)
+3. Use the per-card **status dropdown** to change status without dragging
+4. Use the **Columns** menu to hide statuses you don't need (e.g. `Closed`) or collapse them to a rail — your layout persists
 
 ### Insights (AI Chat)
 
@@ -141,9 +164,10 @@ The GitHub Actions workflow builds for all platforms and publishes to [Releases]
 ### Code Review
 
 1. Open **Code Review** (`Ctrl+R`)
-2. Reviews run automatically on a configurable interval or on-demand
-3. PRs are analyzed for critical issues, bugs, suggestions, and code quality
-4. Findings are grouped by file with severity ratings and inline code references
+2. Pick one or more lists (all selected by default) — every matching task is loaded
+3. Reviews run automatically on a configurable interval or on-demand
+4. PRs are analyzed for critical issues, bugs, suggestions, and code quality
+5. Findings are grouped by file with severity ratings and inline code references
 
 ### AI Agents
 
@@ -185,6 +209,8 @@ src/
 │   │   ├── git-handlers.ts
 │   │   ├── insights-handlers.ts
 │   │   ├── code-review-handlers.ts
+│   │   ├── kanban-handlers.ts            # Kanban tasks + 1-1 ClickUp status write-back
+│   │   ├── dashboard-handlers.ts         # Scheduled AI "Notices" runner + scheduler
 │   │   ├── qc-handlers.ts
 │   │   ├── team-handlers.ts
 │   │   ├── usage-handlers.ts
@@ -203,6 +229,8 @@ src/
 │   │           ├── aider-agent.ts
 │   │           └── qwen-agent.ts
 │   ├── terminal/        # PTY management & persistence
+│   ├── kanban/          # Local Kanban task store (snapshot + workflow state)
+│   ├── dashboard/       # Dashboard Notice store
 │   ├── insights/        # AI chat executor & session storage
 │   ├── qc/              # QC testing logic
 │   ├── team/            # Team collaboration
@@ -212,9 +240,10 @@ src/
 ├── renderer/            # React frontend
 │   ├── App.tsx          # Root component & shortcuts
 │   ├── components/
+│   │   ├── dashboard/   # DashboardView — scheduled AI Notices
 │   │   ├── terminal/    # TerminalView, TerminalPanel
 │   │   ├── layout/      # Sidebar, ProjectTabBar
-│   │   ├── tasks/       # TasksView (multi-provider)
+│   │   ├── kanban/      # KanbanView, KanbanColumn, KanbanCard, backlog, task detail
 │   │   ├── insights/    # InsightsView, ChatMessage, ModelSelector, SessionSidebar
 │   │   ├── code-review/ # CodeReviewView — automated PR review
 │   │   ├── qc/          # QCView — quality check testing
