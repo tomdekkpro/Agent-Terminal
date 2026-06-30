@@ -1,4 +1,4 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList } from '../../../shared/types';
+import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 
 export type ProviderResult<T> =
   | { success: true; data: T }
@@ -14,7 +14,7 @@ export interface ITaskManagerProvider {
   searchTasks(
     settings: AppSettings,
     query: string,
-    filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+    filters?: TaskSearchFilters,
     listId?: string,
     page?: number,
   ): Promise<ProviderResult<TaskManagerTask[]>>;
@@ -35,11 +35,26 @@ export interface ITaskManagerProvider {
     description?: string,
   ): Promise<ProviderResult<any>>;
 
-  getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; entries: any[] }>>;
+  getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; todayMs: number; entries: any[] }>>;
 
   addTag?(settings: AppSettings, taskId: string, tagName: string): Promise<ProviderResult<any>>;
 
   removeTag?(settings: AppSettings, taskId: string, tagName: string): Promise<ProviderResult<any>>;
 
   getComments?(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>>;
+
+  getTaskStatuses?(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
+
+  getListStatuses?(settings: AppSettings, listId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
+
+  getWorkspaceMembers?(settings: AppSettings): Promise<ProviderResult<WorkspaceMember[]>>;
+}
+
+export interface WorkspaceMember {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
 }

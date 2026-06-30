@@ -1,12 +1,13 @@
 import type { IpcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
+import type { TaskSearchFilters } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { ClickUpProvider, JiraProvider, type ITaskManagerProvider } from './providers';
 
 const clickUpProvider = new ClickUpProvider();
 const jiraProvider = new JiraProvider();
 
-function getActiveProvider(): ITaskManagerProvider | null {
+export function getActiveProvider(): ITaskManagerProvider | null {
   const settings = getSettings();
   switch (settings.taskManagerProvider) {
     case 'clickup': return clickUpProvider;
@@ -39,7 +40,7 @@ export function registerTaskManagerHandlers(ipcMain: IpcMain): void {
     async (
       _event,
       query: string,
-      filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+      filters?: TaskSearchFilters,
       listId?: string,
       page?: number,
     ) => {
@@ -119,4 +120,31 @@ export function registerTaskManagerHandlers(ipcMain: IpcMain): void {
       return provider.removeTag(getSettings(), taskId, tagName);
     },
   );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TASK_MANAGER_GET_TASK_STATUSES,
+    async (_event, taskId: string) => {
+      const provider = getActiveProvider();
+      if (!provider) return { success: false, error: 'No task manager configured' };
+      if (!provider.getTaskStatuses) return { success: false, error: 'Provider does not support statuses' };
+      return provider.getTaskStatuses(getSettings(), taskId);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.TASK_MANAGER_GET_LIST_STATUSES,
+    async (_event, listId: string) => {
+      const provider = getActiveProvider();
+      if (!provider) return { success: false, error: 'No task manager configured' };
+      if (!provider.getListStatuses) return { success: false, error: 'Provider does not support list statuses' };
+      return provider.getListStatuses(getSettings(), listId);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.TASK_MANAGER_GET_MEMBERS, async () => {
+    const provider = getActiveProvider();
+    if (!provider) return { success: true, data: [] };
+    if (!provider.getWorkspaceMembers) return { success: true, data: [] };
+    return provider.getWorkspaceMembers(getSettings());
+  });
 }

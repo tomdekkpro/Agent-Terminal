@@ -1,5 +1,5 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList } from '../../../shared/types';
-import type { ITaskManagerProvider, ProviderResult } from './types';
+import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
+import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './types';
 
 const CLICKUP_API_BASE = 'https://api.clickup.com/api/v2';
 
@@ -31,6 +31,29 @@ async function clickUpFetch(apiKey: string, endpoint: string, options: RequestIn
   return response.json();
 }
 
+/** Resolve the "Release version" custom field to its display value. Handles
+ *  dropdown fields (value is the option id for new_drop_down, or the orderindex
+ *  for legacy) and plain text fields. Returns undefined when unset/not present. */
+function extractReleaseVersion(raw: any): string | undefined {
+  const fields = raw.custom_fields;
+  if (!Array.isArray(fields)) return undefined;
+  const field = fields.find((f: any) => (f?.name || '').toLowerCase().includes('release version'));
+  if (!field) return undefined;
+  const value = field.value;
+  if (value === undefined || value === null || value === '') return undefined;
+
+  const options = field.type_config?.options;
+  if (Array.isArray(options) && options.length > 0) {
+    const match = options.find(
+      (o: any) => String(o.id) === String(value) || o.orderindex === value,
+    );
+    if (match) return match.name || match.label || undefined;
+  }
+  // Plain text / short_text custom field
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return undefined;
+}
+
 function normalizeClickUpTask(raw: any): TaskManagerTask {
   return {
     id: raw.id,
@@ -39,7 +62,7 @@ function normalizeClickUpTask(raw: any): TaskManagerTask {
     description: raw.text_content || raw.description,
     status: { name: raw.status?.status || '', color: raw.status?.color || '#888' },
     priority: raw.priority
-      ? { name: raw.priority.priority, color: raw.priority.color }
+      ? { id: raw.priority.id, name: raw.priority.priority, color: raw.priority.color }
       : undefined,
     assignees: (raw.assignees || []).map((a: any) => ({
       id: String(a.id),
@@ -52,6 +75,7 @@ function normalizeClickUpTask(raw: any): TaskManagerTask {
       bgColor: t.tag_bg,
       fgColor: t.tag_fg,
     })),
+    releaseVersion: extractReleaseVersion(raw),
     url: raw.url,
     createdAt: raw.date_created,
     updatedAt: raw.date_updated,
@@ -161,7 +185,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
   async searchTasks(
     settings: AppSettings,
     query: string,
-    filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+    filters?: TaskSearchFilters,
     listId?: string,
     page: number = 0,
   ): Promise<ProviderResult<TaskManagerTask[]>> {
@@ -179,6 +203,10 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (filters?.assignees?.length) {
         for (const a of filters.assignees) params.append('assignees[]', a);
       }
+      // Server-side ordering so paged fetches return the right subset first.
+      // These also become part of the cache key via params.toString().
+      if (filters?.orderBy) params.set('order_by', filters.orderBy);
+      if (filters?.reverse) params.set('reverse', 'true');
 
       const hasQuery = !!query.trim();
 
@@ -366,7 +394,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
     }
   }
 
-  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; entries: any[] }>> {
+  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; todayMs: number; entries: any[] }>> {
     try {
       const teamId = settings.clickupWorkspaceId;
       if (!teamId) throw new Error('Workspace ID not configured');
@@ -374,11 +402,116 @@ export class ClickUpProvider implements ITaskManagerProvider {
       const data = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/time_entries?task_id=${taskId}`);
       const entries = data.data || [];
       const totalMs = entries.reduce((sum: number, e: any) => sum + Number(e.duration || 0), 0);
-      return { success: true, data: { totalMs, entries } };
+
+      // Compute today's tracked time
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const todayMs = entries.reduce((sum: number, e: any) => {
+        const start = Number(e.start || 0);
+        const dur = Number(e.duration || 0);
+        if (start >= todayStart) return sum + dur;
+        // Entry started before today but may overlap into today
+        const end = start + dur;
+        if (end > todayStart) return sum + (end - todayStart);
+        return sum;
+      }, 0);
+
+      return { success: true, data: { totalMs, todayMs, entries } };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get time entries',
+      };
+    }
+  }
+
+  async getTaskStatuses(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>> {
+    try {
+      // Fetch the task to get its list.id, then fetch that list for statuses
+      const task = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}`);
+      const listId = task.list?.id;
+      if (!listId) throw new Error('Could not determine task list');
+
+      const list = await clickUpFetch(settings.clickupApiKey, `/list/${listId}`);
+      const statuses: { name: string; color: string }[] = (list.statuses || []).map((s: any) => ({
+        name: s.status as string,
+        color: (s.color as string) || '#999',
+      }));
+      return { success: true, data: statuses };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get statuses',
+      };
+    }
+  }
+
+  async getWorkspaceMembers(settings: AppSettings): Promise<ProviderResult<WorkspaceMember[]>> {
+    try {
+      const teamId = settings.clickupWorkspaceId;
+      if (!teamId) throw new Error('Workspace ID not configured');
+
+      const cacheKey = `members-${teamId}`;
+      const cached = taskCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        return { success: true, data: cached.data };
+      }
+
+      const data = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}`);
+      const members: WorkspaceMember[] = (data.team?.members || []).map((m: any) => {
+        const user = m.user || {};
+        return {
+          id: String(user.id),
+          username: user.username || user.email || 'Unknown',
+          email: user.email,
+          initials: user.initials,
+          color: user.color,
+          profilePicture: user.profilePicture,
+        };
+      });
+
+      // De-duplicate by id (some ClickUp workspaces return duplicates across groups)
+      const seen = new Set<string>();
+      const unique = members.filter((m) => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+
+      // Sort alphabetically by username for stable dropdowns
+      unique.sort((a, b) => a.username.localeCompare(b.username));
+
+      taskCache.set(cacheKey, { data: unique, timestamp: Date.now() });
+      return { success: true, data: unique };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch workspace members',
+      };
+    }
+  }
+
+  async getListStatuses(settings: AppSettings, listId: string): Promise<ProviderResult<{ name: string; color: string }[]>> {
+    try {
+      if (!listId) throw new Error('List ID is required');
+
+      const cacheKey = `list-statuses-${listId}`;
+      const cached = taskCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        return { success: true, data: cached.data };
+      }
+
+      const list = await clickUpFetch(settings.clickupApiKey, `/list/${listId}`);
+      const statuses: { name: string; color: string }[] = (list.statuses || []).map((s: any) => ({
+        name: s.status as string,
+        color: (s.color as string) || '#999',
+      }));
+      taskCache.set(cacheKey, { data: statuses, timestamp: Date.now() });
+      return { success: true, data: statuses };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get list statuses',
       };
     }
   }

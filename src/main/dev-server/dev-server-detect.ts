@@ -1,7 +1,7 @@
 import { join, relative, dirname, basename } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { debugLog } from '../../shared/utils';
-import type { DetectedServer, DetectResult } from '../../shared/types';
+import type { DetectResult, LaunchProfile } from '../../shared/types';
 
 /**
  * Recursively find files matching a predicate, up to maxDepth.
@@ -74,36 +74,59 @@ function parseSolutionProjects(slnPath: string): string[] {
 }
 
 /**
- * Among a list of .csproj paths, find the one most likely to be the runnable web host.
- * Returns the relative csproj path or null.
+ * Among a list of .csproj paths, find ALL runnable Web SDK projects.
+ * Returns an array sorted by likelihood (best first).
  */
-function findHostProject(slnDir: string, csprojRelPaths: string[]): string | null {
-  // Filter to Web SDK projects only
-  const webProjects: { rel: string; score: number }[] = [];
+function findWebProjects(slnDir: string, csprojRelPaths: string[]): { rel: string; name: string; score: number }[] {
+  const webProjects: { rel: string; name: string; score: number }[] = [];
   for (const rel of csprojRelPaths) {
     const fullPath = join(slnDir, rel);
     try {
       const content = readFileSync(fullPath, 'utf-8');
       if (!content.includes('Microsoft.NET.Sdk.Web')) continue;
 
-      const name = basename(rel, '.csproj').toLowerCase();
+      const name = basename(rel, '.csproj');
+      const nameLower = name.toLowerCase();
       let score = 50;
-      if (name.includes('.web.host') || name.includes('.webhost')) score += 40;
-      if (name.includes('.host') && !name.includes('.webhost')) score += 30;
-      if (name.includes('.api') || name.endsWith('api')) score += 30;
-      if (name.includes('.server')) score += 25;
+      if (nameLower.includes('.web.host') || nameLower.includes('.webhost')) score += 40;
+      if (nameLower.includes('.host') && !nameLower.includes('.webhost')) score += 30;
+      if (nameLower.includes('.api') || nameLower.endsWith('api')) score += 30;
+      if (nameLower.includes('.server') || nameLower.includes('.service')) score += 25;
 
       // Check for launchSettings.json — strong signal
       const launchSettings = join(dirname(fullPath), 'Properties', 'launchSettings.json');
       if (existsSync(launchSettings)) score += 15;
 
-      webProjects.push({ rel, score });
+      webProjects.push({ rel, name, score });
     } catch { /* skip unreadable */ }
   }
 
-  if (webProjects.length === 0) return null;
   webProjects.sort((a, b) => b.score - a.score);
-  return webProjects[0].rel;
+  return webProjects;
+}
+
+/**
+ * Parse launchSettings.json and return profiles with commandName === "Project".
+ */
+function parseLaunchProfiles(projectDir: string): LaunchProfile[] {
+  const settingsPath = join(projectDir, 'Properties', 'launchSettings.json');
+  if (!existsSync(settingsPath)) return [];
+  try {
+    const raw = readFileSync(settingsPath, 'utf-8');
+    const settings = JSON.parse(raw);
+    const profiles: LaunchProfile[] = [];
+    for (const [name, profile] of Object.entries<any>(settings.profiles || {})) {
+      if (profile.commandName !== 'Project') continue;
+      profiles.push({
+        name,
+        environment: profile.environmentVariables?.ASPNETCORE_ENVIRONMENT || 'Development',
+        applicationUrl: profile.applicationUrl,
+      });
+    }
+    return profiles;
+  } catch {
+    return [];
+  }
 }
 
 export function detectDevServers(projectPath: string): DetectResult {
@@ -148,8 +171,9 @@ export function detectDevServers(projectPath: string): DetectResult {
   }
 
   // ── Backend detection (.sln-driven) ──────────────────────────
-  // List ALL .sln files so the user can choose which one to run
+  // List ALL .sln files and expose every runnable Web SDK project
   const slnFiles = findFiles(projectPath, (name) => name.endsWith('.sln'), 4);
+  const seen = new Set<string>(); // dedupe projects across solutions
 
   const scoredSlns = slnFiles
     .map((slnPath) => ({ path: slnPath, score: scoreSolution(slnPath) }))
@@ -157,21 +181,26 @@ export function detectDevServers(projectPath: string): DetectResult {
 
   for (const sln of scoredSlns) {
     const slnDir = dirname(sln.path);
-    const slnName = basename(sln.path);
+    const slnName = basename(sln.path, '.sln');
     const csprojRels = parseSolutionProjects(sln.path);
+    const webProjects = findWebProjects(slnDir, csprojRels);
 
-    // Try to find the best web host project inside this solution for the cwd
-    const hostRel = findHostProject(slnDir, csprojRels);
-    const cwd = hostRel
-      ? relative(projectPath, join(slnDir, dirname(hostRel)))
-      : relative(projectPath, slnDir);
+    for (const proj of webProjects) {
+      const projDir = join(slnDir, dirname(proj.rel));
+      const cwd = relative(projectPath, projDir);
+      if (seen.has(cwd)) continue;
+      seen.add(cwd);
 
-    result.backend.push({
-      cmd: 'dotnet run',
-      cwd,
-      label: slnName,
-      confidence: sln.score,
-    });
+      const profiles = parseLaunchProfiles(projDir);
+
+      result.backend.push({
+        cmd: 'dotnet run',
+        cwd,
+        label: `${proj.name} (${slnName})`,
+        confidence: Math.min(100, Math.round((sln.score + proj.score) / 2)),
+        profiles: profiles.length > 0 ? profiles : undefined,
+      });
+    }
   }
 
   debugLog(`[DevServerDetect] Found ${result.frontend.length} frontend, ${result.backend.length} backend candidates`);

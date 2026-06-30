@@ -1,6 +1,6 @@
 import { type IpcMain } from 'electron';
 import { exec, execSync } from 'child_process';
-import { existsSync, readFileSync, appendFileSync, cpSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, statSync, appendFileSync, cpSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { debugLog, debugError } from '../../shared/utils';
@@ -8,7 +8,80 @@ import { debugLog, debugError } from '../../shared/utils';
 const GIT_TIMEOUT = 30000; // 30 seconds for most git operations
 const NETWORK_TIMEOUT = 60000; // 60 seconds for network operations (push, pull, fetch)
 
+/** Cap for untracked-file preview to keep the renderer responsive. */
+const UNTRACKED_MAX_BYTES = 1_000_000;
+const UNTRACKED_MAX_LINES = 10_000;
+
+/** Build a unified-diff representation of a new (untracked) file by showing
+ *  every line as an addition. Mirrors the format `git diff` produces for a
+ *  fresh add so the renderer's existing diff parser/highlighter just works. */
+function buildUntrackedDiff(cwd: string, relPath: string): string {
+  const fullPath = join(cwd, relPath);
+  const header = `diff --git a/${relPath} b/${relPath}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/${relPath}\n`;
+  let stat;
+  try {
+    stat = statSync(fullPath);
+  } catch {
+    return '';
+  }
+  if (stat.size === 0) {
+    return header + '@@ -0,0 +0,0 @@\n';
+  }
+  if (stat.size > UNTRACKED_MAX_BYTES) {
+    return (
+      header +
+      `@@ -0,0 +1,1 @@\n+(file too large to preview — ${(stat.size / 1024).toFixed(1)} KB)\n`
+    );
+  }
+  let buf: Buffer;
+  try {
+    buf = readFileSync(fullPath);
+  } catch {
+    return '';
+  }
+  // Binary heuristic: any null byte in the first 8KB → treat as binary.
+  const probe = buf.subarray(0, Math.min(buf.length, 8192));
+  if (probe.includes(0)) {
+    return (
+      header +
+      `@@ -0,0 +1,1 @@\n+(binary file — ${(stat.size / 1024).toFixed(1)} KB)\n`
+    );
+  }
+  const text = buf.toString('utf-8');
+  // split('\n') leaves a trailing '' when the file ends with '\n' — drop it.
+  const lines = text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const truncated = lines.length > UNTRACKED_MAX_LINES;
+  const shown = truncated ? lines.slice(0, UNTRACKED_MAX_LINES) : lines;
+  const body = shown.map((l) => '+' + l).join('\n');
+  const trailer = truncated
+    ? `\n+(...truncated — ${lines.length - UNTRACKED_MAX_LINES} more lines)`
+    : '';
+  return `${header}@@ -0,0 +1,${shown.length} @@\n${body}${trailer}\n`;
+}
+
 /** Run a git command asynchronously with timeout (non-blocking) */
+/**
+ * Resolve the project's default remote branch (e.g. "origin/main").
+ * Matches what `claude --worktree <name>` uses as the base branch — see
+ * https://code.claude.com/docs/en/common-workflows#git-worktrees. Returns
+ * `null` if there's no remote or HEAD isn't set there, so callers can fall
+ * back to the local HEAD.
+ */
+async function resolveOriginHead(projectPath: string): Promise<string | null> {
+  try {
+    const ref = await new Promise<string>((resolve, reject) => {
+      exec('git symbolic-ref refs/remotes/origin/HEAD --short', { cwd: projectPath, encoding: 'utf-8', timeout: 5000 }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    return ref || null;
+  } catch {
+    return null;
+  }
+}
+
 function gitExec(command: string, cwd: string, timeout = GIT_TIMEOUT): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(command, { cwd, encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -31,7 +104,13 @@ function copyClaudeConfig(projectPath: string, worktreeDir: string): void {
 
     const destDir = join(worktreeDir, '.claude');
     mkdirSync(destDir, { recursive: true });
-    cpSync(srcDir, destDir, { recursive: true });
+    // Exclude .claude/worktrees/ — the new worktree convention places
+    // the worktree dir INSIDE this path, so a recursive copy would
+    // nest it inside itself.
+    cpSync(srcDir, destDir, {
+      recursive: true,
+      filter: (s) => !s.replace(/\\/g, '/').includes('/.claude/worktrees'),
+    });
     debugLog('[Git] Copied .claude/ config to worktree');
   } catch (err) {
     debugError('[Git] Failed to copy .claude/ config:', err);
@@ -72,15 +151,18 @@ function ensureGitignore(projectPath: string, entry: string): void {
 export function registerGitHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     IPC_CHANNELS.GIT_CREATE_WORKTREE,
-    async (_event, projectPath: string, taskId: string, _taskName?: string) => {
+    async (_event, projectPath: string, taskId: string, _taskName?: string, baseBranch?: string) => {
       try {
         if (!isGitRepo(projectPath)) {
           return { success: false, error: 'Not a git repository' };
         }
 
         const safeName = sanitize(taskId);
-        const worktreeDir = join(projectPath, '.task-worktrees', safeName);
-        const branch = `task/${safeName}`;
+        // Use Claude's native worktree convention so `claude --worktree <name>`
+        // reuses the same dir + branch we create. See:
+        //   <repo>/.claude/worktrees/<name>  with branch  worktree-<name>
+        const worktreeDir = join(projectPath, '.claude', 'worktrees', safeName);
+        const branch = `worktree-${safeName}`;
 
         // Already exists — reuse
         if (existsSync(worktreeDir)) {
@@ -93,22 +175,44 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           await gitExec('git worktree prune', projectPath, 5000);
         } catch { /* non-critical */ }
 
-        // Add .task-worktrees/ to .gitignore
-        ensureGitignore(projectPath, '.task-worktrees/');
+        // .claude/ is already gitignored in most projects, but ensure it
+        ensureGitignore(projectPath, '.claude/');
+
+        // Pick the base ref:
+        //  1. Explicit caller override (per-task selection from the UI)
+        //  2. origin/HEAD — matches `claude --worktree <name>`
+        //  3. local HEAD — for projects with no remote
+        let baseRef: string;
+        if (baseBranch && baseBranch.trim()) {
+          baseRef = baseBranch.trim();
+        } else {
+          const originHead = await resolveOriginHead(projectPath);
+          baseRef = originHead || 'HEAD';
+        }
+        debugLog('[Git] Worktree base:', baseRef);
 
         // Try creating with new branch
         try {
-          await gitExec(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+          await gitExec(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
         } catch {
-          // Branch might already exist (previous worktree was removed but branch kept)
-          // Force-delete the old branch first, then try with existing branch
+          // Two stale-state cases git won't recover from on its own:
+          //  - branch already exists (previous worktree removed but branch kept)
+          //  - worktree record still registered ("is already used by worktree at ...")
+          //    happens when the dir was deleted manually so plain `prune` skips it.
+          try {
+            await gitExec(`git worktree remove --force "${worktreeDir}"`, projectPath, 5000);
+            debugLog('[Git] Removed stale worktree record:', worktreeDir);
+          } catch { /* no record or path mismatch, ignore */ }
+          try {
+            await gitExec('git worktree prune --expire=now', projectPath, 5000);
+          } catch { /* noop */ }
           try {
             await gitExec(`git branch -D "${branch}"`, projectPath, 5000);
             debugLog('[Git] Deleted stale branch:', branch);
           } catch { /* branch may not exist, ignore */ }
 
           try {
-            await gitExec(`git worktree add "${worktreeDir}" -b "${branch}"`, projectPath);
+            await gitExec(`git worktree add "${worktreeDir}" -b "${branch}" ${baseRef}`, projectPath);
           } catch (err: any) {
             return { success: false, error: err.message || 'Failed to create worktree' };
           }
@@ -177,6 +281,42 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
           return { success: false, error: 'Not a git repository' };
         }
 
+        // Claude Code auto-removes the worktree (and the branch when there
+        // are no commits) if you exit the agent with a clean working tree —
+        // see https://code.claude.com/docs/en/common-workflows#git-worktrees.
+        // If the task branch is gone, surface a clear error rather than
+        // letting `git merge` fail with a generic "not something we can merge".
+        try {
+          await gitExec(`git rev-parse --verify "${taskBranch}"`, projectPath, 5000);
+        } catch {
+          return {
+            success: false,
+            error: `Branch "${taskBranch}" no longer exists. Claude likely removed the worktree after a clean session — there's nothing to merge.`,
+          };
+        }
+
+        // Auto-commit any pending changes in the worktree — modifications,
+        // deletions, AND new files the agent created. We use `git add -A`
+        // so newly-created files come along; project `.gitignore` is the
+        // right filter for junk (build outputs, logs, .DS_Store), not
+        // limiting to tracked-only with `-u` (which silently skips new
+        // files and they get destroyed when the worktree is removed).
+        let autoCommitted = false;
+        try {
+          const status = await gitExec('git status --porcelain', worktreePath);
+          if (status.length > 0) {
+            await gitExec('git add -A', worktreePath);
+            await gitExec(`git commit -m "Auto-commit pending changes on ${taskBranch}"`, worktreePath);
+            autoCommitted = true;
+            debugLog('[Git] Auto-committed pending changes on', taskBranch);
+          }
+        } catch (err: any) {
+          return {
+            success: false,
+            error: `Failed to auto-commit pending changes on ${taskBranch}: ${err.message || err}. Commit manually with "Commit only", then retry.`,
+          };
+        }
+
         // Ensure task branch has commits ahead of target
         try {
           const aheadCount = await gitExec(
@@ -184,7 +324,10 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
             projectPath,
           );
           if (aheadCount === '0') {
-            return { success: false, error: `No commits to merge — task branch is up to date with ${targetBranch}` };
+            return {
+              success: false,
+              error: `No commits to merge — ${taskBranch} is at the same commit as ${targetBranch}. Verify the agent committed onto ${taskBranch} (\`git log ${taskBranch}\`).`,
+            };
           }
         } catch {
           // Could not determine ahead count, proceed anyway
@@ -229,7 +372,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         } catch { /* ignore */ }
 
         debugLog('[Git] Merged task branch into', targetBranch);
-        return { success: true, targetBranch };
+        return { success: true, targetBranch, autoCommitted };
       } catch (error: any) {
         debugError('[Git] mergeTask error:', error);
         return { success: false, error: error.message || 'Failed to merge task branch' };
@@ -608,6 +751,119 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         return { success: false, error: error.message || 'Failed to get task summary' };
       }
     }
+  );
+
+  // ─── Diff Files — per-file diffs for Changes panel ────────────
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_DIFF_FILES,
+    async (_event, cwd: string, baseBranch?: string) => {
+      try {
+        if (!isGitRepo(cwd)) {
+          return { success: false, error: 'Not a git repository' };
+        }
+
+        interface DiffFile { path: string; status: string; diff: string }
+        const files: DiffFile[] = [];
+
+        // Get current branch
+        let currentBranch = '';
+        try { currentBranch = await gitExec('git rev-parse --abbrev-ref HEAD', cwd); } catch { /* ignore */ }
+
+        // Uncommitted changes (staged + unstaged combined)
+        try {
+          const diff = await gitExec('git diff HEAD --unified=3 --no-color', cwd);
+          if (diff) {
+            // Parse into per-file diffs
+            const fileDiffs = diff.split(/^diff --git /m).filter(Boolean);
+            for (const chunk of fileDiffs) {
+              const pathMatch = chunk.match(/^a\/(.*?) b\//);
+              const path = pathMatch ? pathMatch[1] : 'unknown';
+              // Determine status from diff header
+              let status = 'modified';
+              if (chunk.includes('new file mode')) status = 'added';
+              else if (chunk.includes('deleted file mode')) status = 'deleted';
+              files.push({ path, status, diff: 'diff --git ' + chunk });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Untracked new files — synthesize an "all added" diff so the panel
+        // can preview the content (capped at 1MB / 10k lines, binary detected).
+        try {
+          const untracked = await gitExec('git ls-files --others --exclude-standard', cwd);
+          if (untracked) {
+            for (const filePath of untracked.split('\n').filter(Boolean)) {
+              const diff = buildUntrackedDiff(cwd, filePath);
+              files.push({ path: filePath, status: 'untracked', diff });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Staged changes not in HEAD (for files that are only staged)
+        try {
+          const staged = await gitExec('git diff --cached --unified=3 --no-color', cwd);
+          if (staged) {
+            const fileDiffs = staged.split(/^diff --git /m).filter(Boolean);
+            for (const chunk of fileDiffs) {
+              const pathMatch = chunk.match(/^a\/(.*?) b\//);
+              const path = pathMatch ? pathMatch[1] : 'unknown';
+              // Skip if already in the list from HEAD diff
+              if (files.some((f) => f.path === path)) continue;
+              let status = 'staged';
+              if (chunk.includes('new file mode')) status = 'added';
+              files.push({ path, status, diff: 'diff --git ' + chunk });
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Branch diff (committed changes vs base)
+        let branchFiles: DiffFile[] = [];
+        if (baseBranch && baseBranch !== currentBranch) {
+          try {
+            const branchDiff = await gitExec(
+              `git diff ${baseBranch}...${currentBranch} --unified=3 --no-color`,
+              cwd,
+            );
+            if (branchDiff) {
+              const fileDiffs = branchDiff.split(/^diff --git /m).filter(Boolean);
+              for (const chunk of fileDiffs) {
+                const pathMatch = chunk.match(/^a\/(.*?) b\//);
+                const path = pathMatch ? pathMatch[1] : 'unknown';
+                let status = 'modified';
+                if (chunk.includes('new file mode')) status = 'added';
+                else if (chunk.includes('deleted file mode')) status = 'deleted';
+                branchFiles.push({ path, status, diff: 'diff --git ' + chunk });
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Commit log
+        let commits: string[] = [];
+        if (baseBranch && baseBranch !== currentBranch) {
+          try {
+            const log = await gitExec(
+              `git log --pretty=format:"%h %s" ${baseBranch}..${currentBranch}`,
+              cwd,
+            );
+            if (log) commits = log.split('\n').filter(Boolean);
+          } catch { /* ignore */ }
+        }
+
+        return {
+          success: true,
+          data: {
+            uncommitted: files,
+            branch: branchFiles,
+            commits,
+            currentBranch,
+            baseBranch: baseBranch || '',
+          },
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message || 'Failed to get diff' };
+      }
+    },
   );
 
   // ─── Enable Auto-Merge on PR ─────────────────────────────────

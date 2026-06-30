@@ -6,6 +6,9 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { QCTestPanel } from '../insights/QCTestPanel';
 import { ModelSelector } from '../insights/ModelSelector';
 import { QCSidebar } from './QCSidebar';
+import { UsageIndicator } from '../usage/UsageIndicator';
+import { SystemMonitor } from '../status/SystemMonitor';
+import { ServiceStatusIndicator } from '../status/ServiceStatusIndicator';
 import type { AgentProviderId, AgentProviderMeta, InsightsModel } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 
@@ -138,6 +141,9 @@ export function QCView() {
               {agentProviders.length > 0 ? agentProviders.map((p) => (<option key={p.id} value={p.id}>{p.displayName}{!p.available ? ' (N/A)' : ''}</option>)) : (<><option value="claude">Claude Code</option><option value="copilot">GitHub Copilot</option></>)}
             </select>
             <ModelSelector models={currentModels} value={selectedModel} onChange={setSelectedModel} disabled={false} />
+            <SystemMonitor />
+            <ServiceStatusIndicator />
+            <UsageIndicator />
           </div>
         </div>
 

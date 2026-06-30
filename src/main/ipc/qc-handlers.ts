@@ -2,8 +2,70 @@ import type { BrowserWindow, IpcMain } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { InsightsModel, QCTask } from '../../shared/types';
+import { splitTimeByDate } from '../../shared/utils';
 import { generateTestCases, runAllTests, runTestCase, abortQC } from '../qc/qc-executor';
 import { getSession, saveSession } from '../insights/session-storage';
+import { getActiveProvider } from './task-manager-handlers';
+import { getSettings } from './settings-handlers';
+import { listKanbanTasks } from '../kanban/kanban-task-store';
+import { broadcastKanbanTaskUpdate } from './kanban-handlers';
+import { recordActivity } from '../activity/activity-store';
+
+/** Bridge a finished QC run to the auto-code loop + activity feed. When tests
+ *  fail and the QC task is linked to a tracked task, mirror the captured
+ *  console/network diagnostics onto the matching KanbanTask (so the next
+ *  auto-code attempt sees them) and record a 'qc-failed' activity event. */
+function bridgeQCDiagnostics(task: QCTask): void {
+  if (!task.linkedTask) return;
+  const failed = task.testCases.filter((tc) => tc.status === 'failed');
+  if (failed.length === 0) return;
+
+  const dedupe = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).slice(0, 40);
+  const consoleErrors = dedupe(failed.flatMap((tc) => tc.consoleErrors || []));
+  const networkErrors = dedupe(failed.flatMap((tc) => tc.networkErrors || []));
+
+  try {
+    const match = listKanbanTasks().find((t) => t.clickupTaskId === task.linkedTask!.id);
+    if (match && (consoleErrors.length || networkErrors.length)) {
+      broadcastKanbanTaskUpdate(match.id, {
+        qcDiagnostics: { consoleErrors, networkErrors, capturedAt: new Date().toISOString() },
+      });
+    }
+  } catch { /* non-critical */ }
+
+  const extras: string[] = [];
+  if (consoleErrors.length) extras.push(`${consoleErrors.length} console error(s)`);
+  if (networkErrors.length) extras.push(`${networkErrors.length} network error(s)`);
+  recordActivity({
+    source: 'qc',
+    kind: 'qc-failed',
+    level: 'error',
+    title: `QC failed: ${task.linkedTask.name || task.title}`,
+    message: `${failed.length} test(s) failed${extras.length ? ` — ${extras.join(', ')}` : ''}.`,
+    clickupTaskId: task.linkedTask.id,
+    taskName: task.linkedTask.name || task.title,
+    url: task.linkedTask.url,
+  });
+}
+
+/** Post QC duration as time entries split by calendar day to the linked task */
+async function postQCTimeEntries(task: QCTask): Promise<void> {
+  if (!task.linkedTask || !task.startedAt) return;
+  const provider = getActiveProvider();
+  if (!provider) return;
+
+  const startMs = new Date(task.startedAt).getTime();
+  const endMs = task.completedAt ? new Date(task.completedAt).getTime() : Date.now();
+  if (endMs <= startMs) return;
+
+  const entries = splitTimeByDate(startMs, endMs);
+  const settings = getSettings();
+  for (const entry of entries) {
+    try {
+      await provider.postTimeEntry(settings, task.linkedTask.id, entry.startMs, entry.durationMs, `QC: ${task.title}`);
+    } catch { /* non-critical */ }
+  }
+}
 
 export function registerQCHandlers(
   ipcMain: IpcMain,
@@ -77,6 +139,12 @@ export function registerQCHandlers(
           await saveSession(freshSession);
         }
 
+        // Post QC time entries to linked task (split by date)
+        try { await postQCTimeEntries(updatedTask); } catch { /* non-critical */ }
+
+        // Bridge diagnostics → auto-code loop + activity feed
+        try { bridgeQCDiagnostics(updatedTask); } catch { /* non-critical */ }
+
         return { success: true, data: updatedTask };
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : 'Failed to run tests' };
@@ -113,6 +181,22 @@ export function registerQCHandlers(
           );
           freshSession.qcTask.updatedAt = new Date().toISOString();
           await saveSession(freshSession);
+
+          // Post single test case time entry to linked task (split by date)
+          if (freshSession.qcTask.linkedTask && result.startedAt && result.durationMs) {
+            const provider = getActiveProvider();
+            if (provider) {
+              const startMs = new Date(result.startedAt).getTime();
+              const endMs = result.completedAt ? new Date(result.completedAt).getTime() : startMs + result.durationMs;
+              const entries = splitTimeByDate(startMs, endMs);
+              const settings = getSettings();
+              for (const entry of entries) {
+                try {
+                  await provider.postTimeEntry(settings, freshSession.qcTask.linkedTask.id, entry.startMs, entry.durationMs, `QC: ${result.name}`);
+                } catch { /* non-critical */ }
+              }
+            }
+          }
         }
 
         return { success: true, data: result };

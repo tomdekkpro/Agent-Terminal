@@ -22,6 +22,7 @@ export class GeminiAgentProvider implements IAgentProvider {
     sessionDetection: false,
     remoteControl: false,
     insights: false,
+    headless: true,
   };
 
   isAvailable(): boolean {
@@ -42,6 +43,17 @@ export class GeminiAgentProvider implements IAgentProvider {
 
   buildResumeCommand(_options: AgentInvokeOptions): string {
     return `${this.command} --resume`;
+  }
+
+  buildHeadlessArgs(options: { model?: string; cwd: string }): string[] {
+    // Gemini CLI goes non-interactive automatically when input is piped to
+    // stdin (the orchestrator pipes the fix prompt), so no `-p` is needed —
+    // the piped content becomes the prompt. `--yolo` auto-approves all tool
+    // calls so it can edit/commit unattended; `-m` selects the model.
+    // Flags verified against google-gemini/gemini-cli docs (v0.36+).
+    const args: string[] = ['--yolo'];
+    if (options.model) args.push('-m', options.model);
+    return args;
   }
 
   parseUsageFromOutput(_data: string): AgentUsageData | null {

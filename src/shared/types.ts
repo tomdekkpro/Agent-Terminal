@@ -11,6 +11,10 @@ export interface AgentCapabilities {
   sessionDetection: boolean;
   remoteControl: boolean;
   insights: boolean;
+  /** Supports a non-interactive, single-shot run (prompt piped to stdin)
+   *  driven by the auto-code orchestrator. Optional — undefined = false.
+   *  Only agents with this can be selected as a task's auto-code agent. */
+  headless?: boolean;
 }
 
 export interface AgentModelOption {
@@ -25,6 +29,12 @@ export interface AgentInvokeOptions {
   sessionId?: string;
   task?: string;
   env?: Record<string, string>;
+  /** Pass-through to Claude's `-w/--worktree <name>` flag.
+   *  Claude creates / reuses a worktree at `<repo>/.claude/worktrees/<name>`
+   *  with branch `worktree-<name>`. When set, the CLI is run from the
+   *  project root (not the worktree path) — Claude handles the cd internally
+   *  and resume works across worktrees of the same repo. */
+  worktreeName?: string;
 }
 
 export interface AgentSettingsField {
@@ -78,14 +88,50 @@ export interface TaskManagerTask {
   name: string;
   description?: string;
   status: { name: string; color: string };
-  priority?: { name: string; color: string };
+  /** ClickUp priority — id: "1" (Urgent) | "2" (High) | "3" (Normal) | "4" (Low). Lower = more important. */
+  priority?: { id?: string; name: string; color: string };
   assignees: Array<{ id: string; username: string; email?: string; initials?: string }>;
   tags: Array<{ name: string; bgColor: string; fgColor: string }>;
+  /** Selected "Release version" custom-field value (resolved to its option name), if set. */
+  releaseVersion?: string;
   url: string;
   createdAt: string;
   updatedAt: string;
   providerTaskId: string;
   provider: TaskManagerProvider;
+}
+
+/** Data sources a Dashboard Notice's AI run is allowed to use. */
+export type NoticeSource = 'clickup' | 'github' | 'web';
+
+/** A scheduled AI "Notice" on the Dashboard: a saved prompt that runs daily at
+ *  a chosen local time (and on demand), producing a Markdown digest. */
+export interface DashboardNotice {
+  id: string;
+  title: string;
+  /** Natural-language prompt, e.g. "all tasks that need priority today". */
+  prompt: string;
+  /** Local time-of-day "HH:mm" to auto-run daily. Empty = manual only. */
+  scheduleTime: string;
+  enabled: boolean;
+  /** Optional project path used as the Claude CLI working directory (needed for GitHub/gh). */
+  projectPath?: string;
+  /** ClickUp list id to pull tasks from (falls back to the configured list). */
+  listId?: string;
+  /** Which data sources/tools this notice may use. Undefined = legacy ClickUp-only. */
+  sources?: NoticeSource[];
+  /** Websites to consult when the 'web' source is enabled. */
+  urls?: string[];
+  status: 'idle' | 'running' | 'done' | 'error';
+  /** Latest result, Markdown. */
+  lastResult?: string;
+  /** ISO timestamp of the last run. */
+  lastRunAt?: string;
+  /** Local YYYY-MM-DD of the last run — guards the once-per-day auto-trigger. */
+  lastRunDate?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** List/container that holds tasks (ClickUp list, Jira project, etc.) */
@@ -103,9 +149,45 @@ export interface TerminalTask {
   name: string;
   status: string;
   statusColor: string;
+  /** Selected "Release version" custom-field value, if set. */
+  releaseVersion?: string;
   url: string;
   provider: TaskManagerProvider;
 }
+
+/** Ordering options for the Kanban Backlog column. */
+export type BacklogSortBy =
+  | 'priority'      // Priority (Urgent → Low), then newest-created
+  | 'created-desc'  // Newest created first
+  | 'created-asc'   // Oldest created first
+  | 'updated-desc'; // Recently updated first
+
+export const BACKLOG_SORT_LABELS: Record<BacklogSortBy, string> = {
+  'priority': 'Priority',
+  'created-desc': 'Newest first',
+  'created-asc': 'Oldest first',
+  'updated-desc': 'Recently updated',
+};
+
+/** Filters accepted by task-manager search across providers. */
+export interface TaskSearchFilters {
+  statuses?: string[];
+  assignees?: string[];
+  includeClosed?: boolean;
+  /** Server-side ordering. ClickUp maps to order_by/reverse; Jira maps to JQL ORDER BY. */
+  orderBy?: 'id' | 'created' | 'updated' | 'due_date';
+  reverse?: boolean;
+}
+
+/** Map a backlog sort to server-side ordering so pagination fetches the right
+ *  subset first. ClickUp's order_by doesn't support priority — for that sort we
+ *  fetch newest-created first and let the client order the loaded set. */
+export const BACKLOG_SORT_API_PARAMS: Record<BacklogSortBy, { orderBy: 'created' | 'updated'; reverse: boolean }> = {
+  'priority': { orderBy: 'created', reverse: false },
+  'created-desc': { orderBy: 'created', reverse: false },
+  'created-asc': { orderBy: 'created', reverse: true },
+  'updated-desc': { orderBy: 'updated', reverse: false },
+};
 
 export interface AppSettings {
   // Terminal
@@ -152,6 +234,72 @@ export interface AppSettings {
   codeReviewStatuses: string;
   codeReviewProjectPath: string;
   codeReviewTagName: string;
+  // Kanban filter — persisted assignee id; empty = show all tasks; also gates the auto-code loop
+  kanbanFilterAssigneeId: string;
+  /** Persisted project filter for the Kanban board. Empty = show all projects. */
+  kanbanFilterProjectId: string;
+  /** ClickUp status names (comma-separated) that count as backlog candidates — shown in the leftmost column when not yet imported */
+  kanbanBacklogStatuses: string;
+  /** How the Backlog column is ordered. Persisted so the choice survives restarts. */
+  kanbanBacklogSortBy: BacklogSortBy;
+  /** ClickUp list id used to populate the backlog (falls back to clickupListId) */
+  kanbanBacklogListId: string;
+  /** ClickUp status names (comma-separated) that map to the "In Progress" Kanban column */
+  kanbanInProgressStatuses: string;
+  /** ClickUp status names (comma-separated) that map to the "Review / QC" Kanban column */
+  kanbanReviewStatuses: string;
+  /** ClickUp status names (comma-separated) that map to the "Failed" Kanban column */
+  kanbanFailedStatuses: string;
+  /** ClickUp status names (comma-separated) that map to the "Done" Kanban column */
+  kanbanDoneStatuses: string;
+  /** How often (in minutes) to auto-refresh ClickUp snapshots for imported tasks. Set to 0 to disable. */
+  kanbanSnapshotIntervalMinutes: number;
+  /** ClickUp status names (comma-separated, case-insensitive) whose board columns are hidden — their cards aren't rendered. */
+  kanbanHiddenStatuses: string;
+  /** ClickUp status names (comma-separated, case-insensitive) whose board columns are collapsed to a thin rail. */
+  kanbanCollapsedStatuses: string;
+  // Auto Code Loop — autonomously implements tasks from their description and
+  // fixes them from QC feedback: watches trigger statuses, dispatches the agent,
+  // pushes, opens a PR, re-requests QC, and (optionally) auto-merges.
+  autoCodeEnabled: boolean;
+  autoCodeMaxIterations: number;
+  autoCodePollIntervalMinutes: number;
+  /** ClickUp status(es) that trigger IMPLEMENT mode (build the task from its
+   *  description). Accepts a comma-separated list. Blank = start as soon as a
+   *  task is enabled (no status gate). */
+  autoCodeStartStatus: string;
+  /** ClickUp status name(s) that trigger FIX mode (address QC feedback).
+   *  Accepts a comma-separated list (e.g. "failed, review failed"). */
+  autoCodeFailedStatus: string;
+  /** ClickUp status name(s) that trigger REVIEW-FIX mode (address Code Review
+   *  findings, then hand the task back to the Code Review loop to re-verify).
+   *  Accepts a comma-separated list. Set by the Code Review subsystem when an
+   *  AI review fails. */
+  autoCodeReviewFailedStatus: string;
+  /** ClickUp status to flip the task TO when the agent starts coding (so the
+   *  remote board reflects active work instead of sitting in its failed/start
+   *  status for the whole run). Accepts a list for matching; the FIRST entry is
+   *  written back. Blank = don't touch the status when coding starts. */
+  autoCodeInProgressStatus: string;
+  /** ClickUp status to flip the task back to after pushing a fix (so QC
+   *  re-tests). Accepts a list for matching; the FIRST entry is written back. */
+  autoCodeReviewStatus: string;
+  /** Project path used for git worktrees + gh CLI */
+  autoCodeProjectPath: string;
+  /** Auto-merge PR when the QC→Done transition happens */
+  autoCodeAutoMerge: boolean;
+  /** ClickUp status(es) that signal QC passed and the PR should be merged.
+   *  Accepts a comma-separated list. */
+  autoCodeDoneStatus: string;
+  /** Run a second agent to review the fix diff before flipping to retest.
+   *  Critical findings hold the task back (escalate) instead of going to QC. */
+  autoCodeReviewGate: boolean;
+  /** Native OS notifications for autonomous-loop events (fix pushed/escalated,
+   *  QC failed, PR auto-merged, review rejected). */
+  notificationsEnabled: boolean;
+  /** During QC runs, capture browser console errors + failed network requests
+   *  and attach them to the failure report (and the auto-code prompt). */
+  qcCaptureDiagnostics: boolean;
   /** @deprecated Use defaultAgentProvider */
   defaultCopilotProvider?: AgentProviderId;
   /** @deprecated Use agentModels.copilot */
@@ -181,6 +329,35 @@ export interface UsageCostData {
   timestamp: Date;
 }
 
+/** Per-day cost breakdown across all imported Kanban tasks, derived from
+ *  Claude session JSONL timestamps. `byDay` is sorted oldest → newest and
+ *  always covers the most recent 7 calendar days (entries with $0 included
+ *  so the chart has a stable shape). */
+export interface KanbanDailyCostBreakdown {
+  /** YYYY-MM-DD (local TZ) → cost */
+  byDay: { date: string; cost: number }[];
+  today: number;
+  yesterday: number;
+  /** Sum of the last 7 days inclusive of today. */
+  week: number;
+  /** Sum across the entire history found on disk. */
+  total: number;
+}
+
+/** Cumulative per-terminal usage accumulated from the session JSONL.
+ *  Sent on every poll cycle as absolute totals (not deltas). */
+export interface TerminalUsageData {
+  terminalId: string;
+  /** Latest model seen in the session (e.g. "claude-sonnet-4-6"). */
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  /** USD — sum of (tokens × per-1M-rate) for every assistant turn. */
+  cost: number;
+}
+
 export interface CopilotUsageData {
   premiumRequests?: number;
   totalTurns: number;
@@ -203,6 +380,7 @@ export interface DevServerConfig {
   frontendCwd: string;  // relative to project path
   backendCmd: string;
   backendCwd: string;   // relative to project path
+  backendProfile?: string; // dotnet launch profile name
 }
 
 export type DevServerStatus = 'stopped' | 'starting' | 'running' | 'error';
@@ -224,11 +402,18 @@ export interface DevServerEvent {
   output?: string;
 }
 
+export interface LaunchProfile {
+  name: string;
+  environment: string;  // ASPNETCORE_ENVIRONMENT value
+  applicationUrl?: string;
+}
+
 export interface DetectedServer {
   cmd: string;
   cwd: string;
   label: string;
   confidence: number;
+  profiles?: LaunchProfile[];
 }
 
 export interface DetectResult {
@@ -258,6 +443,8 @@ export interface Project {
   agentConfig?: Record<string, string>;
   skills?: ProjectSkill[];
   devServer?: DevServerConfig;
+  /** Path to documentation/reference files for this project */
+  docsPath?: string;
 }
 
 export interface ProjectTabState {
@@ -311,6 +498,10 @@ export interface QCTestCase {
   startedAt?: string;
   completedAt?: string;
   durationMs?: number;
+  /** Browser console errors captured during the run (when diagnostics on). */
+  consoleErrors?: string[];
+  /** Failed/erroring network requests captured during the run. */
+  networkErrors?: string[];
 }
 
 export interface QCCredential {
@@ -333,6 +524,15 @@ export interface QCTask {
   durationMs?: number;
   createdAt: string;
   updatedAt: string;
+  /** Linked ClickUp (or other task manager) task */
+  linkedTask?: {
+    id: string;
+    customId?: string;
+    name: string;
+    status: string;
+    statusColor: string;
+    url: string;
+  };
 }
 
 export interface InsightsMessage {
@@ -396,6 +596,7 @@ export interface InsightsSessionMeta {
   qcTotal?: number;
   qcDurationMs?: number;
   linkedTaskName?: string;
+  linkedTaskColor?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -453,6 +654,152 @@ export const DEFAULT_PERSONAS: Persona[] = [
   },
 ];
 
+// ─── Kanban Tasks ─────────────────────────────────────────────
+
+/** Local Kanban workflow status — separate from (but influenced by) ClickUp status */
+export type KanbanTaskStatus = 'todo' | 'in-progress' | 'review' | 'failed' | 'done';
+
+export type AutoCodeTaskState =
+  | 'idle'
+  | 'coding'
+  | 'awaiting-review'
+  | 'escalated'
+  | 'merging'
+  | 'done';
+
+/** Snapshot + working state for a task the user has imported to the Kanban board.
+ *  Source of truth for per-task metadata (session, worktree, auto-code state).
+ *  The `clickup*` fields are a snapshot refreshed on poll. */
+export interface KanbanTask {
+  id: string;                       // local uuid
+  /** 'clickup' = imported from ClickUp; the auto-code orchestrator and
+   *  ClickUp-sync flows process these. 'local' = user-created on this
+   *  machine; clickupUrl is empty and orchestrator skips the task. */
+  provider?: 'clickup' | 'local';
+  /** For local tasks: `local:<uuid>` (= the local id). For clickup: real id. */
+  clickupTaskId: string;
+  clickupCustomId?: string;
+  clickupName: string;
+  clickupStatus: string;            // current ClickUp status name (snapshot)
+  clickupStatusColor?: string;
+  /** Empty string for local tasks. */
+  clickupUrl: string;
+  /** Free-text body for local tasks, used as the first prompt to the agent.
+   *  ClickUp tasks fetch description live from the API. */
+  description?: string;
+  clickupAssignees?: Array<{ id: string; username: string; initials?: string; color?: string }>;
+  clickupPriority?: { name: string; color: string };
+  clickupTags?: Array<{ name: string; bgColor: string; fgColor: string }>;
+  /** Selected "Release version" custom-field value (snapshot), if set. */
+  clickupReleaseVersion?: string;
+  clickupUpdatedAt?: string;
+
+  /** Local project path for worktree + gh CLI */
+  projectPath: string;
+  projectId?: string;               // optional link to project store
+
+  /** Our workflow status */
+  kanbanStatus: KanbanTaskStatus;
+
+  /** Stable ordering key. Tasks render in ascending orderIndex within each
+   *  column, so ordering survives refreshes and only changes when the user
+   *  drags+drops (which bumps it to "newest" in the destination column).
+   *  Backfilled from createdAt for tasks created before this field existed. */
+  orderIndex?: number;
+
+  /** Agent session data — persisted across terminal recreation */
+  agentSessionId?: string;
+  agentProvider?: AgentProviderId;
+  /** The cwd where the agent session was actually started.
+   *  Claude CLI scopes `--resume <id>` lookups by encoded cwd, so we must
+   *  resume from the same directory the session was created in (not a
+   *  freshly-created worktree, which would be a different Claude project dir). */
+  agentCwd?: string;
+
+  /** Latest cumulative usage for this task's active agent session.
+   *  Sourced from the session JSONL by the main-side usage tracker and
+   *  written here so the Kanban board can show cost even when the terminal
+   *  for this task is closed. Reflects ONLY the current `agentSessionId` —
+   *  if the user starts a fresh session, this resets. */
+  usage?: {
+    model?: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+    /** ISO timestamp of the last update. */
+    updatedAt: string;
+  };
+
+  worktreePath?: string;
+  worktreeBranch?: string;
+  baseBranch?: string;
+  /** When false, the agent runs directly against the project's current branch
+   *  — no worktree is created and `--worktree` is not passed to Claude. The
+   *  baseBranch + worktreeBranch fields are not used in that case. Undefined
+   *  defaults to worktree mode for back-compat with pre-1.23.5 records. */
+  useWorktree?: boolean;
+
+  /** Auto-fix loop state */
+  autoCodeState: AutoCodeTaskState;
+  iterationCount: number;
+  lastSeenFailureCommentId: string | null;
+  lastFixActionAt?: string;
+  lastError?: string | null;
+  autoMergeOverride?: boolean | null;
+  autoMergeQueuedAt?: string;
+  /** Per-task opt-in for the auto-code loop. The orchestrator only follows
+   *  tasks where this is explicitly true — undefined/false = OFF (default).
+   *  Replaces the pre-1.25 tri-state `autoCodeOverride` (which defaulted to
+   *  following the global toggle, i.e. effectively on for every task). */
+  autoCodeEnabled?: boolean;
+  /** Runtime diagnostics captured by the last failing QC run, fed into the
+   *  next auto-code attempt so the agent sees console/network errors. */
+  qcDiagnostics?: {
+    consoleErrors: string[];
+    networkErrors: string[];
+    capturedAt: string;
+  };
+
+  prUrl?: string;
+
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Activity Feed ────────────────────────────────────────────
+
+/** Which autonomous subsystem produced an activity event. */
+export type ActivitySource = 'auto-code' | 'qc' | 'code-review' | 'dashboard';
+export type ActivityLevel = 'info' | 'success' | 'warn' | 'error';
+
+/** A single entry in the cross-project activity timeline. Emitted by the
+ *  auto-code orchestrator, QC runner, and code-review engine whenever something
+ *  noteworthy happens while the user may be away. Also the trigger source for
+ *  native OS notifications. */
+export interface ActivityEvent {
+  id: string;
+  /** ISO timestamp. */
+  at: string;
+  source: ActivitySource;
+  level: ActivityLevel;
+  /** Stable machine kind, e.g. 'fix-pushed' | 'fix-escalated' | 'pr-auto-merged'
+   *  | 'qc-failed' | 'review-rejected'. Used to gate notifications. */
+  kind: string;
+  title: string;
+  message?: string;
+  projectPath?: string;
+  projectName?: string;
+  /** Local KanbanTask id (for deep-linking the board). */
+  taskId?: string;
+  clickupTaskId?: string;
+  taskName?: string;
+  /** Optional URL opened when the OS notification / feed row is clicked. */
+  url?: string;
+  read?: boolean;
+}
+
 // ─── Code Review ──────────────────────────────────────────────
 
 export type CodeReviewSeverity = 'critical' | 'major' | 'minor' | 'suggestion';
@@ -469,7 +816,12 @@ export interface CodeReviewFinding {
 export interface CodeReviewPR {
   prNumber: number;
   prUrl?: string;
+  /** Head branch — the source branch the PR is built from */
   prBranch?: string;
+  /** Base branch — the branch the PR merges into (e.g. main, Develop) */
+  prBaseBranch?: string;
+  /** GitHub login of the PR author */
+  prAuthor?: string;
   prTitle?: string;
   status: CodeReviewStatus;
   findings: CodeReviewFinding[];
@@ -633,7 +985,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   teamServerUrl: '',
   teamAutoConnect: false,
   teamAutoStartServer: false,
-  defaultModel: 'claude-opus-4-6',
+  defaultModel: 'claude-opus-4-8',
   workingDirectory: '',
   maxTerminals: 12,
   theme: 'dark',
@@ -641,7 +993,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   telemetryEnabled: true,
   defaultAgentProvider: 'claude',
   agentModels: {
-    claude: 'claude-opus-4-6',
+    claude: 'claude-opus-4-8',
     copilot: 'claude-sonnet-4.5',
     gemini: 'gemini-2.5-pro',
     qwen: 'qwen3-coder',
@@ -655,4 +1007,30 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewStatuses: 'ready for review, in review, review',
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
+  kanbanFilterAssigneeId: '',
+  kanbanFilterProjectId: '',
+  kanbanBacklogStatuses: 'to do, open, backlog, planning, ready',
+  kanbanBacklogSortBy: 'priority',
+  kanbanBacklogListId: '',
+  kanbanInProgressStatuses: 'in progress, in development, developing, working',
+  kanbanReviewStatuses: 'review, in review, ready for review',
+  kanbanFailedStatuses: 'failed',
+  kanbanDoneStatuses: 'done, complete, closed',
+  kanbanSnapshotIntervalMinutes: 5,
+  kanbanHiddenStatuses: '',
+  kanbanCollapsedStatuses: '',
+  autoCodeEnabled: false,
+  autoCodeMaxIterations: 3,
+  autoCodePollIntervalMinutes: 30,
+  autoCodeStartStatus: '',
+  autoCodeFailedStatus: 'failed',
+  autoCodeReviewFailedStatus: 'review failed',
+  autoCodeInProgressStatus: 'in progress',
+  autoCodeReviewStatus: 'ready for review',
+  autoCodeProjectPath: '',
+  autoCodeAutoMerge: false,
+  autoCodeDoneStatus: 'done',
+  autoCodeReviewGate: false,
+  notificationsEnabled: true,
+  qcCaptureDiagnostics: true,
 };

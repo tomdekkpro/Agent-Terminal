@@ -6,6 +6,7 @@ import { registerTerminalHandlers } from './ipc/terminal-handlers';
 import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
+import { sessionUsageTracker } from './usage/session-usage-tracker';
 import { registerServiceStatusHandlers, stopServiceStatusPolling } from './ipc/service-status-handlers';
 import { registerSystemMonitorHandlers, stopSystemMonitorPolling } from './ipc/system-monitor-handlers';
 import { registerProjectHandlers } from './ipc/project-handlers';
@@ -14,8 +15,15 @@ import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handle
 import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
+import { registerAutoCodeHandlers, stopAutoCodeOrchestrator } from './ipc/auto-code-handlers';
+import { registerKanbanHandlers } from './ipc/kanban-handlers';
+import { registerActivityHandlers } from './ipc/activity-handlers';
+import { registerDashboardHandlers, stopDashboardScheduler } from './ipc/dashboard-handlers';
+import { flushKanbanTasks } from './kanban/kanban-task-store';
+import { flushNotices } from './dashboard/notice-store';
 import { registerClaudeSessionsHandlers } from './ipc/claude-sessions-handlers';
 import { registerDevServerHandlers } from './ipc/dev-server-handlers';
+import { registerFilesHandlers } from './ipc/files-handlers';
 import { stopAllDevServers } from './dev-server/dev-server-manager';
 import { cleanupAllQC } from './qc/qc-executor';
 import { initAutoUpdater } from './updater';
@@ -108,6 +116,7 @@ app.whenReady().then(() => {
   trackAppStarted();
 
   terminalManager = new TerminalManager(getWindow);
+  sessionUsageTracker.setWindowGetter(getWindow);
 
   registerTerminalHandlers(ipcMain, terminalManager, getWindow);
   registerTaskManagerHandlers(ipcMain);
@@ -119,8 +128,13 @@ app.whenReady().then(() => {
   registerTeamHandlers(ipcMain, getWindow);
   registerQCHandlers(ipcMain, getWindow);
   registerCodeReviewHandlers(ipcMain, getWindow);
+  registerKanbanHandlers(ipcMain, getWindow);
+  registerActivityHandlers(ipcMain, getWindow);
+  registerDashboardHandlers(ipcMain, getWindow);
+  registerAutoCodeHandlers(ipcMain, getWindow);
   registerClaudeSessionsHandlers(ipcMain);
   registerDevServerHandlers(ipcMain, getWindow);
+  registerFilesHandlers(ipcMain);
   registerServiceStatusHandlers(ipcMain, getWindow);
   registerSystemMonitorHandlers(ipcMain, getWindow);
   initAutoUpdater(getWindow);
@@ -153,6 +167,10 @@ app.on('before-quit', () => {
   stopUsagePolling();
   stopServiceStatusPolling();
   stopSystemMonitorPolling();
+  stopAutoCodeOrchestrator();
+  stopDashboardScheduler();
+  flushKanbanTasks();
+  flushNotices();
   if (terminalManager) {
     // Save output buffers while terminals are still alive
     // (terminals are killed later in will-quit, after renderer has saved state)

@@ -1,10 +1,12 @@
 import type { BrowserWindow, IpcMain } from 'electron';
 import { exec, spawn } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem } from '../../shared/types';
+import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, TaskManagerTask } from '../../shared/types';
 import { getSettings } from './settings-handlers';
+import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
 import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from './providers/agent-registry';
@@ -12,7 +14,6 @@ import { agentRegistry } from './providers/agent-registry';
 const clickUpProvider = new ClickUpProvider();
 
 const GH_TIMEOUT = 120000;
-const MAX_DIFF = 50000; // cap diff size — we truncate to this anyway before sending to Claude
 
 // ─── Scheduler state ──────────────────────────────────────────
 let schedulerInterval: NodeJS.Timeout | null = null;
@@ -22,8 +23,33 @@ let nextSchedulerRun: string | null = null;
 
 // ─── Active review processes (for cancellation) ──────────────
 import type { ChildProcess } from 'child_process';
+import { v4 as uuidv4 } from 'uuid';
 const activeReviews = new Map<string, ChildProcess>();
 let stopAllRequested = false;
+
+// ─── Session tracking for resumed reviews ────────────────────
+// Key: `${taskId}__pr${prNumber}`, Value: session UUID
+const reviewSessions = new Map<string, string>();
+
+function getSessionKey(taskId: string, prNumber: number): string {
+  return `${taskId}__pr${prNumber}`;
+}
+
+function clearReviewSession(taskId: string, prNumber: number): void {
+  const key = getSessionKey(taskId, prNumber);
+  if (reviewSessions.has(key)) {
+    debugLog(`[CodeReview] Cleared session for ${key}`);
+    reviewSessions.delete(key);
+  }
+}
+
+function clearAllSessionsForTask(taskId: string): void {
+  for (const key of reviewSessions.keys()) {
+    if (key.startsWith(`${taskId}__`)) {
+      reviewSessions.delete(key);
+    }
+  }
+}
 
 function killReviewProcess(taskId: string): boolean {
   const child = activeReviews.get(taskId);
@@ -43,6 +69,76 @@ function killAllReviewProcesses(): void {
   }
 }
 
+/** Approval keywords that a developer can post in a ClickUp comment to override a failed review */
+const APPROVAL_KEYWORDS = ['review:approve', 'review:ok', 'review:approved', 'review:lgtm'];
+
+/** Tag that marks a task for manual review — AI auto-review must skip these */
+const MANUAL_REVIEW_TAG = 'manual-review';
+
+function hasManualReviewTag(task: { tags?: Array<{ name: string }> }): boolean {
+  return !!task.tags?.some((t) => t.name.toLowerCase() === MANUAL_REVIEW_TAG);
+}
+
+/** Signature markers that identify comments posted by this bot (must be excluded from approval detection) */
+const BOT_COMMENT_MARKERS = [
+  '_automated review by agent terminal_',
+  '_automated by agent terminal_',
+  '_approved via agent terminal_',
+];
+
+/** Extract plain text from a ClickUp comment (handles both comment_text and rich text comment array) */
+function extractCommentText(comment: any): string {
+  // Try comment_text first (plain text field)
+  if (comment.comment_text) return comment.comment_text;
+  // Fallback: extract from rich text comment array
+  if (Array.isArray(comment.comment)) {
+    return comment.comment
+      .map((block: any) => block.text || '')
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
+/** True if the comment was posted by this bot (identified by footer signature) */
+function isBotComment(text: string): boolean {
+  const lower = text.toLowerCase();
+  return BOT_COMMENT_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/** Check whether a developer has posted an approval comment on the task (newer than the last review) */
+async function hasApprovalComment(taskId: string): Promise<boolean> {
+  try {
+    const settings = getSettings();
+    const commentsResult = await clickUpProvider.getComments(settings, taskId);
+    if (!commentsResult.success || !commentsResult.data) return false;
+
+    // Check recent comments (last 20) for approval keywords — skip bot messages
+    const recentComments = commentsResult.data
+      .filter((c: any) => c.user?.id !== -1)
+      .slice(-20);
+
+    for (const comment of recentComments) {
+      const text = extractCommentText(comment).trim();
+      // Skip bot's own comments (they contain instructional text mentioning "review:approve")
+      if (isBotComment(text)) {
+        debugLog(`[CodeReview] Skipping bot comment on task ${taskId}`);
+        continue;
+      }
+      const lower = text.toLowerCase();
+      debugLog(`[CodeReview] Checking comment from ${comment.user?.username || 'unknown'}: "${lower.substring(0, 100)}"`);
+      if (APPROVAL_KEYWORDS.some((kw) => lower.includes(kw))) {
+        debugLog(`[CodeReview] Found approval comment on task ${taskId}: "${lower.substring(0, 80)}"`);
+        return true;
+      }
+    }
+    debugLog(`[CodeReview] No approval comment found among ${recentComments.length} comments for task ${taskId}`);
+  } catch (err) {
+    debugError('[CodeReview] Failed to check approval comments:', err);
+  }
+  return false;
+}
+
 function ghExec(command: string, cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(command, { cwd, encoding: 'utf-8', timeout: GH_TIMEOUT, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -57,57 +153,6 @@ function ghExec(command: string, cwd: string): Promise<string> {
   });
 }
 
-/**
- * Stream `gh pr diff` and stop reading after MAX_DIFF bytes.
- * Avoids the maxBuffer exceeded error from exec() on large PRs.
- */
-function streamGhDiff(prNumber: number, cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('gh', ['pr', 'diff', String(prNumber)], {
-      cwd,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let truncated = false;
-    let stderr = '';
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (truncated) return;
-      output += chunk.toString();
-      if (output.length >= MAX_DIFF) {
-        truncated = true;
-        output = output.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]';
-        child.kill('SIGTERM');
-      }
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`gh pr diff timed out after ${GH_TIMEOUT / 1000}s`));
-    }, GH_TIMEOUT);
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      // code may be non-zero when we killed it after truncation — that's fine
-      if (truncated || code === 0) {
-        resolve(output);
-      } else {
-        reject(new Error(`gh pr diff exited with code ${code}: ${stderr.trim()}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
-}
 
 function sendReviewEvent(getWindow: () => BrowserWindow | null, event: CodeReviewEvent) {
   const win = getWindow();
@@ -282,47 +327,60 @@ async function findPRsForTask(task: { id: string; customId?: string; description
   return results;
 }
 
-/** Fetch PR info using gh CLI */
+/** Fetch PR metadata using gh CLI (no diff — Claude fetches that itself) */
 async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
   title: string;
   url: string;
   branch: string;
+  baseBranch: string;
+  author: string;
   state: string;
   mergeable: string;
-  diff: string;
-  additions: number;
-  deletions: number;
-  files: string[];
 }> {
   const infoJson = await ghExec(
-    `gh pr view ${prNumber} --json title,url,headRefName,additions,deletions,files,state,mergeable`,
+    `gh pr view ${prNumber} --json title,url,headRefName,baseRefName,author,state,mergeable`,
     projectPath,
   );
   const info = JSON.parse(infoJson);
-  const state = (info.state || '').toUpperCase();
-  const mergeable = (info.mergeable || '').toUpperCase();
-
-  // Only fetch diff for open PRs — stream and cap at MAX_DIFF to avoid maxBuffer blow-up
-  let diff = '';
-  if (state === 'OPEN') {
-    diff = await streamGhDiff(prNumber, projectPath);
-  }
-
   return {
     title: info.title,
     url: info.url,
     branch: info.headRefName,
-    state,
-    mergeable,
-    diff,
-    additions: info.additions || 0,
-    deletions: info.deletions || 0,
-    files: (info.files || []).map((f: any) => f.path),
+    baseBranch: info.baseRefName || '',
+    author: info.author?.login || '',
+    state: (info.state || '').toUpperCase(),
+    mergeable: (info.mergeable || '').toUpperCase(),
   };
 }
 
+/** PR metadata shown in the review list (branch, base branch, author, title) */
+type PRMetadata = { url?: string; branch?: string; baseBranch?: string; author?: string; title?: string };
+
+/** Fetch metadata for all open PRs in one gh call, keyed by PR number */
+async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRMetadata>> {
+  const map = new Map<number, PRMetadata>();
+  try {
+    const json = await ghExec(
+      `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit 200`,
+      projectPath,
+    );
+    for (const pr of JSON.parse(json)) {
+      map.set(pr.number, {
+        url: pr.url,
+        branch: pr.headRefName,
+        baseBranch: pr.baseRefName,
+        author: pr.author?.login,
+        title: pr.title,
+      });
+    }
+  } catch {
+    // gh CLI not available or not in a repo — list will just lack metadata
+  }
+  return map;
+}
+
 /** Run AI code review on a PR diff using Claude CLI */
-/** Fetch task context (description + developer comments) for informed review */
+/** Fetch task context (description + all developer comments) for informed review */
 async function fetchTaskContext(taskId: string): Promise<{ description: string; comments: string }> {
   const settings = getSettings();
   let description = '';
@@ -331,20 +389,26 @@ async function fetchTaskContext(taskId: string): Promise<{ description: string; 
   try {
     const taskResult = await clickUpProvider.getTask(settings, taskId);
     if (taskResult.success && taskResult.data) {
-      description = taskResult.data.description || '';
+      // ClickUp sometimes returns description in text_content (plain text) or description (markdown)
+      description = taskResult.data.text_content || taskResult.data.description || '';
     }
   } catch { /* non-critical */ }
 
   try {
     const commentsResult = await clickUpProvider.getComments(settings, taskId);
     if (commentsResult.success && commentsResult.data) {
-      // Collect developer comments (skip automated bot messages, keep last 10)
+      // Include ALL developer comments — filter out only bot-posted messages by signature
       const devComments = commentsResult.data
-        .filter((c: any) => c.user?.id !== -1) // skip ClickBot
-        .slice(-10)
-        .map((c: any) => `[${c.user?.username || 'Unknown'}]: ${c.comment_text || ''}`.trim())
+        .map((c: any) => {
+          const text = extractCommentText(c).trim();
+          if (!text || isBotComment(text)) return null;
+          const user = c.user?.username || 'Unknown';
+          const date = c.date ? new Date(Number(c.date)).toISOString().split('T')[0] : '';
+          return `[${user}${date ? ` · ${date}` : ''}]: ${text}`;
+        })
         .filter(Boolean);
       comments = devComments.join('\n\n');
+      debugLog(`[CodeReview] Task ${taskId} context: ${devComments.length} developer comments, ${description.length} char description`);
     }
   } catch { /* non-critical */ }
 
@@ -400,74 +464,22 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
   throw new Error('No valid review JSON found in response');
 }
 
-async function runAIReview(
-  diff: string,
-  prTitle: string,
-  files: string[],
-  projectPath: string | undefined,
-  taskContext?: { taskName?: string; description?: string; comments?: string },
-  taskId?: string,
-): Promise<{ passed: boolean; findings: CodeReviewFinding[] }> {
-  const agentProvider = agentRegistry.get('claude');
-  if (!agentProvider || !agentProvider.isAvailable()) {
-    throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
-  }
+/** Build the full initial review prompt */
+function buildInitialReviewPrompt(
+  prNumber: number,
+  taskSection: string,
+  reviewGuidelines: string,
+): string {
+  return `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text.
 
-  // Diff is already capped by streamGhDiff, but guard in case called with raw diff
-  const truncatedDiff = diff.length > MAX_DIFF
-    ? diff.substring(0, MAX_DIFF) + '\n\n[... diff truncated for review ...]'
-    : diff;
+Analyze Pull Request #${prNumber} for real bugs and issues.
 
-  // Build task context section
-  let taskSection = '';
-  if (taskContext) {
-    const parts: string[] = [];
-    if (taskContext.taskName) parts.push(`Task: ${taskContext.taskName}`);
-    if (taskContext.description) {
-      const desc = taskContext.description.length > 3000
-        ? taskContext.description.substring(0, 3000) + '...'
-        : taskContext.description;
-      parts.push(`Task Description / Bug Report:\n${desc}`);
-    }
-    if (taskContext.comments) {
-      const comm = taskContext.comments.length > 2000
-        ? taskContext.comments.substring(0, 2000) + '...'
-        : taskContext.comments;
-      parts.push(`Developer Comments:\n${comm}`);
-    }
-    if (parts.length > 0) {
-      taskSection = `\n--- TASK CONTEXT ---\n${parts.join('\n\n')}\n--- END TASK CONTEXT ---\n`;
-    }
-  }
+First, run these commands to get the PR details:
+1. \`gh pr view ${prNumber} --json title,files,additions,deletions\` — to see what changed
+2. \`gh pr diff ${prNumber}\` — to see the actual diff
 
-  // Read REVIEW.md from the project if it exists
-  let reviewGuidelines = '';
-  if (projectPath) {
-    try {
-      const reviewMdPath = path.join(projectPath, 'REVIEW.md');
-      const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
-      if (content.trim()) {
-        const trimmed = content.length > 3000
-          ? content.substring(0, 3000) + '\n...[truncated]'
-          : content;
-        reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
-      }
-    } catch { /* REVIEW.md not found — that's fine */ }
-  }
-
-  const prompt = `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text.
-
-Analyze this Pull Request for real bugs and issues. You act as a fleet of specialized reviewers — examine the changes from multiple angles: correctness, security, performance, and error handling. For each potential issue, verify it against the actual code behavior before reporting. Only report issues you are confident are real problems.
+Then act as a fleet of specialized reviewers — examine the changes from multiple angles: correctness, security, performance, and error handling. For each potential issue, verify it against the actual code behavior before reporting. Only report issues you are confident are real problems. You have full access to the project files, so you can read any source file to understand context beyond the diff.
 ${taskSection}${reviewGuidelines}
-## Pull Request
-Title: ${prTitle}
-Files changed: ${files.join(', ')}
-
-## Diff
-\`\`\`diff
-${truncatedDiff}
-\`\`\`
-
 ## Review Checklist
 
 ### 1. Correctness & Task Verification
@@ -510,25 +522,125 @@ ${truncatedDiff}
 - If the code correctly solves the task with no real issues, pass the review.
 
 ## Output Format
-Respond with ONLY this JSON object — no text before or after:
+After your analysis, respond with ONLY this JSON object as your final output — no text before or after:
 
 {"passed": false, "findings": [{"severity": "critical", "file": "src/example.ts", "line": 42, "description": "What is wrong and why", "suggestion": "How to fix it"}]}
 
 If no issues found:
 
 {"passed": true, "findings": []}`;
+}
+
+/** Build a follow-up prompt for re-reviewing with session context */
+function buildReReviewPrompt(
+  prNumber: number,
+  taskSection: string,
+): string {
+  return `The developer has updated PR #${prNumber} after your previous review. Please re-review the changes.
+
+1. Run \`gh pr diff ${prNumber}\` to see the current diff
+2. Compare against your previous findings — check which issues have been fixed
+3. If a developer has commented explaining why the code is correct, consider their reasoning carefully
+4. Look for any NEW issues introduced by their changes
+${taskSection}
+## Important
+- If all previous findings are fixed and no new issues exist, PASS the review
+- If the developer's explanation is valid and the code is correct as-is, PASS the review
+- Only report issues that STILL exist or are NEW — do not repeat fixed findings
+- You have full context from the previous review, use it
+
+## Output Format
+Respond with ONLY this JSON object — no text before or after:
+
+{"passed": false, "findings": [{"severity": "critical", "file": "src/example.ts", "line": 42, "description": "What is wrong and why", "suggestion": "How to fix it"}]}
+
+If all issues are resolved:
+
+{"passed": true, "findings": []}`;
+}
+
+async function runAIReview(
+  prNumber: number,
+  projectPath: string,
+  taskContext?: { taskName?: string; description?: string; comments?: string },
+  taskId?: string,
+): Promise<{ passed: boolean; findings: CodeReviewFinding[] }> {
+  const agentProvider = agentRegistry.get('claude');
+  if (!agentProvider || !agentProvider.isAvailable()) {
+    throw new Error('Claude Code CLI is not installed. Install with: npm install -g @anthropic-ai/claude-code');
+  }
+
+  // Build task context section — give Claude the full picture (generous limits since context is critical)
+  let taskSection = '';
+  if (taskContext) {
+    const parts: string[] = [];
+    if (taskContext.taskName) parts.push(`Task: ${taskContext.taskName}`);
+    if (taskContext.description) {
+      const desc = taskContext.description.length > 10000
+        ? taskContext.description.substring(0, 10000) + '\n...[description truncated]'
+        : taskContext.description;
+      parts.push(`Task Description / Bug Report:\n${desc}`);
+    }
+    if (taskContext.comments) {
+      const comm = taskContext.comments.length > 8000
+        ? taskContext.comments.substring(0, 8000) + '\n...[older comments truncated]'
+        : taskContext.comments;
+      parts.push(`Developer Comments (all, chronological):\n${comm}`);
+    }
+    if (parts.length > 0) {
+      taskSection = `\n--- TASK CONTEXT ---\n${parts.join('\n\n')}\n--- END TASK CONTEXT ---\n`;
+    }
+  }
+
+  // Read REVIEW.md from the project if it exists
+  let reviewGuidelines = '';
+  try {
+    const reviewMdPath = path.join(projectPath, 'REVIEW.md');
+    const content = await fs.promises.readFile(reviewMdPath, 'utf-8');
+    if (content.trim()) {
+      const trimmed = content.length > 3000
+        ? content.substring(0, 3000) + '\n...[truncated]'
+        : content;
+      reviewGuidelines = `\n--- PROJECT REVIEW GUIDELINES (from REVIEW.md) ---\n${trimmed}\n--- END REVIEW GUIDELINES ---\n`;
+    }
+  } catch { /* REVIEW.md not found — that's fine */ }
+
+  // Check if we have an existing session for this task/PR (re-review)
+  const sessionKey = taskId ? getSessionKey(taskId, prNumber) : null;
+  const existingSessionId = sessionKey ? reviewSessions.get(sessionKey) : null;
+  const isReReview = !!existingSessionId;
+
+  // Generate or reuse session ID
+  const sessionId = existingSessionId || uuidv4();
+  if (sessionKey && !existingSessionId) {
+    reviewSessions.set(sessionKey, sessionId);
+    debugLog(`[CodeReview] New session ${sessionId} for ${sessionKey}`);
+  } else if (isReReview) {
+    debugLog(`[CodeReview] Resuming session ${sessionId} for ${sessionKey}`);
+  }
+
+  const prompt = isReReview
+    ? buildReReviewPrompt(prNumber, taskSection)
+    : buildInitialReviewPrompt(prNumber, taskSection, reviewGuidelines);
 
   return new Promise((resolve, reject) => {
-    // Use stdin piping instead of -p flag to avoid Windows command line length limits
-    const args = ['--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '-'];
-    if (projectPath) args.push('--add-dir', projectPath);
+    const args: string[] = [];
+
+    if (isReReview) {
+      // Resume the existing session — Claude has full context from previous review
+      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--resume', sessionId);
+    } else {
+      // New session — pass session ID so we can resume later
+      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--session-id', sessionId);
+    }
+    args.push('--add-dir', projectPath);
 
     const env = { ...process.env };
     delete env.CLAUDECODE;
 
     const child = spawn('claude', args, {
       env,
-      cwd: projectPath || undefined,
+      cwd: projectPath,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -544,20 +656,15 @@ If no issues found:
     let stderr = '';
     let settled = false;
 
-    // Dynamic timeout: 3 min base + 1 min per 5KB of diff, capped at 20 min
-    const baseMs = 3 * 60_000;
-    const perChunkMs = 1 * 60_000;
-    const chunkSize = 5000;
-    const maxMs = 20 * 60_000;
-    const dynamicMs = Math.min(baseMs + Math.ceil(truncatedDiff.length / chunkSize) * perChunkMs, maxMs);
-    const timeoutMinutes = Math.round(dynamicMs / 60_000);
+    // Claude fetches diff + reads files itself, so allow generous timeout (20 min)
+    const timeoutMs = 20 * 60_000;
 
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill('SIGTERM');
-      reject(new Error(`Code review timed out after ${timeoutMinutes} minutes`));
-    }, dynamicMs);
+      reject(new Error('Code review timed out after 20 minutes'));
+    }, timeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -632,8 +739,40 @@ function formatReviewComment(prTitle: string, findings: CodeReviewFinding[], pas
     lines.push('');
   }
 
-  lines.push('---\n_Automated review by Agent Terminal_');
+  lines.push('---');
+  lines.push('💬 If the code is correct and no changes are needed, add a comment with **review:approve** to override this review.');
+  lines.push('\n_Automated review by Agent Terminal_');
   return lines.join('\n');
+}
+
+/**
+ * Fetch ALL tasks matching the given statuses across pages.
+ * `searchTasks` returns only a single page (max 100) when there's no text query,
+ * so a list with >100 tasks in review statuses would silently drop the rest.
+ */
+async function fetchAllReviewTasks(
+  settings: AppSettings,
+  statuses: string[],
+  listId: string,
+): Promise<TaskManagerTask[]> {
+  const all: TaskManagerTask[] = [];
+  const PAGE_SIZE = 100; // ClickUp returns up to 100 tasks per page
+  const MAX_PAGES = 30; // safety cap (3000 tasks)
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const result = await clickUpProvider.searchTasks(settings, '', { statuses }, listId, page);
+    if (!result.success) {
+      // Surface the error if even the first page fails; otherwise keep what we have
+      if (page === 0) throw new Error(result.error || 'Failed to fetch review tasks');
+      break;
+    }
+    const tasks = result.data || [];
+    all.push(...tasks);
+    if (tasks.length < PAGE_SIZE) break; // last page reached
+  }
+
+  debugLog(`[CodeReview] Fetched ${all.length} task(s) across pages for list ${listId}`);
+  return all;
 }
 
 // ─── Auto-review: run a full cycle ───────────────────────────
@@ -666,15 +805,19 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
   });
 
   try {
-    // 1. Fetch reviewable tasks
-    const taskResult = await clickUpProvider.searchTasks(settings, '', { statuses }, settings.clickupListId);
-    if (!taskResult.success || !taskResult.data?.length) {
+    // 1. Fetch ALL reviewable tasks across pages (a single page caps at 100)
+    let tasks: TaskManagerTask[];
+    try {
+      tasks = await fetchAllReviewTasks(settings, statuses, settings.clickupListId);
+    } catch (err) {
+      debugError('[CodeReview] Scheduler: failed to fetch tasks:', err);
+      return; // `finally` resets schedulerRunning
+    }
+    if (!tasks.length) {
       debugLog('[CodeReview] Scheduler: no tasks found for review');
-      schedulerRunning = false;
       return;
     }
 
-    const tasks = taskResult.data;
     debugLog(`[CodeReview] Scheduler: found ${tasks.length} tasks`);
 
     // 2. Review each task
@@ -688,6 +831,27 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       const hasTag = task.tags?.some((t) => t.name.toLowerCase() === tagName.toLowerCase());
       if (hasTag) {
         debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — already has "${tagName}" tag`);
+        continue;
+      }
+
+      // Skip tasks flagged for manual review — the reviewer will handle them by hand
+      if (hasManualReviewTag(task)) {
+        debugLog(`[CodeReview] Scheduler: skipping task ${task.id} — tagged "${MANUAL_REVIEW_TAG}"`);
+        continue;
+      }
+
+      // Check if a developer posted an approval comment (e.g. "review:approve")
+      const approved = await hasApprovalComment(task.id);
+      if (approved) {
+        debugLog(`[CodeReview] Scheduler: task ${task.id} has developer approval comment — auto-approving`);
+        await clickUpProvider.addTag(settings, task.id, tagName);
+        await clickUpProvider.postComment(
+          settings,
+          task.id,
+          `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+        );
+        clearAllSessionsForTask(task.id);
+        sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'passed' });
         continue;
       }
 
@@ -731,37 +895,33 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             continue;
           }
 
-          // Fail immediately if PR has merge conflicts
-          if (prInfo.mergeable === 'CONFLICTING') {
-            debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
-            const conflictFinding: CodeReviewFinding = {
-              severity: 'critical',
-              file: 'PR',
-              description: `PR #${prNumber}: This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.`,
-            };
-            allFindings.push(conflictFinding);
-            anyFailed = true;
-            allPassed = false;
-            await clickUpProvider.postComment(settings, task.id, `## ❌ Code Review Failed — Merge Conflict\n\n**PR:** #${prNumber} — ${prInfo.title}\n\n🔴 **Critical**: This PR has merge conflicts and cannot be merged. Please resolve the conflicts and request a new review.\n\n---\n_Automated review by Agent Terminal_`);
-            sendReviewEvent(getWindow, { type: 'done', taskId: eventTaskId, status: 'failed', findings: [conflictFinding] });
-            continue;
-          }
-
-          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber} (${prInfo.files.length} files, ${prInfo.additions}+ / ${prInfo.deletions}-)...` });
+          sendReviewEvent(getWindow, { type: 'progress', taskId: eventTaskId, message: `Reviewing PR #${prNumber}...` });
 
           // Fetch task context for informed review
           const taskCtx = await fetchTaskContext(task.id);
 
-          // Run AI review with task context
-          const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
+          // Run AI review — Claude fetches the diff itself
+          const result = await runAIReview(prNumber, projectPath, {
             taskName: task.name,
             description: taskCtx.description,
             comments: taskCtx.comments,
           }, eventTaskId);
+
+          // Check for merge conflicts after review and append as a finding
+          if (prInfo.mergeable === 'CONFLICTING') {
+            debugLog(`[CodeReview] Scheduler: task ${task.id} — PR #${prNumber} has merge conflicts`);
+            result.findings.push({
+              severity: 'critical',
+              file: 'PR',
+              description: `PR #${prNumber}: This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts.`,
+            });
+            result.passed = false;
+          }
+
           const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
 
           if (result.passed) {
-            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} PASSED`);
           } else {
             allPassed = false;
@@ -770,12 +930,28 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             await clickUpProvider.postComment(settings, task.id, comment);
             // Post comment on GitHub PR
             try {
-              const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
-              await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
+              const tmpFile = path.join(os.tmpdir(), `cr-comment-${Date.now()}.md`);
+              fs.writeFileSync(tmpFile, comment, 'utf-8');
+              try {
+                await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+              } finally {
+                fs.unlinkSync(tmpFile);
+              }
             } catch {
               // Non-critical
             }
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} FAILED with ${result.findings.length} findings`);
+            const crit = result.findings.filter((f) => f.severity === 'critical').length;
+            recordActivity({
+              source: 'code-review',
+              kind: 'review-failed',
+              level: 'error',
+              title: `Code review failed: ${task.name || `PR #${prNumber}`}`,
+              message: `${result.findings.length} finding(s)${crit ? `, ${crit} critical` : ''} on PR #${prNumber}.`,
+              clickupTaskId: task.id,
+              taskName: task.name,
+              url: prInfo.url,
+            });
           }
 
           sendReviewEvent(getWindow, {
@@ -798,6 +974,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       // Update task status based on combined results of all PRs
       if (allPassed && prs.length > 0) {
         await clickUpProvider.addTag(settings, task.id, tagName);
+        clearAllSessionsForTask(task.id);
       } else if (anyFailed) {
         try {
           await clickUpProvider.updateStatus(settings, task.id, 'review failed');
@@ -867,32 +1044,58 @@ export function registerCodeReviewHandlers(
   // ─── Task fetching ───────────────────────────────────────────
   ipcMain.handle(
     IPC_CHANNELS.CODE_REVIEW_GET_TASKS,
-    async (_event, reviewStatuses?: string[], projectPath?: string, listId?: string) => {
+    async (_event, reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => {
       try {
         const settings = getSettings();
         if (settings.taskManagerProvider !== 'clickup') {
           return { success: false, error: 'Code Review requires ClickUp integration. Configure it in Settings.' };
         }
 
-        const targetListId = listId || settings.clickupListId;
-        if (!targetListId) return { success: false, error: 'No ClickUp list configured' };
+        const targetListIds = (listIds && listIds.length)
+          ? listIds
+          : (settings.clickupListId ? [settings.clickupListId] : []);
+        if (targetListIds.length === 0) return { success: false, error: 'No ClickUp list configured' };
 
         const statuses = reviewStatuses || ['ready for review', 'in review', 'review'];
-        const result = await clickUpProvider.searchTasks(settings, '', { statuses }, targetListId);
 
-        if (!result.success) return result;
+        // Fetch tasks across every selected list, de-duplicating by task id
+        // (ClickUp allows a task to live in multiple lists).
+        const seen = new Set<string>();
+        const allTasks: TaskManagerTask[] = [];
+        for (const lid of targetListIds) {
+          const listTasks = await fetchAllReviewTasks(settings, statuses, lid);
+          for (const task of listTasks) {
+            if (!seen.has(task.id)) {
+              seen.add(task.id);
+              allTasks.push(task);
+            }
+          }
+        }
 
-        // Filter out tasks that already have the reviewpass tag
+        // Filter out tasks that already have the reviewpass tag, or are flagged for manual review
         const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();
-        const filteredTasks = (result.data || []).filter((task) => {
+        const filteredTasks = allTasks.filter((task) => {
           const hasTag = task.tags?.some((t) => t.name.toLowerCase() === tagName);
-          if (hasTag) debugLog(`[CodeReview] Skipping task ${task.id} — already has "${tagName}" tag`);
-          return !hasTag;
+          if (hasTag) {
+            debugLog(`[CodeReview] Skipping task ${task.id} — already has "${tagName}" tag`);
+            return false;
+          }
+          if (hasManualReviewTag(task)) {
+            debugLog(`[CodeReview] Skipping task ${task.id} — tagged "${MANUAL_REVIEW_TAG}"`);
+            return false;
+          }
+          return true;
         });
 
         // Resolve PR info for each task (checks description, comments, and branch matching)
         // Each task contains a prs array with all its open PRs
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
+
+        // Fetch metadata (branch, base branch, author) for all open PRs in one gh call
+        const prMeta = effectiveProjectPath
+          ? await fetchOpenPRMetadata(effectiveProjectPath)
+          : new Map();
+
         const items: CodeReviewItem[] = [];
         for (const task of filteredTasks) {
           const foundPRs = await findPRsForTask(task, effectiveProjectPath);
@@ -905,12 +1108,19 @@ export function registerCodeReviewHandlers(
             prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
             status: 'pending' as const,
             findings: [],
-            prs: foundPRs.map((pr) => ({
-              prNumber: pr.prNumber,
-              prUrl: pr.prUrl ?? undefined,
-              status: 'pending' as const,
-              findings: [],
-            })),
+            prs: foundPRs.map((pr) => {
+              const meta = prMeta.get(pr.prNumber);
+              return {
+                prNumber: pr.prNumber,
+                prUrl: pr.prUrl ?? meta?.url ?? undefined,
+                prTitle: meta?.title,
+                prBranch: meta?.branch,
+                prBaseBranch: meta?.baseBranch,
+                prAuthor: meta?.author,
+                status: 'pending' as const,
+                findings: [],
+              };
+            }),
           });
         }
 
@@ -941,7 +1151,25 @@ export function registerCodeReviewHandlers(
     IPC_CHANNELS.CODE_REVIEW_RUN,
     async (_event, projectPath: string, taskId: string, prNumber: number) => {
       try {
-        sendReviewEvent(getWindow, { type: 'progress', taskId, message: 'Fetching PR info...' });
+        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Checking PR #${prNumber}...` });
+
+        // Check if developer posted an approval comment — auto-pass if so
+        const approved = await hasApprovalComment(taskId);
+        if (approved) {
+          debugLog(`[CodeReview] Task ${taskId} has developer approval — auto-passing`);
+          sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
+          // Submit the approval
+          const settings = getSettings();
+          const tagName = settings.codeReviewTagName || 'reviewpass';
+          await clickUpProvider.addTag(settings, taskId, tagName);
+          await clickUpProvider.postComment(
+            settings,
+            taskId,
+            `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+          );
+          clearReviewSession(taskId, prNumber);
+          return { success: true, data: { passed: true, findings: [], prTitle: '', prUrl: '', prBranch: '', approved: true } };
+        }
 
         const prInfo = await fetchPRInfo(projectPath, prNumber);
 
@@ -949,40 +1177,30 @@ export function registerCodeReviewHandlers(
         if (prInfo.state !== 'OPEN') {
           const msg = `PR #${prNumber} is ${prInfo.state.toLowerCase()}, skipped.`;
           sendReviewEvent(getWindow, { type: 'done', taskId, status: 'skipped', message: msg });
-          return { success: true, data: { passed: false, findings: [], prTitle: prInfo.title, prUrl: prInfo.url, prBranch: prInfo.branch, skipped: true } };
+          return { success: true, data: { passed: false, findings: [], prTitle: prInfo.title, prUrl: prInfo.url, prBranch: prInfo.branch, prBaseBranch: prInfo.baseBranch, prAuthor: prInfo.author, skipped: true } };
         }
 
-        // Fail immediately if PR has merge conflicts
-        if (prInfo.mergeable === 'CONFLICTING') {
-          const conflictFinding: CodeReviewFinding = {
-            severity: 'critical',
-            file: 'PR',
-            description: 'This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts before requesting a review.',
-          };
-          sendReviewEvent(getWindow, { type: 'finding', taskId, finding: conflictFinding });
-          sendReviewEvent(getWindow, { type: 'done', taskId, status: 'failed', findings: [conflictFinding] });
-          return {
-            success: true,
-            data: {
-              passed: false,
-              findings: [conflictFinding],
-              prTitle: prInfo.title,
-              prUrl: prInfo.url,
-              prBranch: prInfo.branch,
-            },
-          };
-        }
-
-        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing ${prInfo.files.length} files (${prInfo.additions}+ / ${prInfo.deletions}-)...` });
+        sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Reviewing PR #${prNumber}...` });
 
         // Fetch task context for informed review
         const taskCtx = await fetchTaskContext(taskId);
 
-        const result = await runAIReview(prInfo.diff, prInfo.title, prInfo.files, projectPath, {
+        // Claude fetches the diff itself via gh CLI
+        const result = await runAIReview(prNumber, projectPath, {
           taskName: prInfo.title,
           description: taskCtx.description,
           comments: taskCtx.comments,
         }, taskId);
+
+        // Check for merge conflicts after review and append as a finding
+        if (prInfo.mergeable === 'CONFLICTING') {
+          result.findings.push({
+            severity: 'critical',
+            file: 'PR',
+            description: 'This Pull Request has merge conflicts and cannot be merged. Please resolve the conflicts.',
+          });
+          result.passed = false;
+        }
 
         for (const finding of result.findings) {
           sendReviewEvent(getWindow, { type: 'finding', taskId, finding });
@@ -1003,6 +1221,8 @@ export function registerCodeReviewHandlers(
             prTitle: prInfo.title,
             prUrl: prInfo.url,
             prBranch: prInfo.branch,
+            prBaseBranch: prInfo.baseBranch,
+            prAuthor: prInfo.author,
           },
         };
       } catch (error) {
@@ -1027,7 +1247,9 @@ export function registerCodeReviewHandlers(
           if (!tagResult.success) {
             debugError('[CodeReview] Failed to add tag:', tagResult.error);
           }
-          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.`);
+          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
+          // Clear the review session — no longer needed
+          clearReviewSession(taskId, prNumber);
           debugLog('[CodeReview] Review passed, tag added for task:', taskId);
         } else {
           // Post detailed comment on ClickUp
@@ -1041,8 +1263,13 @@ export function registerCodeReviewHandlers(
           }
           // Post comment on GitHub PR
           try {
-            const escapedComment = comment.replace(/"/g, '\\"').replace(/`/g, '\\`');
-            await ghExec(`gh pr comment ${prNumber} --body "${escapedComment}"`, projectPath);
+            const tmpFile = path.join(os.tmpdir(), `cr-comment-${Date.now()}.md`);
+            fs.writeFileSync(tmpFile, comment, 'utf-8');
+            try {
+              await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+            } finally {
+              fs.unlinkSync(tmpFile);
+            }
             debugLog('[CodeReview] Posted review comment on PR #', prNumber);
           } catch (ghErr) {
             debugError('[CodeReview] Failed to post GitHub comment:', ghErr);
@@ -1053,6 +1280,98 @@ export function registerCodeReviewHandlers(
       } catch (error) {
         debugError('[CodeReview] submitReview error:', error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to submit review' };
+      }
+    },
+  );
+
+  // ─── Force approve (manual override) ────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE,
+    async (_event, projectPath: string, taskId: string, prNumber: number, prTitle: string) => {
+      try {
+        const settings = getSettings();
+        const tagName = settings.codeReviewTagName || 'reviewpass';
+
+        // Add reviewpass tag
+        const tagResult = await clickUpProvider.addTag(settings, taskId, tagName);
+        if (!tagResult.success) {
+          debugError('[CodeReview] Force approve — failed to add tag:', tagResult.error);
+        }
+
+        // Post approval comment on ClickUp
+        await clickUpProvider.postComment(
+          settings,
+          taskId,
+          `✅ Code Review Manually Approved — PR #${prNumber} (${prTitle}) was approved by the reviewer. Previous findings were reviewed and accepted as correct.\n\n_Approved via Agent Terminal_`,
+        );
+
+        // Post approval comment on GitHub PR
+        try {
+          const comment = `## ✅ Code Review — Manually Approved\n\n**PR:** ${prTitle}\n\nPrevious findings were reviewed and accepted as correct. No changes required.\n\n---\n_Approved via Agent Terminal_`;
+          const tmpFile = path.join(os.tmpdir(), `cr-approve-${Date.now()}.md`);
+          fs.writeFileSync(tmpFile, comment, 'utf-8');
+          try {
+            await ghExec(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, projectPath);
+          } finally {
+            fs.unlinkSync(tmpFile);
+          }
+        } catch (ghErr) {
+          debugError('[CodeReview] Force approve — failed to post GitHub comment:', ghErr);
+        }
+
+        // Clear the review session — no longer needed
+        clearReviewSession(taskId, prNumber);
+        sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
+        debugLog(`[CodeReview] Force approved task ${taskId} PR #${prNumber}`);
+        return { success: true };
+      } catch (error) {
+        debugError('[CodeReview] Force approve error:', error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to approve' };
+      }
+    },
+  );
+
+  // ─── Add PR manually ────────────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_REVIEW_ADD_PR,
+    async (_event, projectPath: string, prInput: string) => {
+      try {
+        const trimmed = (prInput || '').trim();
+        if (!trimmed) return { success: false, error: 'PR URL or number is required' };
+        if (!projectPath) return { success: false, error: 'Project path is required' };
+
+        // Accept: full URL, #123, or plain number
+        let prNumber: number | null = null;
+        const urlMatch = trimmed.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/i);
+        if (urlMatch) {
+          prNumber = parseInt(urlMatch[1], 10);
+        } else {
+          const numMatch = trimmed.match(/^#?(\d+)$/);
+          if (numMatch) prNumber = parseInt(numMatch[1], 10);
+        }
+
+        if (!prNumber || Number.isNaN(prNumber)) {
+          return { success: false, error: 'Invalid PR — paste a GitHub PR URL or PR number' };
+        }
+
+        // Validate PR exists in the selected project repo
+        const info = await fetchPRInfo(projectPath, prNumber);
+        return {
+          success: true,
+          data: {
+            prNumber,
+            prUrl: info.url,
+            prBranch: info.branch,
+            prBaseBranch: info.baseBranch,
+            prAuthor: info.author,
+            prTitle: info.title,
+            state: info.state,
+          },
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'Failed to add PR';
+        debugError('[CodeReview] addPR error:', error);
+        return { success: false, error: msg };
       }
     },
   );

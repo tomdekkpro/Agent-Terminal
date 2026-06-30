@@ -25,10 +25,10 @@ export class CopilotAgentProvider implements IAgentProvider {
   readonly color = '#22c55e';
   readonly installHint = 'Install with: npm install -g @github/copilot';
   readonly capabilities: AgentCapabilities = {
-    resume: false,
+    resume: true,
     continue: true,
-    yolo: false,
-    sessionDetection: false,
+    yolo: true,
+    sessionDetection: true,
     remoteControl: false,
     insights: true,
   };
@@ -45,12 +45,22 @@ export class CopilotAgentProvider implements IAgentProvider {
 
   buildInvokeCommand(options: AgentInvokeOptions): string {
     let cmd = this.command;
+    if (options.skipPermissions) cmd += ' --yolo';
     if (options.model) cmd += ` --model ${options.model}`;
     return cmd;
   }
 
-  buildResumeCommand(_options: AgentInvokeOptions): string {
+  buildResumeCommand(options: AgentInvokeOptions): string {
+    // If we have a session ID, just start copilot — /resume will follow via getResumeInput
+    if (options.sessionId) return this.command;
     return `${this.command} --continue`;
+  }
+
+  getResumeInput(options: AgentInvokeOptions): string | null {
+    if (options.sessionId) {
+      return `/resume ${options.sessionId}`;
+    }
+    return null;
   }
 
   parseUsageFromOutput(data: string): AgentUsageData | null {

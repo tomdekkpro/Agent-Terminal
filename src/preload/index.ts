@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC_CHANNELS } from '../shared/constants';
+import type { TaskSearchFilters } from '../shared/types';
 
 const electronAPI = {
   // Terminal
@@ -48,6 +49,11 @@ const electronAPI = {
     ipcRenderer.on(IPC_CHANNELS.TERMINAL_AGENT_SESSION, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_AGENT_SESSION, handler);
   },
+  onTerminalResumeFailed: (callback: (id: string, info: { reason: string; cwd?: string }) => void) => {
+    const handler = (_event: any, id: string, info: { reason: string; cwd?: string }) => callback(id, info);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_RESUME_FAILED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_RESUME_FAILED, handler);
+  },
   // Legacy event listeners (still fired for backward compat)
   onTerminalClaudeBusy: (callback: (id: string, isBusy: boolean) => void) => {
     const handler = (_event: any, id: string, isBusy: boolean) => callback(id, isBusy);
@@ -64,7 +70,7 @@ const electronAPI = {
   checkTaskManagerConnection: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_CHECK_CONNECTION),
   getTaskManagerLists: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_LISTS),
   getTaskManagerTasks: (listId?: string, page?: number) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASKS, listId, page),
-  searchTaskManagerTasks: (query: string, filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean }, listId?: string, page?: number) =>
+  searchTaskManagerTasks: (query: string, filters?: TaskSearchFilters, listId?: string, page?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_SEARCH_TASKS, query, filters, listId, page),
   getTaskManagerTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK, taskId),
   createTaskManagerTask: (listId: string, data: any) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_CREATE_TASK, listId, data),
@@ -73,6 +79,9 @@ const electronAPI = {
   postTaskTimeEntry: (taskId: string, startMs: number, durationMs: number, description?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_TIME_ENTRY, taskId, startMs, durationMs, description),
   getTaskTimeEntries: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TIME_ENTRIES, taskId),
+  getTaskStatuses: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK_STATUSES, taskId),
+  getListStatuses: (listId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_LIST_STATUSES, listId),
+  getTaskManagerMembers: () => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_MEMBERS),
 
   // Usage Monitor
   requestUsageUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.USAGE_REQUEST),
@@ -85,6 +94,11 @@ const electronAPI = {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on(IPC_CHANNELS.USAGE_COST_UPDATE, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.USAGE_COST_UPDATE, handler);
+  },
+  onTerminalUsage: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_USAGE, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_USAGE, handler);
   },
   requestCopilotUsageUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.COPILOT_USAGE_REQUEST),
   onCopilotUsageUpdated: (callback: (data: any) => void) => {
@@ -102,8 +116,17 @@ const electronAPI = {
   getTabState: () => ipcRenderer.invoke(IPC_CHANNELS.TAB_STATE_GET),
   saveTabState: (tabState: any) => ipcRenderer.invoke(IPC_CHANNELS.TAB_STATE_SAVE, tabState),
 
+  // Files
+  listDir: (dirPath: string, depth?: number) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LIST_DIR, dirPath, depth),
+  loadClaudeSkills: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_LOAD_CLAUDE_SKILLS, projectPath),
+  readFile: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_READ_FILE, filePath),
+  saveClaudeSkill: (projectPath: string, skillName: string, content: string) => ipcRenderer.invoke(IPC_CHANNELS.FILES_SAVE_CLAUDE_SKILL, projectPath, skillName, content),
+  pathExists: (targetPath: string): Promise<{ success: boolean; data?: { exists: boolean; isDirectory: boolean }; error?: string }> =>
+    ipcRenderer.invoke(IPC_CHANNELS.FILES_PATH_EXISTS, targetPath),
+
   // Git
-  createTaskWorktree: (projectPath: string, taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId),
+  createTaskWorktree: (projectPath: string, taskId: string, baseBranch?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_WORKTREE, projectPath, taskId, undefined, baseBranch),
   removeTaskWorktree: (projectPath: string, worktreePath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_REMOVE_WORKTREE, projectPath, worktreePath),
   mergeTaskBranch: (projectPath: string, worktreePath: string, taskBranch: string, targetBranch: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_MERGE_TASK, projectPath, worktreePath, taskBranch, targetBranch),
   listBranches: (projectPath: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_LIST_BRANCHES, projectPath),
@@ -113,6 +136,8 @@ const electronAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.GIT_CREATE_BRANCH_PR, cwd, newBranch, targetBranch, title, body),
   getTaskSummary: (cwd: string, taskBranch: string, baseBranch: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.GIT_TASK_SUMMARY, cwd, taskBranch, baseBranch),
+  getDiffFiles: (cwd: string, baseBranch?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.GIT_DIFF_FILES, cwd, baseBranch),
   enablePRAutoMerge: (projectPath: string, branch: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.GIT_ENABLE_PR_AUTO_MERGE, projectPath, branch),
   pushBranch: (cwd: string, branch?: string) => ipcRenderer.invoke(IPC_CHANNELS.GIT_PUSH_BRANCH, cwd, branch),
@@ -241,11 +266,15 @@ const electronAPI = {
   removeTaskTag: (taskId: string, tagName: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_REMOVE_TAG, taskId, tagName),
 
   // Code Review
-  codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listId?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listId),
+  codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listIds),
   codeReviewGetPRInfo: (projectPath: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_PR_INFO, projectPath, prNumber),
   codeReviewRun: (projectPath: string, taskId: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RUN, projectPath, taskId, prNumber),
   codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle),
+  codeReviewForceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE, projectPath, taskId, prNumber, prTitle),
+  codeReviewAddPR: (projectPath: string, prInput: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_ADD_PR, projectPath, prInput),
   codeReviewStop: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_STOP, taskId),
   codeReviewStopAll: () => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_STOP_ALL),
   codeReviewSchedulerStart: () => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SCHEDULER_START),
@@ -257,8 +286,63 @@ const electronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.CODE_REVIEW_EVENT, handler);
   },
 
+  // Kanban Tasks
+  kanbanList: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_LIST),
+  kanbanGet: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_GET, id),
+  kanbanImport: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_IMPORT, input),
+  kanbanCreateLocal: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_CREATE_LOCAL, input),
+  kanbanLinkClickup: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_LINK_CLICKUP, input),
+  kanbanUpdate: (id: string, patch: any) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_UPDATE, id, patch),
+  kanbanSetStatus: (id: string, status: string, orderIndex?: number) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_SET_STATUS, id, status, orderIndex),
+  kanbanDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DELETE, id),
+  kanbanRefreshClickup: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_REFRESH_CLICKUP),
+  kanbanDailyCost: () => ipcRenderer.invoke(IPC_CHANNELS.KANBAN_DAILY_COST),
+  onKanbanEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.KANBAN_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.KANBAN_EVENT, handler);
+  },
+
+  // Dashboard — scheduled AI "Notices"
+  dashboardList: () => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_LIST),
+  dashboardSave: (input: any) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_SAVE, input),
+  dashboardDelete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_DELETE, id),
+  dashboardRun: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.DASHBOARD_RUN, id),
+  onDashboardEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.DASHBOARD_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.DASHBOARD_EVENT, handler);
+  },
+
+  // Auto Code Loop
+  autoCodeStatus: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_STATUS),
+  autoCodeStart: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_START),
+  autoCodeStop: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_STOP),
+  autoCodeRunNow: () => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_RUN_NOW),
+  autoCodeRunTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_RUN_TASK, taskId),
+  autoCodeRequeue: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_REQUEUE, taskId),
+  autoCodeSetTaskAutoMerge: (taskId: string, override: boolean | null) =>
+    ipcRenderer.invoke(IPC_CHANNELS.AUTO_CODE_SET_TASK_AUTOMERGE, taskId, override),
+  onAutoCodeEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.AUTO_CODE_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.AUTO_CODE_EVENT, handler);
+  },
+
+  // Activity Feed
+  activityList: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_LIST),
+  markActivityRead: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_MARK_READ, id),
+  markAllActivityRead: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_MARK_ALL_READ),
+  clearActivity: () => ipcRenderer.invoke(IPC_CHANNELS.ACTIVITY_CLEAR),
+  onActivityEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.ACTIVITY_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTIVITY_EVENT, handler);
+  },
+
   // Claude Sessions Browser
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSIONS_LIST, cwd),
+  claudeSessionExists: (cwd: string, sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSION_EXISTS, cwd, sessionId),
 
   // File utilities
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

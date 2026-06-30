@@ -41,7 +41,8 @@ export async function listSessions(): Promise<InsightsSessionMeta[]> {
         qcFailed: session.qcTask?.testCases.filter((tc) => tc.status === 'failed' || tc.status === 'error').length,
         qcTotal: session.qcTask?.testCases.length,
         qcDurationMs: session.qcTask?.durationMs,
-        linkedTaskName: session.linkedTask?.name,
+        linkedTaskName: session.linkedTask?.name || session.qcTask?.linkedTask?.name,
+        linkedTaskColor: session.linkedTask?.statusColor || session.qcTask?.linkedTask?.statusColor,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
       });

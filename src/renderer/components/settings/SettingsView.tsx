@@ -1,18 +1,20 @@
 import { useState, useEffect } from 'react';
-import { Settings, Terminal, CheckSquare, Bot, Palette, Save, RotateCcw, Loader2, CheckCircle, XCircle, Info, RefreshCw, Download, Users, ShieldCheck, Plus, Trash2, Eye, EyeOff, Wifi, Server, Square } from 'lucide-react';
+import { Settings, Terminal, CheckSquare, Bot, Palette, Save, RotateCcw, Loader2, CheckCircle, XCircle, Info, RefreshCw, Download, Users, ShieldCheck, Plus, Trash2, Eye, EyeOff, Wifi, Server, Square, Wrench, FolderOpen } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useTeamStore } from '../../stores/team-store';
+import { useProjectStore } from '../../stores/project-store';
 import type { AppSettings, AgentProviderMeta, QCCredential } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
 
-type SettingsSection = 'general' | 'terminal' | 'tasks' | 'testing' | 'agent' | 'team' | 'appearance';
+type SettingsSection = 'general' | 'terminal' | 'tasks' | 'testing' | 'auto-code' | 'agent' | 'team' | 'appearance';
 
 const sections: { id: SettingsSection; icon: typeof Terminal; label: string; description: string }[] = [
   { id: 'general', icon: Info, label: 'General', description: 'Version and update settings' },
   { id: 'terminal', icon: Terminal, label: 'Terminal', description: 'Font, cursor, and display settings' },
   { id: 'tasks', icon: CheckSquare, label: 'Tasks', description: 'Task manager integration' },
   { id: 'testing', icon: ShieldCheck, label: 'Testing', description: 'QC Testing default URL and credentials' },
+  { id: 'auto-code', icon: Wrench, label: 'Auto Code Loop', description: 'Autonomously implement & fix tasks from description and QC feedback' },
   { id: 'agent', icon: Bot, label: 'Agent', description: 'AI agent provider configuration' },
   { id: 'team', icon: Users, label: 'Team', description: 'Real-time team chat settings' },
   { id: 'appearance', icon: Palette, label: 'Appearance', description: 'Theme and display options' },
@@ -31,6 +33,7 @@ export function SettingsView() {
 
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   const [visibleCredValues, setVisibleCredValues] = useState<Record<number, boolean>>({});
+  const projects = useProjectStore((s) => s.projects);
 
   useEffect(() => {
     loadSettings();
@@ -744,21 +747,24 @@ export function SettingsView() {
                   <p className="text-[10px] text-[var(--text-muted)] mt-1">AI provider selected by default when creating new terminals</p>
                 </div>
 
-                {/* Per-agent model selector */}
+                {/* Per-agent model selector — known options + Custom for any future model ID */}
                 {(() => {
                   const selectedProvider = agentProviders.find((p) => p.id === localSettings.defaultAgentProvider);
                   if (!selectedProvider || selectedProvider.models.length === 0) return null;
                   const agentModels = localSettings.agentModels || {};
                   const currentModel = agentModels[selectedProvider.id] || selectedProvider.defaultModel;
+                  const CUSTOM = '__custom__';
+                  const isCustom = !selectedProvider.models.some((m) => m.id === currentModel);
                   return (
                     <div>
                       <label className="block text-sm text-[var(--text-secondary)] mb-1.5">
                         Default Model ({selectedProvider.displayName})
                       </label>
                       <select
-                        value={currentModel}
+                        value={isCustom ? CUSTOM : currentModel}
                         onChange={(e) => {
-                          const updated = { ...localSettings.agentModels, [selectedProvider.id]: e.target.value };
+                          const value = e.target.value === CUSTOM ? '' : e.target.value;
+                          const updated = { ...localSettings.agentModels, [selectedProvider.id]: value };
                           handleChange('agentModels', updated);
                         }}
                         className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
@@ -766,7 +772,23 @@ export function SettingsView() {
                         {selectedProvider.models.map((m) => (
                           <option key={m.id} value={m.id}>{m.label}</option>
                         ))}
+                        <option value={CUSTOM}>Custom…</option>
                       </select>
+                      {isCustom && (
+                        <input
+                          type="text"
+                          value={currentModel}
+                          onChange={(e) => {
+                            const updated = { ...localSettings.agentModels, [selectedProvider.id]: e.target.value };
+                            handleChange('agentModels', updated);
+                          }}
+                          placeholder="e.g. claude-opus-4-8"
+                          className="mt-2 w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] font-mono"
+                        />
+                      )}
+                      <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                        Aliases (Opus / Sonnet / Haiku) always use the latest version. Use Custom… to type a specific model ID.
+                      </p>
                     </div>
                   );
                 })()}
@@ -902,6 +924,305 @@ export function SettingsView() {
                   <li>Teammates on the same repo are grouped into a shared chat room</li>
                   <li>One person clicks "Start Server" here (or enables Auto-start) — others just enter the URL and click "Join" in Team Chat</li>
                 </ul>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'auto-code' && (
+            <div className="space-y-6 max-w-xl">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-[var(--text-primary)]">Auto Code Loop</h2>
+                  <p className="text-sm text-[var(--text-muted)] mt-1">
+                    Watches ClickUp tasks in the Failed status, reads QC feedback comments, dispatches a fix prompt in the task's worktree, pushes commits, and flips the task back for re-testing. Runs automatically in the background.
+                  </p>
+                </div>
+                <div className={cn(
+                  'shrink-0 mt-1 w-10 h-10 rounded-lg flex items-center justify-center',
+                  localSettings.autoCodeEnabled ? 'bg-green-500/10' : 'bg-[var(--bg-tertiary)]',
+                )}>
+                  <Wrench className={cn('w-5 h-5', localSettings.autoCodeEnabled ? 'text-green-400' : 'text-[var(--text-muted)]')} />
+                </div>
+              </div>
+
+              {/* Master toggle */}
+              <div className="flex items-center justify-between p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border)]">
+                <div>
+                  <label className="text-sm font-medium text-[var(--text-primary)]">Enable Auto Code Loop</label>
+                  <p className="text-[11px] text-[var(--text-muted)] mt-0.5">Master switch — nothing runs automatically when this is off.</p>
+                </div>
+                <button
+                  onClick={() => handleChange('autoCodeEnabled', !localSettings.autoCodeEnabled)}
+                  className={cn(
+                    'relative w-10 h-5 rounded-full transition-colors shrink-0',
+                    localSettings.autoCodeEnabled ? 'bg-green-500' : 'bg-[var(--border)]',
+                  )}
+                >
+                  <div className={cn(
+                    'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm',
+                    localSettings.autoCodeEnabled ? 'translate-x-5' : 'translate-x-0.5',
+                  )} />
+                </button>
+              </div>
+
+              {/* Max iterations + poll interval */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Max Iterations</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={localSettings.autoCodeMaxIterations}
+                    onChange={(e) => handleChange('autoCodeMaxIterations', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  />
+                  <p className="text-[11px] text-[var(--text-muted)] mt-1">After this many fix attempts the task is escalated for manual review (you can re-queue it).</p>
+                </div>
+                <div>
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Poll Interval</label>
+                  <select
+                    value={localSettings.autoCodePollIntervalMinutes}
+                    onChange={(e) => handleChange('autoCodePollIntervalMinutes', parseInt(e.target.value, 10))}
+                    className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  >
+                    <option value={15}>Every 15 minutes</option>
+                    <option value={30}>Every 30 minutes</option>
+                    <option value={60}>Every 1 hour</option>
+                    <option value={120}>Every 2 hours</option>
+                    <option value={240}>Every 4 hours</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Start status — the IMPLEMENT trigger */}
+              <div>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Start Status <span className="text-[var(--text-muted)] font-normal">(implement trigger)</span></label>
+                <input
+                  type="text"
+                  value={localSettings.autoCodeStartStatus}
+                  onChange={(e) => handleChange('autoCodeStartStatus', e.target.value)}
+                  placeholder="e.g. ready to code — leave blank to start as soon as a task is enabled"
+                  className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                />
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">When an enabled task hits this ClickUp status, Auto Code implements it from the description. Comma-separate to match several statuses. Leave blank to begin the moment a task is enabled (no status gate).</p>
+              </div>
+
+              {/* In Progress status — flipped when coding starts */}
+              <div>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1.5">In Progress Status <span className="text-[var(--text-muted)] font-normal">(set when coding starts)</span></label>
+                <input
+                  type="text"
+                  value={localSettings.autoCodeInProgressStatus}
+                  onChange={(e) => handleChange('autoCodeInProgressStatus', e.target.value)}
+                  placeholder="in progress"
+                  className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                />
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">As soon as the agent starts working a task, ClickUp is flipped to this status so the board shows it's active (it then moves to the Re-Test status when the fix is pushed). First entry is written back. Leave blank to leave the status untouched while coding.</p>
+              </div>
+
+              {/* Status names */}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Failed Status</label>
+                  <input
+                    type="text"
+                    value={localSettings.autoCodeFailedStatus}
+                    onChange={(e) => handleChange('autoCodeFailedStatus', e.target.value)}
+                    placeholder="failed"
+                    className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                  />
+                  <p className="text-[11px] text-[var(--text-muted)] mt-1">Triggers a QC fix. Comma-separate to match several statuses.</p>
+                </div>
+                <div>
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Re-Test Status</label>
+                  <input
+                    type="text"
+                    value={localSettings.autoCodeReviewStatus}
+                    onChange={(e) => handleChange('autoCodeReviewStatus', e.target.value)}
+                    placeholder="ready for review"
+                    className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                  />
+                  <p className="text-[11px] text-[var(--text-muted)] mt-1">After a fix is pushed. First entry is written back.</p>
+                </div>
+                <div>
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Done Status</label>
+                  <input
+                    type="text"
+                    value={localSettings.autoCodeDoneStatus}
+                    onChange={(e) => handleChange('autoCodeDoneStatus', e.target.value)}
+                    placeholder="done"
+                    className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                  />
+                  <p className="text-[11px] text-[var(--text-muted)] mt-1">Triggers auto-merge. Comma-separate to match several statuses.</p>
+                </div>
+              </div>
+
+              {/* Review Failed — the REVIEW-FIX trigger */}
+              <div>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Review Failed Status <span className="text-[var(--text-muted)] font-normal">(code-review fix trigger)</span></label>
+                <input
+                  type="text"
+                  value={localSettings.autoCodeReviewFailedStatus}
+                  onChange={(e) => handleChange('autoCodeReviewFailedStatus', e.target.value)}
+                  placeholder="review failed"
+                  className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                />
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">When a task hits this status (set by the Code Review loop on failure), Auto Code reads the review findings, fixes them on the PR branch, then flips the task back to the Code Review status so it re-reviews — repeating until it passes or hits Max Iterations. Comma-separate to match several statuses.</p>
+              </div>
+
+              {/* Quality & alerts toggles */}
+              <div className="space-y-3">
+                {([
+                  {
+                    key: 'autoCodeReviewGate' as const,
+                    label: 'Second-agent review gate',
+                    desc: 'Have a different agent review the fix diff before sending it to QC. Critical findings hold the task back for manual review.',
+                  },
+                  {
+                    key: 'qcCaptureDiagnostics' as const,
+                    label: 'Capture QC diagnostics',
+                    desc: 'During QC runs, collect browser console errors and failed network requests and feed them into the next auto-code attempt.',
+                  },
+                  {
+                    key: 'notificationsEnabled' as const,
+                    label: 'Desktop notifications',
+                    desc: 'Native OS alerts when a fix is pushed or escalated, QC fails, a PR auto-merges, or a review is rejected.',
+                  },
+                ]).map((t) => (
+                  <div key={t.key} className="flex items-start justify-between gap-3">
+                    <div>
+                      <label className="text-sm text-[var(--text-secondary)]">{t.label}</label>
+                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5">{t.desc}</p>
+                    </div>
+                    <button
+                      onClick={() => handleChange(t.key, !localSettings[t.key])}
+                      className={cn(
+                        'relative w-10 h-5 rounded-full transition-colors shrink-0 mt-0.5',
+                        localSettings[t.key] ? 'bg-green-500' : 'bg-[var(--border)]',
+                      )}
+                    >
+                      <div className={cn(
+                        'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm',
+                        localSettings[t.key] ? 'translate-x-5' : 'translate-x-0.5',
+                      )} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Project path */}
+              <div>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1.5">
+                  <FolderOpen className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />
+                  Project
+                </label>
+                <select
+                  value={localSettings.autoCodeProjectPath || ''}
+                  onChange={(e) => handleChange('autoCodeProjectPath', e.target.value)}
+                  className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                >
+                  <option value="">Select project…</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.path}>{p.name}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">Worktrees are created under <code className="text-[10px]">.task-worktrees/</code> inside this project. The <code className="text-[10px]">gh</code> CLI runs here.</p>
+              </div>
+
+              {/* Per-column status mapping */}
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-primary)] mb-1">Kanban Column Mapping</label>
+                <p className="text-[11px] text-[var(--text-muted)] mb-3">
+                  Map ClickUp statuses (comma-separated, case-insensitive) to each Kanban column. When an imported task's ClickUp status changes, its card moves to the matching column. A status listed under multiple columns matches the topmost one. Unmatched statuses leave the card where it is, so manual drags are preserved.
+                </p>
+                <div className="space-y-3">
+                  {([
+                    { key: 'kanbanBacklogStatuses', label: 'To Do', color: '#94a3b8', placeholder: 'to do, open, backlog, planning, ready', note: "Also defines which ClickUp tasks appear in the board's Backlog column before import." },
+                    { key: 'kanbanInProgressStatuses', label: 'In Progress', color: '#3b82f6', placeholder: 'in progress, in development, developing, working' },
+                    { key: 'kanbanReviewStatuses', label: 'Review / QC', color: '#f59e0b', placeholder: 'review, in review, ready for review' },
+                    { key: 'kanbanFailedStatuses', label: 'Failed', color: '#ef4444', placeholder: 'failed' },
+                    { key: 'kanbanDoneStatuses', label: 'Done', color: '#22c55e', placeholder: 'done, complete, closed' },
+                  ] as const).map((col) => (
+                    <div key={col.key}>
+                      <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mb-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: col.color }} />
+                        {col.label}
+                      </label>
+                      <input
+                        type="text"
+                        value={localSettings[col.key]}
+                        onChange={(e) => handleChange(col.key, e.target.value)}
+                        placeholder={col.placeholder}
+                        className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                      />
+                      {'note' in col && col.note && (
+                        <p className="text-[11px] text-[var(--text-muted)] mt-1">{col.note}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)] mt-3">
+                  Note: the auto-code <span className="text-[var(--text-secondary)]">Failed</span>, <span className="text-[var(--text-secondary)]">Re-Test</span>, and <span className="text-[var(--text-secondary)]">Done</span> statuses above always map to their columns too, since the loop writes those back to ClickUp.
+                </p>
+              </div>
+
+              {/* Snapshot refresh interval */}
+              <div>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1.5">ClickUp Snapshot Refresh</label>
+                <select
+                  value={localSettings.kanbanSnapshotIntervalMinutes}
+                  onChange={(e) => handleChange('kanbanSnapshotIntervalMinutes', parseInt(e.target.value, 10))}
+                  className="w-full px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                >
+                  <option value={0}>Disabled — manual refresh only</option>
+                  <option value={1}>Every minute</option>
+                  <option value={2}>Every 2 minutes</option>
+                  <option value={5}>Every 5 minutes (default)</option>
+                  <option value={10}>Every 10 minutes</option>
+                  <option value={15}>Every 15 minutes</option>
+                  <option value={30}>Every 30 minutes</option>
+                </select>
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">How often the Kanban board pulls fresh ClickUp status for all imported tasks. Runs independently of the auto-code loop.</p>
+              </div>
+
+              {/* Auto-merge */}
+              <div className="flex items-center justify-between p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border)]">
+                <div>
+                  <label className="text-sm font-medium text-[var(--text-primary)]">Auto-Merge on QC Pass</label>
+                  <p className="text-[11px] text-[var(--text-muted)] mt-0.5">Automatically squash-merge the PR via <code className="text-[10px]">gh pr merge --auto</code> once the task moves to Done. Off by default — keep a human in the loop for final merge.</p>
+                </div>
+                <button
+                  onClick={() => handleChange('autoCodeAutoMerge', !localSettings.autoCodeAutoMerge)}
+                  className={cn(
+                    'relative w-10 h-5 rounded-full transition-colors shrink-0',
+                    localSettings.autoCodeAutoMerge ? 'bg-green-500' : 'bg-[var(--border)]',
+                  )}
+                >
+                  <div className={cn(
+                    'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform shadow-sm',
+                    localSettings.autoCodeAutoMerge ? 'translate-x-5' : 'translate-x-0.5',
+                  )} />
+                </button>
+              </div>
+
+              {/* Info box */}
+              <div className="p-4 rounded-lg bg-blue-500/5 border border-blue-500/20">
+                <div className="flex items-start gap-2">
+                  <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                  <div className="text-[11px] text-[var(--text-secondary)] space-y-1">
+                    <p><strong>How it works</strong> (per-task opt-in — enable Auto Code on a card):</p>
+                    <ol className="list-decimal list-inside space-y-0.5">
+                      <li><strong>Implement:</strong> when an enabled task reaches the Start Status{localSettings.autoCodeStartStatus ? <> (<code className="text-[10px]">{localSettings.autoCodeStartStatus}</code>)</> : ' (or immediately, if Start Status is blank)'}, the agent builds it from the task description in an isolated worktree.</li>
+                      <li><strong>Fix:</strong> when a task is in the <code className="text-[10px]">{localSettings.autoCodeFailedStatus}</code> status, the agent addresses the QC failure comments (plus prior attempts, so retries don't repeat).</li>
+                      <li><strong>Review Fix:</strong> when a task is in the <code className="text-[10px]">{localSettings.autoCodeReviewFailedStatus}</code> status, the agent reads the AI Code Review findings, fixes them on the PR branch, and flips the task back to <code className="text-[10px]">{(localSettings.codeReviewStatuses || '').split(',')[0].trim() || localSettings.autoCodeReviewStatus}</code> so Code Review re-runs — looping until it passes (the <code className="text-[10px]">{localSettings.codeReviewTagName}</code> tag) or hits the cap.</li>
+                      {localSettings.autoCodeInProgressStatus ? <li>While the agent is working, the task is flipped to <code className="text-[10px]">{localSettings.autoCodeInProgressStatus}</code> so the board shows it's active.</li> : null}
+                      <li>After pushing + opening a PR, the task flips to <code className="text-[10px]">{localSettings.autoCodeReviewStatus}</code> for review/QC.</li>
+                      <li>QC marks it <code className="text-[10px]">{localSettings.autoCodeFailedStatus}</code> → it iterates, or <code className="text-[10px]">{localSettings.autoCodeDoneStatus}</code> → it auto-merges (if enabled).</li>
+                      <li>Hitting the iteration cap escalates the task — find it on the Kanban Board and click re-queue once the blocker is cleared.</li>
+                    </ol>
+                  </div>
+                </div>
               </div>
             </div>
           )}

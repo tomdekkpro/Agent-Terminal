@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -10,6 +10,14 @@ import { useSettingsStore } from '../../stores/settings-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
+import { postTimeEntriesByDate } from '../../utils/time-tracking';
+
+/** Compact token formatter — 12345 → "12.3K", 1500000 → "1.5M" */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toString();
+}
 
 /** Format milliseconds to HH:MM:SS */
 function formatElapsed(ms: number): string {
@@ -39,9 +47,305 @@ interface TerminalPanelProps {
   onDragHandleStart?: (e: React.DragEvent) => void;
   onDragHandleEnd?: (e: React.DragEvent) => void;
   isDraggedOver?: boolean;
+  /** Hide the built-in toolbar — used when an outer surface (the Kanban task
+   *  modal) renders its own unified action row above the terminal. */
+  hideToolbar?: boolean;
 }
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico']);
+
+/** Actions dropdown — sends prompt-based actions to the agent terminal */
+export function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRemoteControl, align = 'right' }: {
+  terminal: Terminal;
+  isSplit?: boolean;
+  onMergeComplete?: () => void;
+  onMobileRemoteControl?: () => void;
+  /** Which edge the menu aligns to. Right by default (toolbar lives at the
+   *  right); pass 'left' when the trigger sits at the left of its row. */
+  align?: 'left' | 'right';
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const sendPrompt = (prompt: string) => {
+    window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+    setOpen(false);
+  };
+
+  const isAgent = terminal.isClaudeMode;
+  const taskLabel = terminal.task?.customId || terminal.task?.id || '';
+  const isWorktree = !!terminal.worktreePath;
+
+  const cleanupWorktreeAction = async () => {
+    setOpen(false);
+    const msg = isAgent
+      ? 'Close this terminal (the agent will be terminated) and remove the worktree directory?'
+      : 'Close this terminal and remove the worktree directory?';
+    if (!window.confirm(msg)) return;
+    useTerminalStore.getState().markPendingWorktreeCleanup(terminal.id);
+    try {
+      await window.electronAPI.destroyTerminal(terminal.id);
+    } catch { /* non-critical */ }
+    useTerminalStore.getState().removeTerminal(terminal.id);
+  };
+
+  const actions: { icon: React.ReactNode; label: string; description?: string; action: () => void; agentOnly?: boolean; worktreeOnly?: boolean; mergeOnly?: boolean; mobileOnly?: boolean; disabled?: boolean }[] = [
+    {
+      icon: <GitMerge className="w-3.5 h-3.5" />,
+      label: 'Complete Task',
+      description: 'Merge, create PR, or push code',
+      action: () => { setOpen(false); onMergeComplete?.(); },
+      mergeOnly: true,
+    },
+    {
+      icon: <Smartphone className="w-3.5 h-3.5" />,
+      label: 'Remote Control',
+      description: terminal.isClaudeBusy ? 'Wait for agent to finish' : 'Open agent on phone — scan QR',
+      action: () => { setOpen(false); onMobileRemoteControl?.(); },
+      mobileOnly: true,
+      agentOnly: true,
+      disabled: terminal.isClaudeBusy,
+    },
+    {
+      icon: <GitCommitVertical className="w-3.5 h-3.5" />,
+      label: 'Commit Changes',
+      action: () => sendPrompt(`Please commit all changes with a descriptive commit message based on what was changed.`),
+      agentOnly: true,
+    },
+    {
+      icon: <GitPullRequest className="w-3.5 h-3.5" />,
+      label: 'Create PR',
+      action: () => sendPrompt(`Please commit all changes, push the current branch to origin, and create a pull request. Use a descriptive title and summary based on the changes.`),
+      agentOnly: true,
+    },
+    {
+      icon: <MessageSquare className="w-3.5 h-3.5" />,
+      label: 'Post Root Cause & Solution',
+      description: `Comment on ${taskLabel}`,
+      action: () => sendPrompt(`Please analyze the changes made in this session and post a comment to ClickUp task ${terminal.task?.id} summarizing the root cause of the issue and the solution. Include relevant file changes.`),
+      agentOnly: true,
+    },
+    {
+      icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+      label: 'Set Ready for Review',
+      description: `Update ${taskLabel} status`,
+      action: () => sendPrompt(`Please update the ClickUp task ${terminal.task?.id} status to "ready for review".`),
+      agentOnly: true,
+    },
+    {
+      icon: <ListTodo className="w-3.5 h-3.5" />,
+      label: 'Summarize Work',
+      action: () => sendPrompt(`Please summarize all the work done in this session: what was changed, which files were modified, and any remaining items.`),
+      agentOnly: true,
+    },
+    {
+      icon: <Trash2 className="w-3.5 h-3.5" />,
+      label: 'Cleanup Worktree',
+      description: 'Close terminal and remove the worktree dir',
+      action: cleanupWorktreeAction,
+      worktreeOnly: true,
+    },
+  ];
+
+  const visibleActions = actions.filter((a) => {
+    if (a.agentOnly && !isAgent) return false;
+    if (a.worktreeOnly && !isWorktree) return false;
+    if (a.mergeOnly && !onMergeComplete) return false;
+    if (a.mobileOnly && !onMobileRemoteControl) return false;
+    return true;
+  });
+
+  if (visibleActions.length === 0) return null;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+        title="Task actions"
+      >
+        <Zap className="w-3.5 h-3.5" />
+        {!isSplit && 'Actions'}
+        <ChevronDown className="w-3 h-3 opacity-60" />
+      </button>
+      {open && (
+        <div className={cn(
+          'absolute top-full mt-1 w-64 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-30 py-1 overflow-hidden',
+          align === 'left' ? 'left-0' : 'right-0',
+        )}>
+          {visibleActions.map((a, i) => (
+            <button
+              key={i}
+              onClick={(e) => { e.stopPropagation(); a.action(); }}
+              disabled={a.disabled}
+              className={cn(
+                'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
+                a.disabled
+                  ? 'opacity-40 cursor-not-allowed'
+                  : 'hover:bg-[var(--bg-tertiary)]'
+              )}
+            >
+              <span className="mt-0.5 text-[var(--text-muted)]">{a.icon}</span>
+              <div className="min-w-0">
+                <div className="text-xs text-[var(--text-primary)]">{a.label}</div>
+                {a.description && (
+                  <div className="text-[10px] text-[var(--text-muted)] truncate">{a.description}</div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Shows the terminal's agent session ID with copy + manual-import affordance.
+ *  Mirrors the Kanban SessionIdEditor — same UUID validation, same display
+ *  format (first8…last4), so users get a consistent way to inspect and override
+ *  the resume target across both surfaces. */
+function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: boolean }) {
+  const updateTerminal = useTerminalStore((s) => s.updateTerminal);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(terminal.agentSessionId || '');
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setEditing(false);
+        setError(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [editing]);
+
+  const open = () => {
+    setValue(terminal.agentSessionId || '');
+    setError(null);
+    setEditing(true);
+  };
+
+  const save = () => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      updateTerminal(terminal.id, { agentSessionId: undefined });
+      setEditing(false);
+      return;
+    }
+    if (terminal.agentProvider === 'claude' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+      setError('Claude session IDs are UUIDs (e.g. 1a2b3c4d-…)');
+      return;
+    }
+    if (trimmed === terminal.agentSessionId) {
+      setEditing(false);
+      return;
+    }
+    updateTerminal(terminal.id, { agentSessionId: trimmed });
+    setEditing(false);
+  };
+
+  const copy = () => {
+    if (!terminal.agentSessionId) return;
+    navigator.clipboard.writeText(terminal.agentSessionId);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  if (editing) {
+    return (
+      <div ref={wrapRef} className="flex items-center gap-1 shrink-0">
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-[var(--bg-tertiary)] border border-[var(--accent)]/40">
+          <Hash className="w-2.5 h-2.5 text-[var(--text-muted)]" />
+          <input
+            type="text"
+            autoFocus
+            value={value}
+            onChange={(e) => { setValue(e.target.value); setError(null); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); save(); }
+              if (e.key === 'Escape') { setEditing(false); setError(null); }
+            }}
+            placeholder="Paste session ID (UUID)"
+            className={cn(
+              'font-mono text-[10px] bg-transparent text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]',
+              isSplit ? 'w-[160px]' : 'w-[260px]',
+            )}
+            onClick={(e) => e.stopPropagation()}
+          />
+          <button
+            onClick={(e) => { e.stopPropagation(); save(); }}
+            title="Save (Enter)"
+            className="p-0.5 rounded hover:bg-[var(--bg-card)] text-emerald-400"
+          >
+            <Save className="w-2.5 h-2.5" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setEditing(false); setError(null); }}
+            title="Cancel (Esc)"
+            className="p-0.5 rounded hover:bg-[var(--bg-card)] text-[var(--text-muted)]"
+          >
+            <X className="w-2.5 h-2.5" />
+          </button>
+        </span>
+        {error && <span className="text-[10px] text-red-400">{error}</span>}
+      </div>
+    );
+  }
+
+  if (!terminal.agentSessionId) {
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); open(); }}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] border border-[var(--border)] shrink-0 transition-colors"
+        title="Set session ID — paste an existing one to resume that agent conversation on reopen"
+      >
+        <Hash className="w-2.5 h-2.5" />
+        {!isSplit && <span className="italic">Set session ID</span>}
+        <Pencil className="w-2.5 h-2.5 opacity-70" />
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 shrink-0"
+      title={`Agent session ID\n${terminal.agentSessionId}\n\nUsed to resume the agent on reopen.`}
+    >
+      <Hash className="w-2.5 h-2.5" />
+      <span className="font-mono">
+        {terminal.agentSessionId.slice(0, 8)}…{terminal.agentSessionId.slice(-4)}
+      </span>
+      <button
+        onClick={(e) => { e.stopPropagation(); copy(); }}
+        className="p-0.5 rounded hover:bg-cyan-500/20 transition-colors"
+        title="Copy session ID"
+      >
+        {copied ? <Check className="w-2.5 h-2.5" /> : <Copy className="w-2.5 h-2.5" />}
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); open(); }}
+        className="p-0.5 rounded hover:bg-cyan-500/20 transition-colors"
+        title="Edit session ID — paste a different one to resume that conversation on next open"
+      >
+        <Pencil className="w-2.5 h-2.5" />
+      </button>
+    </div>
+  );
+}
 
 const TERMINAL_THEME = {
   background: '#0f0f23',
@@ -68,7 +372,7 @@ const TERMINAL_THEME = {
   brightWhite: '#f8fafc',
 };
 
-export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onBaseBranchChange, availableBranches, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver }: TerminalPanelProps) {
+export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, skills, onInvokeAgent, onProviderChange, onInvokeSkill, onMergeComplete, onLinkTask, onBaseBranchChange, availableBranches, onClose, onFocus, onDragHandleStart, onDragHandleEnd, isDraggedOver, hideToolbar }: TerminalPanelProps) {
   const currentProvider = agentProviders.find((p) => p.id === terminal.agentProvider) || agentProviders[0];
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -98,6 +402,15 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
 
+  /** Kick off remote-control: arm the URL capture buffer, then send /remote-control to the agent */
+  const triggerRemoteControl = useCallback(() => {
+    rcBufferRef.current = '';
+    if (rcTimeoutRef.current) clearTimeout(rcTimeoutRef.current);
+    rcTimeoutRef.current = setTimeout(() => { rcBufferRef.current = null; rcTimeoutRef.current = null; }, 15000);
+    window.electronAPI.sendTerminalInput(terminal.id, '/remote-control');
+    setTimeout(() => window.electronAPI.sendTerminalInput(terminal.id, '\r'), 50);
+  }, [terminal.id]);
+
   // Time tracking
   const startTimer = useTerminalStore((s) => s.startTimer);
   const stopTimer = useTerminalStore((s) => s.stopTimer);
@@ -121,19 +434,24 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
     ? tracking.elapsed + (tracking.startedAt ? now - tracking.startedAt : 0)
     : 0;
 
+  // Today's elapsed — only time tracked today (from API + current session's today-portion)
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayMidnight = new Date(now).setHours(0, 0, 0, 0);
+  const prevTodayMs = tracking && tracking.todayDate === todayStr ? (tracking.todayMs || 0) : 0;
+  const sessionTodayMs = tracking?.startedAt
+    ? Math.max(0, now - Math.max(tracking.startedAt, todayMidnight))
+    : 0;
+  const todayElapsed = prevTodayMs + sessionTodayMs;
+
   const handleToggleTimer = useCallback(async () => {
     if (isTimerRunning) {
       const result = stopTimer(terminal.id);
-      // Sync to ClickUp
-      if (result && result.startedAt && terminal.task) {
-        const duration = result.elapsed;
-        if (duration > 0) {
+      // Sync session time to task manager, split by calendar day
+      if (result && result.sessionStartMs && terminal.task) {
+        const sessionMs = result.sessionEndMs - result.sessionStartMs;
+        if (sessionMs > 0) {
           try {
-            await window.electronAPI.postTaskTimeEntry(
-              terminal.task.id,
-              result.startedAt,
-              duration,
-            );
+            await postTimeEntriesByDate(terminal.task.id, result.sessionStartMs, result.sessionEndMs);
           } catch { /* non-critical */ }
         }
       }
@@ -149,7 +467,13 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
 
   // Base branch picker state
   const [showBaseBranchMenu, setShowBaseBranchMenu] = useState(false);
+  const [baseBranchQuery, setBaseBranchQuery] = useState('');
   const baseBranchMenuRef = useRef<HTMLDivElement>(null);
+
+  // Reset the branch search box each time the dropdown opens
+  useEffect(() => {
+    if (showBaseBranchMenu) setBaseBranchQuery('');
+  }, [showBaseBranchMenu]);
 
   // Close provider dropdown on outside click
   useEffect(() => {
@@ -300,6 +624,8 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               });
               xtermRef.current!.loadAddon(addon);
               webglAddonRef.current = addon;
+              // WebGL addon changes renderer metrics — re-fit to sync dimensions
+              try { fitAddonRef.current!.fit(); } catch { /* not ready */ }
             } catch {
               // WebGL not supported — silently fall back to DOM renderer
             }
@@ -311,8 +637,11 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             for (const data of pending) {
               try { xtermRef.current!.write(data); } catch { /* skip */ }
             }
+            // Re-fit after flushing buffered data to ensure dimensions are correct
+            try { fitAddonRef.current!.fit(); } catch { /* not ready */ }
           }
 
+          // Read final cols/rows after all addons loaded and buffer flushed
           const cols = xtermRef.current.cols;
           const rows = xtermRef.current.rows;
           if (cols > 0 && rows > 0) {
@@ -419,7 +748,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             safeFit();
           }
         }
-      }, 200);
+      }, 80);
     });
 
     observer.observe(container);
@@ -449,7 +778,8 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       e.preventDefault();
       dragCounter++;
       const hasFiles = e.dataTransfer?.types.includes('Files');
-      if (hasFiles) {
+      const hasFilePath = e.dataTransfer?.types.includes('application/x-file-path');
+      if (hasFiles || hasFilePath) {
         setIsDragOver(true);
       }
     };
@@ -473,6 +803,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       e.stopPropagation();
       setIsDragOver(false);
       dragCounter = 0;
+
+      // Handle file path drag from FilesPanel
+      const filePathData = e.dataTransfer?.getData('application/x-file-path');
+      if (filePathData) {
+        const needsQuoting = /[\s'"$`\\!&|;(){}]/.test(filePathData);
+        const quoted = needsQuoting ? `"${filePathData.replace(/["$`\\]/g, '\\$&')}"` : filePathData;
+        window.electronAPI.sendTerminalInput(terminal.id, quoted + ' ');
+        if (xtermRef.current) xtermRef.current.focus();
+        return;
+      }
 
       const files = e.dataTransfer?.files;
       if (!files || files.length === 0) return;
@@ -537,7 +877,9 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
 
   return (
     <div ref={panelRef} className="flex flex-col h-full relative" onClick={onFocus}>
-      {/* Terminal toolbar */}
+      {/* Terminal toolbar — hidden when embedded in the Kanban task modal,
+          which renders its own unified action row above the terminal. */}
+      {!hideToolbar && (
       <div className={cn(
         'h-9 bg-[var(--bg-card)] border-b border-[var(--border)] flex items-center px-3 justify-between shrink-0',
         isSplit && isActive && 'border-b-[var(--accent)]',
@@ -553,6 +895,15 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               title="Drag to reorder"
             >
               <GripVertical className="w-3.5 h-3.5" />
+            </div>
+          )}
+          {/* Active indicator — green Bot icon, pulses while thinking */}
+          {terminal.isClaudeMode && (
+            <div
+              className="flex items-center justify-center shrink-0"
+              title={terminal.isClaudeBusy ? `${currentProvider?.displayName || 'Agent'} thinking…` : `${currentProvider?.displayName || 'Agent'} active`}
+            >
+              <Bot className={cn('w-4 h-4 text-emerald-400', terminal.isClaudeBusy && 'animate-pulse')} />
             </div>
           )}
           {isEditingTitle ? (
@@ -613,10 +964,54 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
             </button>
           )}
-          {terminal.worktreeBranch && (
-            <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] shrink-0">
+          {terminal.worktreePath && (
+            <span
+              className={cn(
+                'flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] border shrink-0',
+                terminal.pendingWorktreeCleanup
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-violet-500/15 text-violet-300 border-violet-500/20',
+              )}
+              title={
+                `Worktree: ${terminal.worktreePath}` +
+                (terminal.worktreeBranch ? `\nBranch: ${terminal.worktreeBranch}` : '') +
+                (terminal.pendingWorktreeCleanup
+                  ? '\n\nCleanup queued — will run when this terminal closes.'
+                  : '')
+              }
+            >
               <GitBranch className="w-2.5 h-2.5" />
-              <span className="font-mono">{terminal.worktreeBranch}</span>
+              <span className="uppercase tracking-wide font-medium text-[9px]">Worktree</span>
+              {terminal.worktreeBranch && (
+                <span className="font-mono opacity-80">{terminal.worktreeBranch}</span>
+              )}
+              {terminal.pendingWorktreeCleanup && (
+                <span className="text-[9px] uppercase tracking-wide font-medium opacity-80">· cleanup pending</span>
+              )}
+            </span>
+          )}
+          {/* Session ID chip — show for any terminal that has or could have an agent
+              (linked to a task, agent already invoked, or a session id was captured) */}
+          {(terminal.task || terminal.isClaudeMode || terminal.agentSessionId) && (
+            <SessionIdChip terminal={terminal} isSplit={isSplit} />
+          )}
+          {/* Per-terminal usage pill */}
+          {terminal.usage && (terminal.usage.cost > 0 || terminal.usage.outputTokens > 0) && (
+            <span
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 shrink-0"
+              title={
+                `Session usage${terminal.usage.model ? ` (${terminal.usage.model})` : ''}\n` +
+                `Input:        ${terminal.usage.inputTokens.toLocaleString()} tokens\n` +
+                `Output:       ${terminal.usage.outputTokens.toLocaleString()} tokens\n` +
+                `Cache write:  ${terminal.usage.cacheCreationTokens.toLocaleString()} tokens\n` +
+                `Cache read:   ${terminal.usage.cacheReadTokens.toLocaleString()} tokens\n` +
+                `Cost:         $${terminal.usage.cost.toFixed(4)}`
+              }
+            >
+              <span className="font-mono font-semibold">${terminal.usage.cost.toFixed(2)}</span>
+              <span className="opacity-60">·</span>
+              <span className="font-mono opacity-90">↑{formatTokens(terminal.usage.inputTokens + terminal.usage.cacheCreationTokens + terminal.usage.cacheReadTokens)}</span>
+              <span className="font-mono opacity-90">↓{formatTokens(terminal.usage.outputTokens)}</span>
             </span>
           )}
           {/* Base branch indicator */}
@@ -631,32 +1026,63 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 <span className="font-mono">{terminal.baseBranch}</span>
                 <ChevronDown className="w-2.5 h-2.5 opacity-50" />
               </button>
-              {showBaseBranchMenu && availableBranches && (
-                <div className="absolute top-full left-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-20 max-h-[200px] overflow-y-auto min-w-[140px]">
-                  {availableBranches.map((branch) => (
-                    <button
-                      key={branch}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onBaseBranchChange?.(branch);
-                        setShowBaseBranchMenu(false);
-                      }}
-                      className={cn(
-                        'w-full text-left px-3 py-1.5 text-xs font-mono transition-colors flex items-center gap-1.5',
-                        branch === terminal.baseBranch
-                          ? 'bg-emerald-500/10 text-emerald-400'
-                          : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+              {showBaseBranchMenu && availableBranches && (() => {
+                const q = baseBranchQuery.trim().toLowerCase();
+                const filtered = q ? availableBranches.filter((b) => b.toLowerCase().includes(q)) : availableBranches;
+                return (
+                  <div className="absolute top-full left-0 mt-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl z-20 min-w-[200px] overflow-hidden">
+                    <div className="p-1.5 border-b border-[var(--border)]">
+                      <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-[var(--bg-tertiary)] border border-[var(--border)]">
+                        <Search className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
+                        <input
+                          type="text"
+                          autoFocus
+                          value={baseBranchQuery}
+                          onChange={(e) => setBaseBranchQuery(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { setShowBaseBranchMenu(false); }
+                            if (e.key === 'Enter' && filtered.length > 0) {
+                              onBaseBranchChange?.(filtered[0]);
+                              setShowBaseBranchMenu(false);
+                            }
+                          }}
+                          placeholder="Search branches…"
+                          className="flex-1 min-w-0 bg-transparent text-xs text-[var(--text-primary)] focus:outline-none placeholder:text-[var(--text-muted)]"
+                        />
+                      </div>
+                    </div>
+                    <div className="max-h-[200px] overflow-y-auto">
+                      {filtered.length === 0 && (
+                        <div className="px-3 py-2.5 text-xs text-[var(--text-muted)]">No branches match “{baseBranchQuery.trim()}”.</div>
                       )}
-                    >
-                      <GitBranch className="w-2.5 h-2.5 shrink-0 text-[var(--text-muted)]" />
-                      {branch}
-                    </button>
-                  ))}
-                </div>
-              )}
+                      {filtered.map((branch) => (
+                        <button
+                          key={branch}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onBaseBranchChange?.(branch);
+                            setShowBaseBranchMenu(false);
+                          }}
+                          className={cn(
+                            'w-full text-left px-3 py-1.5 text-xs font-mono transition-colors flex items-center gap-1.5',
+                            branch === terminal.baseBranch
+                              ? 'bg-emerald-500/10 text-emerald-400'
+                              : 'text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                          )}
+                        >
+                          <GitBranch className="w-2.5 h-2.5 shrink-0 text-[var(--text-muted)]" />
+                          {branch}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
-          {!terminal.task && !terminal.worktreeBranch && isSplit && (
+          {!terminal.task && !terminal.worktreePath && isSplit && (
             <span className="text-[10px] text-[var(--text-muted)] truncate">{terminal.cwd || '~'}</span>
           )}
         </div>
@@ -676,28 +1102,24 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               >
                 {isTimerRunning ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
               </button>
-              {(currentElapsed > 0 || isTimerRunning) && (
+              {(todayElapsed > 0 || isTimerRunning) && (
                 <span className={cn(
                   'text-[11px] font-mono tabular-nums',
                   isTimerRunning ? 'text-red-400' : 'text-[var(--text-muted)]'
                 )}>
                   <Clock className="w-3 h-3 inline-block mr-0.5 -mt-px" />
-                  {formatElapsed(currentElapsed)}
+                  {formatElapsed(todayElapsed)}
                 </span>
               )}
             </div>
           )}
-          {terminal.task && onMergeComplete && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onMergeComplete(); }}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
-              title={terminal.worktreeBranch
-                ? `Complete task — merge or create PR for ${terminal.worktreeBranch}`
-                : 'Complete task — create PR or push code'}
-            >
-              <GitMerge className="w-3.5 h-3.5" />
-              {!isSplit && 'Complete'}
-            </button>
+          {terminal.task && (
+            <ActionsDropdown
+              terminal={terminal}
+              isSplit={isSplit}
+              onMergeComplete={onMergeComplete}
+              onMobileRemoteControl={currentProvider?.capabilities.remoteControl ? triggerRemoteControl : undefined}
+            />
           )}
           {!terminal.task && onLinkTask && (
             <button
@@ -774,17 +1196,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
           {terminal.isClaudeMode && (
             <>
-              {/* Mobile button — only for agents with remoteControl */}
-              {currentProvider?.capabilities.remoteControl && (
+              {/* Mobile button — only for agents with remoteControl, and only when there's no task (task terminals get this in the Actions menu) */}
+              {!terminal.task && currentProvider?.capabilities.remoteControl && (
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    rcBufferRef.current = '';
-                    if (rcTimeoutRef.current) clearTimeout(rcTimeoutRef.current);
-                    rcTimeoutRef.current = setTimeout(() => { rcBufferRef.current = null; rcTimeoutRef.current = null; }, 15000);
-                    window.electronAPI.sendTerminalInput(terminal.id, '/remote-control');
-                    setTimeout(() => window.electronAPI.sendTerminalInput(terminal.id, '\r'), 50);
-                  }}
+                  onClick={(e) => { e.stopPropagation(); triggerRemoteControl(); }}
                   disabled={terminal.isClaudeBusy}
                   className={cn(
                     'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors',
@@ -816,20 +1231,9 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 <Eraser className="w-3.5 h-3.5" />
                 {!isSplit && 'Clear'}
               </button>
-              {/* Active indicator */}
-              <div
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs"
-                style={{
-                  backgroundColor: `${currentProvider?.color || '#22c55e'}20`,
-                  color: currentProvider?.color || '#22c55e',
-                }}
-              >
-                <Bot className={cn('w-3.5 h-3.5', terminal.isClaudeBusy && 'animate-pulse')} />
-                {!isSplit && (terminal.isClaudeBusy ? 'Thinking...' : `${currentProvider?.displayName || 'Agent'} Active`)}
-              </div>
             </>
           )}
-          {/* Preview toggle */}
+          {/* Changes toggle */}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -842,10 +1246,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 ? 'bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
                 : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80'
             )}
-            title={terminal.previewOpen ? 'Close preview' : 'Open live preview'}
+            title={terminal.previewOpen ? 'Close changes panel' : 'Show code changes'}
           >
-            {terminal.previewOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-            {!isSplit && (terminal.previewOpen ? 'Preview' : 'Preview')}
+            <GitCommitVertical className="w-3.5 h-3.5" />
+            {!isSplit && 'Changes'}
           </button>
           {isSplit && onClose && (
             <button
@@ -858,6 +1262,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
         </div>
       </div>
+      )}
 
       {/* Remote control dialog */}
       {remoteUrl && (
@@ -937,6 +1342,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
             e.preventDefault();
             e.stopPropagation();
             setIsDragOver(false);
+
+            // Handle file path drag from FilesPanel
+            const filePathData = e.dataTransfer?.getData('application/x-file-path');
+            if (filePathData) {
+              const needsQuoting = /[\s'"$`\\!&|;(){}]/.test(filePathData);
+              const quoted = needsQuoting ? `"${filePathData.replace(/["$`\\]/g, '\\$&')}"` : filePathData;
+              window.electronAPI.sendTerminalInput(terminal.id, quoted + ' ');
+              if (xtermRef.current) xtermRef.current.focus();
+              return;
+            }
 
             const files = e.dataTransfer?.files;
             if (!files || files.length === 0) return;
@@ -1029,6 +1444,16 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       ) : (
         <div className="flex-1 relative">
           <div ref={containerRef} className="absolute inset-0 bg-[#0f0f23] p-1" />
+          {terminal.isResuming && (
+            <div className="absolute inset-0 z-10 bg-[#0f0f23]/80 backdrop-blur-sm flex items-center justify-center">
+              <div className="flex items-center gap-3 px-5 py-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl">
+                <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
+                <span className="text-sm text-[var(--text-secondary)]">
+                  {terminal.agentSessionId ? 'Resuming session...' : 'Starting agent...'}
+                </span>
+              </div>
+            </div>
+          )}
           {terminal.needsResume && (
             <ResumeBanner terminal={terminal} />
           )}
@@ -1056,7 +1481,7 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
         {/* Icon */}
         <div className="flex justify-center">
           <div className="w-14 h-14 rounded-2xl bg-[var(--accent)]/10 flex items-center justify-center">
-            {terminal.claudeSessionId ? (
+            {terminal.agentSessionId ? (
               <Bot className="w-7 h-7 text-emerald-400" />
             ) : (
               <TerminalIcon className="w-7 h-7 text-blue-400" />
@@ -1075,11 +1500,14 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
               {terminal.cwd}
             </p>
           )}
-          {terminal.claudeSessionId && (
+          {terminal.needsRestore && (
             <p className="text-[11px] text-emerald-400/70 mt-1">
               Agent: {terminal.agentProvider}
               {terminal.skipPermissions && ' • YOLO'}
-              {' • Session will resume'}
+              {terminal.agentSessionId
+                ? <span className="text-[10px] text-[var(--text-muted)] ml-1 font-mono">({terminal.agentSessionId})</span>
+                : <span className="text-[10px] text-amber-400/70 ml-1">(no session — will use --continue)</span>
+              }
             </p>
           )}
         </div>

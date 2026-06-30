@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
-  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List,
+  FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
+  GitBranch, ArrowRight, User, Check,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -118,11 +119,13 @@ function PRRow({
   taskId,
   onReview,
   onStop,
+  onApprove,
 }: {
   pr: CodeReviewPR;
   taskId: string;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
+  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
 }) {
   const [expanded, setExpanded] = useState(pr.status === 'failed');
   const status = STATUS_CONFIG[pr.status] || STATUS_CONFIG.pending;
@@ -142,7 +145,6 @@ function PRRow({
             <StatusIcon className={cn('w-3.5 h-3.5 shrink-0', status.color, isReviewing && 'animate-spin')} />
             <span className="text-xs font-medium text-[var(--text-primary)]">PR #{pr.prNumber}</span>
             {pr.prTitle && <span className="text-xs text-[var(--text-muted)] truncate">{pr.prTitle}</span>}
-            {pr.prBranch && <code className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded">{pr.prBranch}</code>}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -168,6 +170,17 @@ function PRRow({
               </button>
             )}
 
+            {pr.status === 'failed' && (
+              <button
+                onClick={() => onApprove(taskId, pr.prNumber, pr.prTitle || `PR #${pr.prNumber}`)}
+                title="Override review — mark as approved"
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors"
+              >
+                <ThumbsUp className="w-3 h-3" />
+                Approve
+              </button>
+            )}
+
             {pr.prUrl && (
               <button
                 onClick={() => window.electronAPI.openExternal(pr.prUrl!)}
@@ -179,6 +192,32 @@ function PRRow({
             )}
           </div>
         </div>
+
+        {/* Branch flow + author */}
+        {(pr.prBranch || pr.prBaseBranch || pr.prAuthor) && (
+          <div className="flex items-center gap-3 mt-2 flex-wrap">
+            {(pr.prBranch || pr.prBaseBranch) && (
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" title="Source branch → target branch">
+                <GitBranch className="w-3 h-3 shrink-0" />
+                {pr.prBranch && (
+                  <code className="text-[10px] bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded text-[var(--text-secondary)]">{pr.prBranch}</code>
+                )}
+                {pr.prBaseBranch && (
+                  <>
+                    <ArrowRight className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
+                    <code className="text-[10px] bg-[var(--accent)]/10 text-[var(--accent)] px-1.5 py-0.5 rounded font-medium">{pr.prBaseBranch}</code>
+                  </>
+                )}
+              </div>
+            )}
+            {pr.prAuthor && (
+              <div className="flex items-center gap-1 text-[11px] text-[var(--text-muted)]" title="PR author">
+                <User className="w-3 h-3 shrink-0" />
+                <span>{pr.prAuthor}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {pr.findings.length > 0 && (
           <div className="flex items-center gap-3 mt-2">
@@ -217,15 +256,106 @@ function PRRow({
   );
 }
 
+function AddPRInput({
+  taskId,
+  projectPath,
+  onAddPR,
+  compact,
+}: {
+  taskId: string;
+  projectPath: string;
+  onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
+  compact?: boolean;
+}) {
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(!compact);
+
+  const submit = async () => {
+    if (!value.trim() || busy) return;
+    if (!projectPath) {
+      setError('Select a project first');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await onAddPR(taskId, value.trim());
+    setBusy(false);
+    if (result.success) {
+      setValue('');
+      if (compact) setOpen(false);
+    } else {
+      setError(result.error || 'Failed to add PR');
+    }
+  };
+
+  if (compact && !open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+      >
+        <Plus className="w-3 h-3" />
+        Add PR manually
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setError(null); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+          placeholder="Paste PR URL or #123"
+          disabled={busy}
+          className="flex-1 text-xs bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)] disabled:opacity-50"
+        />
+        <button
+          onClick={submit}
+          disabled={busy || !value.trim()}
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+        >
+          {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+          Add PR
+        </button>
+        {compact && (
+          <button
+            onClick={() => { setOpen(false); setValue(''); setError(null); }}
+            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+            title="Cancel"
+          >
+            <XCircle className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+      {error && (
+        <div className="flex items-center gap-1.5 text-[11px] text-red-400">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewItemCard({
   item,
+  projectPath,
   onReview,
   onStop,
+  onApprove,
+  onAddPR,
 }: {
   item: CodeReviewItem;
   projectPath: string;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
+  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
+  onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
@@ -265,12 +395,15 @@ function ReviewItemCard({
           </div>
         </div>
 
-        {/* No PRs warning */}
+        {/* No PRs warning + manual input */}
         {!hasPRs && item.status === 'pending' && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            No open PR found. Add a GitHub PR URL to the task description.
-          </div>
+          <>
+            <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              No open PR found. Add it manually below.
+            </div>
+            <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} />
+          </>
         )}
 
         {/* PR list */}
@@ -283,8 +416,10 @@ function ReviewItemCard({
                 taskId={item.taskId}
                 onReview={onReview}
                 onStop={onStop}
+                onApprove={onApprove}
               />
             ))}
+            <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} compact />
           </div>
         )}
       </div>
@@ -505,7 +640,7 @@ function SchedulerPanel({ projectPath }: { projectPath: string }) {
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
@@ -514,9 +649,9 @@ export function CodeReviewView() {
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
   const [customStatuses, setCustomStatuses] = useState('ready for review, in review, review');
 
-  // List dropdown state
+  // List dropdown state — multi-select (review across all selected lists)
   const [lists, setLists] = useState<TaskManagerList[]>([]);
-  const [selectedListId, setSelectedListId] = useState<string>('');
+  const [selectedListIds, setSelectedListIds] = useState<string[]>([]);
   const [showListDropdown, setShowListDropdown] = useState(false);
   const listDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -528,7 +663,21 @@ export function CodeReviewView() {
     return acc;
   }, {});
 
-  const selectedList = lists.find((l) => l.id === selectedListId);
+  const toggleList = (id: string) => {
+    setSelectedListIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const allListsSelected = lists.length > 0 && selectedListIds.length === lists.length;
+  const toggleAllLists = () => {
+    setSelectedListIds(allListsSelected ? [] : lists.map((l) => l.id));
+  };
+  const listButtonLabel =
+    selectedListIds.length === 0
+      ? 'Select lists...'
+      : allListsSelected
+        ? `All lists (${lists.length})`
+        : selectedListIds.length === 1
+          ? lists.find((l) => l.id === selectedListIds[0])?.name || '1 list'
+          : `${selectedListIds.length} lists`;
 
   // Close list dropdown on outside click
   useEffect(() => {
@@ -547,12 +696,8 @@ export function CodeReviewView() {
     window.electronAPI.getTaskManagerLists().then((result: any) => {
       if (result.success && result.data) {
         setLists(result.data);
-        if (result.data.length > 0) {
-          const settings = useSettingsStore.getState().settings;
-          const defaultId = settings.clickupListId || result.data[0].id;
-          const exists = result.data.some((l: TaskManagerList) => l.id === defaultId);
-          setSelectedListId(exists ? defaultId : result.data[0].id);
-        }
+        // Select ALL lists by default so review covers every list at once
+        setSelectedListIds(result.data.map((l: TaskManagerList) => l.id));
       }
     });
   }, [taskManagerProvider]);
@@ -574,16 +719,16 @@ export function CodeReviewView() {
 
   // Auto-load tasks when the view is opened and a project + list are selected
   useEffect(() => {
-    if (selectedProjectPath && selectedListId && taskManagerProvider !== 'none' && items.length === 0 && !loading) {
+    if (selectedProjectPath && selectedListIds.length > 0 && taskManagerProvider !== 'none' && items.length === 0 && !loading) {
       const statuses = customStatuses.split(',').map((s) => s.trim()).filter(Boolean);
-      loadTasks(statuses, selectedProjectPath, selectedListId);
+      loadTasks(statuses, selectedProjectPath, selectedListIds);
     }
-  }, [selectedProjectPath, selectedListId, taskManagerProvider]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedProjectPath, selectedListIds, taskManagerProvider]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLoadTasks = useCallback(() => {
     const statuses = customStatuses.split(',').map((s) => s.trim()).filter(Boolean);
-    loadTasks(statuses, selectedProjectPath || undefined, selectedListId || undefined);
-  }, [customStatuses, selectedProjectPath, selectedListId, loadTasks]);
+    loadTasks(statuses, selectedProjectPath || undefined, selectedListIds.length ? selectedListIds : undefined);
+  }, [customStatuses, selectedProjectPath, selectedListIds, loadTasks]);
 
   const handleReview = useCallback((taskId: string, prNumber: number) => {
     if (!selectedProjectPath) return;
@@ -602,6 +747,16 @@ export function CodeReviewView() {
   const handleStopAll = useCallback(() => {
     stopAllReviews();
   }, [stopAllReviews]);
+
+  const handleApprove = useCallback((taskId: string, prNumber: number, prTitle: string) => {
+    if (!selectedProjectPath) return;
+    forceApprove(selectedProjectPath, taskId, prNumber, prTitle);
+  }, [selectedProjectPath, forceApprove]);
+
+  const handleAddPR = useCallback(async (taskId: string, prInput: string) => {
+    if (!selectedProjectPath) return { success: false, error: 'Select a project first' };
+    return addPR(selectedProjectPath, taskId, prInput);
+  }, [selectedProjectPath, addPR]);
 
   const projectPath = selectedProjectPath || '';
   const allPRs = items.flatMap((i) => i.prs || []);
@@ -628,13 +783,15 @@ export function CodeReviewView() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="border-b border-[var(--border)] bg-[var(--bg-secondary)] px-6 py-4">
+      <div className="border-b border-[var(--border)] glass px-6 py-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
-            <GitPullRequestDraft className="w-5 h-5 text-purple-400" />
-            <h1 className="text-lg font-semibold text-[var(--text-primary)]">Code Review</h1>
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-[var(--clickup-purple)]/15 text-[var(--clickup-purple)] shadow-[0_0_16px_-2px_var(--clickup-purple)]">
+              <GitPullRequestDraft className="w-[18px] h-[18px]" />
+            </span>
+            <h1 className="font-display text-lg font-semibold tracking-tight text-[var(--text-primary)]">Code Review</h1>
             {items.length > 0 && (
-              <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">
+              <span className="font-mono-ui text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/80 border border-[var(--border)] px-2 py-0.5 rounded-full">
                 {items.length} task{items.length !== 1 ? 's' : ''}
               </span>
             )}
@@ -709,39 +866,57 @@ export function CodeReviewView() {
                 className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors min-w-[160px]"
               >
                 <List className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
-                <span className="truncate max-w-[200px]">
-                  {selectedList ? selectedList.name : 'Select list...'}
-                </span>
+                <span className="truncate max-w-[200px]">{listButtonLabel}</span>
                 <ChevronDown className={cn('w-3.5 h-3.5 text-[var(--text-muted)] shrink-0 transition-transform ml-auto', showListDropdown && 'rotate-180')} />
               </button>
 
               {showListDropdown && (
-                <div className="absolute z-50 top-full left-0 mt-1 min-w-[240px] max-h-64 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                <div className="absolute z-50 top-full left-0 mt-1 min-w-[240px] max-h-72 overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl">
+                  {/* Select all / Clear header */}
+                  <button
+                    onClick={toggleAllLists}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card)]"
+                  >
+                    <span className={cn(
+                      'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                      allListsSelected ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--border)]',
+                    )}>
+                      {allListsSelected && <Check className="w-3 h-3 text-white" />}
+                    </span>
+                    {allListsSelected ? 'Clear all' : 'Select all'}
+                  </button>
+
                   {Object.entries(listsBySpace).map(([space, spaceLists]) => (
                     <div key={space}>
                       {Object.keys(listsBySpace).length > 1 && (
-                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] bg-[var(--bg-secondary)] sticky top-0">
+                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] bg-[var(--bg-secondary)]">
                           {space}
                         </div>
                       )}
-                      {spaceLists.map((list) => (
-                        <button
-                          key={list.id}
-                          onClick={() => {
-                            setSelectedListId(list.id);
-                            setShowListDropdown(false);
-                          }}
-                          className={cn(
-                            'w-full text-left px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-tertiary)]',
-                            list.id === selectedListId && 'bg-[var(--accent)]/10 text-[var(--accent)]',
-                          )}
-                        >
-                          <span>{list.name}</span>
-                          {list.folder && (
-                            <span className="text-[10px] text-[var(--text-muted)] ml-2">{list.folder}</span>
-                          )}
-                        </button>
-                      ))}
+                      {spaceLists.map((list) => {
+                        const checked = selectedListIds.includes(list.id);
+                        return (
+                          <button
+                            key={list.id}
+                            onClick={() => toggleList(list.id)}
+                            className={cn(
+                              'w-full flex items-center gap-2 text-left px-3 py-2 text-sm transition-colors hover:bg-[var(--bg-tertiary)]',
+                              checked && 'text-[var(--accent)]',
+                            )}
+                          >
+                            <span className={cn(
+                              'w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                              checked ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--border)]',
+                            )}>
+                              {checked && <Check className="w-3 h-3 text-white" />}
+                            </span>
+                            <span className="truncate">{list.name}</span>
+                            {list.folder && (
+                              <span className="text-[10px] text-[var(--text-muted)] ml-auto shrink-0">{list.folder}</span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   ))}
                 </div>
@@ -819,6 +994,8 @@ export function CodeReviewView() {
               projectPath={projectPath}
               onReview={handleReview}
               onStop={handleStop}
+              onApprove={handleApprove}
+              onAddPR={handleAddPR}
             />
           ))}
         </div>

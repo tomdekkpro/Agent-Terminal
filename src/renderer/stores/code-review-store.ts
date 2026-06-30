@@ -7,12 +7,14 @@ interface CodeReviewState {
   error: string | null;
   reviewingAll: boolean;
   // Actions
-  loadTasks: (statuses?: string[], projectPath?: string, listId?: string) => Promise<void>;
+  loadTasks: (statuses?: string[], projectPath?: string, listIds?: string[]) => Promise<void>;
   runReview: (projectPath: string, taskId: string, prNumber: number) => Promise<void>;
   runAllReviews: (projectPath: string) => Promise<void>;
   stopReview: (taskId: string, prNumber?: number) => Promise<void>;
   stopAllReviews: () => Promise<void>;
   submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
+  forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) => Promise<void>;
+  addPR: (projectPath: string, taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
   updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
@@ -36,10 +38,10 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
   error: null,
   reviewingAll: false,
 
-  loadTasks: async (statuses, projectPath, listId) => {
+  loadTasks: async (statuses, projectPath, listIds) => {
     set({ loading: true, error: null });
     try {
-      const result = await window.electronAPI.codeReviewGetTasks(statuses, projectPath, listId);
+      const result = await window.electronAPI.codeReviewGetTasks(statuses, projectPath, listIds);
       if (result.success) {
         set({ items: result.data, loading: false });
       } else {
@@ -55,9 +57,9 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     try {
       const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber);
       if (result.success) {
-        const { passed, findings, prTitle, prUrl, prBranch, skipped } = result.data;
+        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, skipped } = result.data;
         if (skipped) {
-          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prTitle });
+          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle });
           return;
         }
         get().updatePR(taskId, prNumber, {
@@ -65,6 +67,8 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           findings,
           prUrl,
           prBranch,
+          prBaseBranch,
+          prAuthor,
           prTitle,
           reviewedAt: new Date().toISOString(),
         });
@@ -119,6 +123,48 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     } catch (err) {
       // Non-critical — review result is already shown in UI
       console.error('[CodeReview] Failed to submit result:', err);
+    }
+  },
+
+  forceApprove: async (projectPath, taskId, prNumber, prTitle) => {
+    // Optimistically update UI
+    get().updatePR(taskId, prNumber, { status: 'passed', findings: [] });
+    try {
+      await window.electronAPI.codeReviewForceApprove(projectPath, taskId, prNumber, prTitle);
+    } catch (err) {
+      // Revert on failure
+      get().updatePR(taskId, prNumber, { status: 'failed' });
+      console.error('[CodeReview] Failed to force approve:', err);
+    }
+  },
+
+  addPR: async (projectPath, taskId, prInput) => {
+    try {
+      const result = await window.electronAPI.codeReviewAddPR(projectPath, prInput);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      const { prNumber, prUrl, prBranch, prBaseBranch, prAuthor, prTitle } = result.data;
+      const item = get().items.find((i) => i.taskId === taskId);
+      if (!item) return { success: false, error: 'Task not found' };
+      if (item.prs.some((p) => p.prNumber === prNumber)) {
+        return { success: false, error: `PR #${prNumber} already attached` };
+      }
+      const newPR: CodeReviewPR = {
+        prNumber,
+        prUrl,
+        prBranch,
+        prBaseBranch,
+        prAuthor,
+        prTitle,
+        status: 'pending',
+        findings: [],
+      };
+      const updatedPRs = [...item.prs, newPR];
+      get().updateItem(taskId, { prs: updatedPRs, status: deriveTaskStatus(updatedPRs) });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to add PR' };
     }
   },
 

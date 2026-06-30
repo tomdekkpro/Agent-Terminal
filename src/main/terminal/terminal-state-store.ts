@@ -10,20 +10,22 @@ export interface SavedTerminal {
   cwd: string;
   projectId?: string;
   isClaudeMode: boolean;
+  agentSessionId?: string;
+  /** @deprecated Use agentSessionId */
   claudeSessionId?: string;
   claudeCwd?: string;
-  clickUpTask?: {
-    id: string;
-    customId?: string;
-    name: string;
-    status: string;
-    statusColor: string;
-    url: string;
-  };
-  copilotProvider?: 'claude' | 'copilot';
+  agentProvider?: string;
+  /** @deprecated Use agentProvider */
+  copilotProvider?: string;
   skipPermissions?: boolean;
+  task?: Record<string, unknown>;
+  /** @deprecated Use task */
+  clickUpTask?: Record<string, unknown>;
   worktreePath?: string;
   worktreeBranch?: string;
+  baseBranch?: string;
+  timeTracking?: Record<string, unknown>;
+  previewUrl?: string;
 }
 
 export interface SavedTerminalState {

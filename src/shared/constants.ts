@@ -12,6 +12,8 @@ export const IPC_CHANNELS = {
   TERMINAL_AGENT_SESSION: 'terminal:agent-session',
   TERMINAL_AGENT_BUSY: 'terminal:agent-busy',
   TERMINAL_AGENT_LIST: 'terminal:agent-list',
+  /** Emitted when a resume can't run because its working dir is gone */
+  TERMINAL_RESUME_FAILED: 'terminal:resume-failed',
   // Legacy aliases (delegate to generic)
   TERMINAL_INVOKE_CLAUDE: 'terminal:invoke-claude',
   TERMINAL_INVOKE_COPILOT: 'terminal:invoke-copilot',
@@ -38,6 +40,9 @@ export const IPC_CHANNELS = {
   TASK_MANAGER_GET_LISTS: 'task-manager:get-lists',
   TASK_MANAGER_ADD_TAG: 'task-manager:add-tag',
   TASK_MANAGER_REMOVE_TAG: 'task-manager:remove-tag',
+  TASK_MANAGER_GET_TASK_STATUSES: 'task-manager:get-task-statuses',
+  TASK_MANAGER_GET_LIST_STATUSES: 'task-manager:get-list-statuses',
+  TASK_MANAGER_GET_MEMBERS: 'task-manager:get-members',
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
@@ -46,6 +51,7 @@ export const IPC_CHANNELS = {
   USAGE_REQUEST: 'usage:request',
   USAGE_UPDATED: 'usage:updated',
   USAGE_COST_UPDATE: 'usage:cost-update',
+  TERMINAL_USAGE: 'terminal:usage',
   COPILOT_USAGE_REQUEST: 'copilot-usage:request',
   COPILOT_USAGE_UPDATED: 'copilot-usage:updated',
   // Projects
@@ -65,6 +71,7 @@ export const IPC_CHANNELS = {
   GIT_ENABLE_PR_AUTO_MERGE: 'git:enable-pr-auto-merge',
   GIT_CREATE_BRANCH_PR: 'git:create-branch-pr',
   GIT_TASK_SUMMARY: 'git:task-summary',
+  GIT_DIFF_FILES: 'git:diff-files',
   GIT_PUSH_BRANCH: 'git:push-branch',
   GIT_FETCH: 'git:fetch',
   GIT_PULL: 'git:pull',
@@ -136,8 +143,44 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_STOP: 'code-review:stop',
   CODE_REVIEW_STOP_ALL: 'code-review:stop-all',
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
+  CODE_REVIEW_FORCE_APPROVE: 'code-review:force-approve',
+  CODE_REVIEW_ADD_PR: 'code-review:add-pr',
+  // Kanban Tasks (local task records)
+  KANBAN_LIST: 'kanban:list',
+  KANBAN_GET: 'kanban:get',
+  KANBAN_IMPORT: 'kanban:import',
+  KANBAN_CREATE_LOCAL: 'kanban:create-local',
+  KANBAN_LINK_CLICKUP: 'kanban:link-clickup',
+  KANBAN_UPDATE: 'kanban:update',
+  KANBAN_SET_STATUS: 'kanban:set-status',
+  KANBAN_DELETE: 'kanban:delete',
+  KANBAN_REFRESH_CLICKUP: 'kanban:refresh-clickup',
+  KANBAN_EVENT: 'kanban:event',
+  KANBAN_DAILY_COST: 'kanban:daily-cost',
+  // Dashboard — scheduled AI "Notices"
+  DASHBOARD_LIST: 'dashboard:list',
+  DASHBOARD_SAVE: 'dashboard:save',
+  DASHBOARD_DELETE: 'dashboard:delete',
+  DASHBOARD_RUN: 'dashboard:run',
+  DASHBOARD_EVENT: 'dashboard:event',
+  // Auto Code Loop
+  AUTO_CODE_STATUS: 'auto-code:status',
+  AUTO_CODE_START: 'auto-code:start',
+  AUTO_CODE_STOP: 'auto-code:stop',
+  AUTO_CODE_RUN_NOW: 'auto-code:run-now',
+  AUTO_CODE_RUN_TASK: 'auto-code:run-task',
+  AUTO_CODE_REQUEUE: 'auto-code:requeue',
+  AUTO_CODE_SET_TASK_AUTOMERGE: 'auto-code:set-task-automerge',
+  AUTO_CODE_EVENT: 'auto-code:event',
+  // Activity Feed (cross-project autonomous-loop timeline + notifications)
+  ACTIVITY_LIST: 'activity:list',
+  ACTIVITY_MARK_READ: 'activity:mark-read',
+  ACTIVITY_MARK_ALL_READ: 'activity:mark-all-read',
+  ACTIVITY_CLEAR: 'activity:clear',
+  ACTIVITY_EVENT: 'activity:event',
   // Claude Sessions Browser
   CLAUDE_SESSIONS_LIST: 'claude-sessions:list',
+  CLAUDE_SESSION_EXISTS: 'claude-sessions:exists',
   // Dev Server
   DEV_SERVER_START: 'dev-server:start',
   DEV_SERVER_STOP: 'dev-server:stop',
@@ -147,6 +190,12 @@ export const IPC_CHANNELS = {
   // System Monitor
   SYSTEM_MONITOR_REQUEST: 'system-monitor:request',
   SYSTEM_MONITOR_UPDATED: 'system-monitor:updated',
+  // Files
+  FILES_LIST_DIR: 'files:list-dir',
+  FILES_LOAD_CLAUDE_SKILLS: 'files:load-claude-skills',
+  FILES_READ_FILE: 'files:read-file',
+  FILES_SAVE_CLAUDE_SKILL: 'files:save-claude-skill',
+  FILES_PATH_EXISTS: 'files:path-exists',
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',

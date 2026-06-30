@@ -3,12 +3,23 @@ import { v4 as uuid } from 'uuid';
 import type { AgentProviderId, TerminalTask } from '../../shared/types';
 import { useSettingsStore } from './settings-store';
 import { useProjectStore } from './project-store';
+import { resolveSessionCwd, buildSessionCandidates } from '../lib/resolve-session-cwd';
 
 export type TerminalStatus = 'idle' | 'running' | 'claude-active' | 'exited';
 
 export interface TimeTracking {
   startedAt: number | null;  // Unix timestamp ms when current session started
-  elapsed: number;           // Accumulated ms from previous sessions
+  elapsed: number;           // Total accumulated ms (historical + all sessions)
+  todayMs: number;           // Today's accumulated ms (from API + sessions today)
+  todayDate: string;         // ISO date string (YYYY-MM-DD) for todayMs
+}
+
+/** Return value from stopTimer — includes session boundaries for posting */
+export interface StopTimerResult extends TimeTracking {
+  /** Original startedAt before stop (when play was clicked) */
+  sessionStartMs: number;
+  /** Timestamp when stop was called */
+  sessionEndMs: number;
 }
 
 export interface Terminal {
@@ -20,7 +31,7 @@ export interface Terminal {
   createdAt: Date;
   isClaudeMode: boolean;
   isClaudeBusy?: boolean;
-  claudeSessionId?: string;
+  agentSessionId?: string;
   claudeCwd?: string;
   projectId?: string;
   task?: TerminalTask;
@@ -32,12 +43,29 @@ export interface Terminal {
   worktreeBranch?: string;
   /** Target branch for merging/PR when completing task */
   baseBranch?: string;
+  /** True when CompleteTask delegated to the agent (Create PR / Branch & PR).
+   *  We can't `git worktree remove` while Claude holds the worktree open, so
+   *  cleanup is deferred until the PTY exits — at which point the global
+   *  exit listener fires `cleanupWorktree`. */
+  pendingWorktreeCleanup?: boolean;
+  /** Live cumulative usage for this terminal's Claude session, parsed from
+   *  the session JSONL. Populated by the global TERMINAL_USAGE listener. */
+  usage?: {
+    model?: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+  };
   timeTracking?: TimeTracking;
   pendingTaskPrompt?: string;
   /** True when restored from saved state but PTY not yet created */
   needsRestore?: boolean;
   /** True when terminal is restored but agent session not yet resumed */
   needsResume?: boolean;
+  /** True while agent session is being resumed (shows overlay) */
+  isResuming?: boolean;
   /** URL for live preview panel (e.g. http://localhost:3000) */
   previewUrl?: string;
   /** Whether the preview panel is currently open */
@@ -89,7 +117,7 @@ function buildSaveableState(state: TerminalState) {
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
-      claudeSessionId: t.claudeSessionId,
+      agentSessionId: t.agentSessionId,
       claudeCwd: t.claudeCwd,
       agentProvider: t.agentProvider,
       skipPermissions: t.skipPermissions,
@@ -135,7 +163,7 @@ export function flushTerminalStateSync(): void {
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
-      claudeSessionId: t.claudeSessionId,
+      agentSessionId: t.agentSessionId,
       claudeCwd: t.claudeCwd,
       agentProvider: t.agentProvider,
       skipPermissions: t.skipPermissions,
@@ -181,7 +209,7 @@ interface TerminalState {
   reorderGroups: (projectId: string | undefined, fromGroupId: string, toGroupId: string) => void;
   reorderTerminalsInGroup: (fromTerminalId: string, toTerminalId: string) => void;
   startTimer: (id: string) => void;
-  stopTimer: (id: string) => TimeTracking | null;
+  stopTimer: (id: string) => StopTimerResult | null;
   writeToTerminal: (terminalId: string, data: string) => void;
   restoreState: () => Promise<Terminal[]>;
   /** Create PTY for a single restored terminal (no agent resume) */
@@ -194,6 +222,12 @@ interface TerminalState {
   togglePreview: (id: string) => void;
   /** Set the preview URL for a terminal */
   setPreviewUrl: (id: string, url: string) => void;
+  /** Mark a terminal so the global exit listener will run cleanupWorktree. */
+  markPendingWorktreeCleanup: (id: string) => void;
+  /** Remove the worktree on disk and clear worktree fields on the terminal.
+   *  Caller must ensure the agent has stopped — git refuses to remove a
+   *  worktree that has a process holding it open. */
+  cleanupWorktree: (id: string) => Promise<void>;
 }
 
 
@@ -207,8 +241,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   // Create a terminal in a new group (new tab)
   addTerminal: (cwd?: string, projectId?: string) => {
     const state = get();
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
     const activeCount = state.terminals.filter(t => t.status !== 'exited').length;
-    if (activeCount >= state.maxTerminals) return null;
+    if (activeCount >= maxTerminals) return null;
 
     const groupId = uuid();
     const project = projectId ? useProjectStore.getState().projects.find(p => p.id === projectId) : undefined;
@@ -237,8 +272,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   // Create a terminal in the active group (split)
   splitTerminal: (cwd?: string, projectId?: string) => {
     const state = get();
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
     const activeCount = state.terminals.filter(t => t.status !== 'exited').length;
-    if (activeCount >= state.maxTerminals) return null;
+    if (activeCount >= maxTerminals) return null;
     if (!state.activeGroupId) return null;
 
     const project = projectId ? useProjectStore.getState().projects.find(p => p.id === projectId) : undefined;
@@ -387,7 +423,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
   canAddTerminal: () => {
     const state = get();
-    return state.terminals.filter(t => t.status !== 'exited').length < state.maxTerminals;
+    const maxTerminals = useSettingsStore.getState().settings.maxTerminals || state.maxTerminals;
+    return state.terminals.filter(t => t.status !== 'exited').length < maxTerminals;
   },
   getTerminalsByProject: (projectId?: string) => {
     const state = get();
@@ -470,31 +507,59 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   startTimer: (id: string) => {
+    const today = new Date().toISOString().slice(0, 10);
     set((state) => ({
-      terminals: state.terminals.map((t) =>
-        t.id === id
-          ? { ...t, timeTracking: { startedAt: Date.now(), elapsed: t.timeTracking?.elapsed || 0 } }
-          : t
-      ),
+      terminals: state.terminals.map((t) => {
+        if (t.id !== id) return t;
+        const prev = t.timeTracking;
+        // Reset todayMs if the date changed since last tracking
+        const todayMs = prev?.todayDate === today ? (prev.todayMs || 0) : 0;
+        return {
+          ...t,
+          timeTracking: {
+            startedAt: Date.now(),
+            elapsed: prev?.elapsed || 0,
+            todayMs,
+            todayDate: today,
+          },
+        };
+      }),
     }));
   },
 
-  stopTimer: (id: string) => {
+  stopTimer: (id: string): StopTimerResult | null => {
     const terminal = get().terminals.find((t) => t.id === id);
     if (!terminal?.timeTracking?.startedAt) return null;
 
     const now = Date.now();
-    const sessionMs = now - terminal.timeTracking.startedAt;
+    const sessionStartMs = terminal.timeTracking.startedAt;
+    const sessionMs = now - sessionStartMs;
     const totalElapsed = terminal.timeTracking.elapsed + sessionMs;
-    const result: TimeTracking = { startedAt: null, elapsed: totalElapsed };
+
+    // Compute today's portion of this session
+    const today = new Date().toISOString().slice(0, 10);
+    const todayMidnight = new Date(now).setHours(0, 0, 0, 0);
+    const sessionTodayMs = Math.max(0, now - Math.max(sessionStartMs, todayMidnight));
+    const prevTodayMs = terminal.timeTracking.todayDate === today ? (terminal.timeTracking.todayMs || 0) : 0;
+
+    const updated: TimeTracking = {
+      startedAt: null,
+      elapsed: totalElapsed,
+      todayMs: prevTodayMs + sessionTodayMs,
+      todayDate: today,
+    };
 
     set((state) => ({
       terminals: state.terminals.map((t) =>
-        t.id === id ? { ...t, timeTracking: result } : t
+        t.id === id ? { ...t, timeTracking: updated } : t
       ),
     }));
 
-    return { ...result, startedAt: terminal.timeTracking.startedAt };
+    return {
+      ...updated,
+      sessionStartMs,
+      sessionEndMs: now,
+    };
   },
 
   writeToTerminal: (terminalId: string, data: string) => {
@@ -537,7 +602,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // terminals get needsRestore=false so their PTY is created automatically.
       const restored: Terminal[] = saved.terminals
         .map((t: any) => {
-          const isAgent = !!(t.claudeSessionId || t.isClaudeMode);
+          // Support both new agentSessionId and legacy claudeSessionId from old saves
+          const sessionId = t.agentSessionId || t.claudeSessionId;
+          const isAgent = !!(sessionId || t.isClaudeMode);
           return {
             id: t.id,
             groupId: t.groupId,
@@ -548,7 +615,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             isClaudeMode: false,
             // Migrate legacy copilotProvider → agentProvider
             agentProvider: t.agentProvider || t.copilotProvider || 'claude',
-            claudeSessionId: t.claudeSessionId,
+            agentSessionId: sessionId,
             claudeCwd: t.claudeCwd,
             skipPermissions: t.skipPermissions || false,
             projectId: t.projectId,
@@ -582,6 +649,25 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         }
       }
 
+      // Refresh task status colors from API so tabs reflect current status
+      for (const t of restored) {
+        if (!t.task) continue;
+        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
+          if (!res.success || !res.data) return;
+          const task = res.data;
+          const newStatus = task.status.name;
+          const newColor = task.status.color;
+          const current = get().terminals.find((x) => x.id === t.id);
+          if (current?.task && (newStatus !== current.task.status || newColor !== current.task.statusColor)) {
+            set((state) => ({
+              terminals: state.terminals.map((x) =>
+                x.id === t.id ? { ...x, task: { ...x.task!, status: newStatus, statusColor: newColor } } : x
+              ),
+            }));
+          }
+        }).catch(() => {});
+      }
+
       return restored;
     } catch {
       set({ isRestored: true });
@@ -601,7 +687,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         rows: 24,
       });
 
-      const hasSession = !!terminal.claudeSessionId;
+      const hasSession = !!terminal.agentSessionId;
+      const isAgentTerminal = hasSession || terminal.agentProvider !== 'claude';
 
       set((state) => ({
         terminals: state.terminals.map((t) =>
@@ -609,28 +696,103 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             ...t,
             needsRestore: false,
             needsResume: false,
-            // If there's a session to resume, go straight to claude-active
-            isClaudeMode: hasSession,
-            status: hasSession ? 'claude-active' as TerminalStatus : 'idle' as TerminalStatus,
+            isClaudeMode: isAgentTerminal,
+            isResuming: isAgentTerminal,
+            status: isAgentTerminal ? 'claude-active' as TerminalStatus : 'idle' as TerminalStatus,
           } : t
         ),
       }));
 
-      // Auto-resume agent session if available
-      if (hasSession) {
+      // Auto-resume agent session if it was an agent terminal
+      if (isAgentTerminal) {
         const agentId = terminal.agentProvider || 'claude';
-        const resumeCwd = terminal.claudeCwd || terminal.cwd;
+        const project = terminal.projectId
+          ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+          : undefined;
+
+        // Compute candidate worktree paths so the probe can find sessions
+        // in either layout: v1.14.0+ native (`<project>/.claude/worktrees/<id>`)
+        // or pre-v1.14.0 legacy (`<project>/.task-worktrees/<id>`).
+        const taskName = terminal.task && agentId === 'claude'
+          ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+          : undefined;
+        const sep = (project?.path || '').includes('\\') ? '\\' : '/';
+        const nativeWorktreePath = project?.path && taskName
+          ? `${project.path}${sep}.claude${sep}worktrees${sep}${taskName}`
+          : undefined;
+        const legacyWorktreePath = project?.path && taskName
+          ? `${project.path}${sep}.task-worktrees${sep}${taskName}`
+          : undefined;
+
+        const resolved = terminal.agentSessionId
+          ? await resolveSessionCwd(
+              terminal.agentSessionId,
+              buildSessionCandidates({
+                agentCwd: terminal.claudeCwd,
+                currentCwd: terminal.cwd,
+                worktreePath: terminal.worktreePath,
+                nativeWorktreePath,
+                computedWorktreePath: legacyWorktreePath,
+                projectPath: project?.path,
+              }),
+            )
+          : null;
+
+        if (resolved && resolved.cwd !== terminal.cwd) {
+          set((state) => ({
+            terminals: state.terminals.map((t) =>
+              t.id === id ? { ...t, cwd: resolved.cwd, claudeCwd: resolved.cwd } : t
+            ),
+          }));
+        }
+
+        // Resume strategy:
+        // - Session located → cd into the matched cwd, no --worktree flag.
+        //   `claude --worktree X --resume <id>` only finds sessions inside
+        //   that worktree's own encoded scope, so we cd directly instead.
+        // - No session id (agent terminal without prior conversation) →
+        //   start fresh; pass --worktree if this is a task terminal so
+        //   Claude isolates new work in <project>/.claude/worktrees/<id>.
+        // - Session id present but unlocatable → skip --resume; user gets
+        //   an idle shell instead of the not-found error.
+        const resumeOptions = resolved
+          ? {
+              sessionId: terminal.agentSessionId,
+              cwd: resolved.cwd,
+              skipPermissions: terminal.skipPermissions,
+            }
+          : !terminal.agentSessionId
+            ? {
+                cwd: project?.path || terminal.cwd,
+                skipPermissions: terminal.skipPermissions,
+                worktreeName: taskName,
+              }
+            : null;
         try {
-          await window.electronAPI.resumeAgent(terminal.id, agentId, {
-            sessionId: terminal.claudeSessionId,
-            cwd: resumeCwd,
-            skipPermissions: terminal.skipPermissions,
-          });
+          if (!resumeOptions) {
+            // No session findable — drop back to idle so the user can start fresh
+            set((state) => ({
+              terminals: state.terminals.map((t) =>
+                t.id === id ? { ...t, isClaudeMode: false, isResuming: false, status: 'idle' as TerminalStatus } : t
+              ),
+            }));
+            return;
+          }
+          await window.electronAPI.resumeAgent(terminal.id, agentId, resumeOptions);
+          // Clear resuming overlay after delay (agent needs time to start + execute /resume)
+          const delay = terminal.agentSessionId ? 5000 : 3000;
+          setTimeout(() => {
+            set((state) => ({
+              terminals: state.terminals.map((t) =>
+                t.id === id ? { ...t, isResuming: false } : t
+              ),
+            }));
+          }, delay);
         } catch {
           // Resume failed — fall back to idle terminal with Start button
           set((state) => ({
             terminals: state.terminals.map((t) =>
-              t.id === id ? { ...t, isClaudeMode: false, status: 'idle' as TerminalStatus } : t
+              t.id === id ? { ...t, isClaudeMode: false, isResuming: false, status: 'idle' as TerminalStatus } : t
             ),
           }));
         }
@@ -649,27 +811,69 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     if (!terminal || !terminal.needsResume) return;
 
     try {
+      const agentId = terminal.agentProvider || 'claude';
+      const project = terminal.projectId
+        ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+        : undefined;
+
+      const taskName = terminal.task && agentId === 'claude'
+        ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+        : undefined;
+      const sep = (project?.path || '').includes('\\') ? '\\' : '/';
+      const nativeWorktreePath = project?.path && taskName
+        ? `${project.path}${sep}.claude${sep}worktrees${sep}${taskName}`
+        : undefined;
+      const legacyWorktreePath = project?.path && taskName
+        ? `${project.path}${sep}.task-worktrees${sep}${taskName}`
+        : undefined;
+
+      const resolved = terminal.agentSessionId
+        ? await resolveSessionCwd(
+            terminal.agentSessionId,
+            buildSessionCandidates({
+              agentCwd: terminal.claudeCwd,
+              currentCwd: terminal.cwd,
+              worktreePath: terminal.worktreePath,
+              nativeWorktreePath,
+              computedWorktreePath: legacyWorktreePath,
+              projectPath: project?.path,
+            }),
+          )
+        : null;
+
+      if (terminal.agentSessionId && !resolved) {
+        set((state) => ({
+          terminals: state.terminals.map((t) =>
+            t.id === id ? { ...t, needsResume: false, isClaudeMode: false, status: 'idle' as TerminalStatus } : t
+          ),
+        }));
+        return;
+      }
+
+      const resumeCwd = resolved?.cwd || project?.path || terminal.cwd;
+
       set((state) => ({
         terminals: state.terminals.map((t) =>
-          t.id === id ? { ...t, needsResume: false, status: 'claude-active' as TerminalStatus } : t
+          t.id === id ? {
+            ...t,
+            needsResume: false,
+            status: 'claude-active' as TerminalStatus,
+            ...(resolved && resolved.cwd !== t.cwd
+              ? { cwd: resolved.cwd, claudeCwd: resolved.cwd }
+              : {}),
+          } : t
         ),
       }));
 
-      const agentId = terminal.agentProvider || 'claude';
-      const resumeCwd = terminal.claudeCwd || terminal.cwd;
-
-      if (agentId === 'claude') {
-        await window.electronAPI.resumeAgent(terminal.id, 'claude', {
-          sessionId: terminal.claudeSessionId,
-          cwd: resumeCwd,
-          skipPermissions: terminal.skipPermissions,
-        });
-      } else {
-        await window.electronAPI.resumeAgent(terminal.id, agentId, {
-          cwd: terminal.cwd,
-          skipPermissions: terminal.skipPermissions,
-        });
-      }
+      // Resume: cd into the matched cwd (no --worktree — sessions are scoped
+      // to their original encoded path). Fresh start: pass worktreeName so
+      // Claude isolates new work in the native worktree dir.
+      await window.electronAPI.resumeAgent(terminal.id, agentId, {
+        sessionId: terminal.agentSessionId,
+        cwd: resumeCwd,
+        skipPermissions: terminal.skipPermissions,
+        worktreeName: terminal.agentSessionId ? undefined : taskName,
+      });
     } catch {
       set((state) => ({
         terminals: state.terminals.map((t) =>
@@ -711,6 +915,46 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       ),
     }));
   },
+
+  markPendingWorktreeCleanup: (id: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, pendingWorktreeCleanup: true } : t
+      ),
+    }));
+  },
+
+  cleanupWorktree: async (id: string) => {
+    const terminal = get().terminals.find((t) => t.id === id);
+    if (!terminal?.worktreePath) return;
+    const project = terminal.projectId
+      ? useProjectStore.getState().projects.find((p) => p.id === terminal.projectId)
+      : undefined;
+    if (!project?.path) return;
+    try {
+      await window.electronAPI.removeTaskWorktree(project.path, terminal.worktreePath);
+    } catch { /* non-critical — worktree may already be gone */ }
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              worktreePath: undefined,
+              worktreeBranch: undefined,
+              cwd: project.path,
+              pendingWorktreeCleanup: false,
+            }
+          : t
+      ),
+    }));
+    // Clear worktree fields on the KanbanTask record as well so reopening
+    // it from the board doesn't think the worktree still lives on disk.
+    const clickupId = terminal.task?.id;
+    if (clickupId) {
+      const { useKanbanStore } = await import('./kanban-store');
+      void useKanbanStore.getState().clearWorktreeForClickupId(clickupId);
+    }
+  },
 }));
 
 // Auto-save on state changes (skip transient fields like isClaudeBusy)
@@ -726,10 +970,10 @@ useTerminalStore.subscribe((state) => {
     projects: state.terminals.map((t) => t.projectId || '').join(','),
     active: state.activeTerminalId,
     activeGroup: state.activeGroupId,
-    claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.claudeSessionId || ''}:${t.agentProvider}`).join(','),
+    claude: state.terminals.map((t) => `${t.isClaudeMode ? 1 : 0}:${t.agentSessionId || ''}:${t.agentProvider}`).join(','),
     worktrees: state.terminals.map((t) => t.worktreeBranch || '').join(','),
-    tasks: state.terminals.map((t) => t.task?.id || '').join(','),
-    timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}`).join(','),
+    tasks: state.terminals.map((t) => t.task ? `${t.task.id}:${t.task.statusColor}:${t.task.status}` : '').join(','),
+    timers: state.terminals.map((t) => `${t.timeTracking?.startedAt || 0}:${t.timeTracking?.elapsed || 0}:${t.timeTracking?.todayMs || 0}:${t.timeTracking?.todayDate || ''}`).join(','),
     previews: state.terminals.map((t) => t.previewUrl || '').join(','),
   });
   if (snap !== prevSnapshot) {

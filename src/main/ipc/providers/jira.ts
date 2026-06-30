@@ -1,4 +1,4 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList } from '../../../shared/types';
+import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 import type { ITaskManagerProvider, ProviderResult } from './types';
 
 // 30-second cache
@@ -178,7 +178,7 @@ export class JiraProvider implements ITaskManagerProvider {
   async searchTasks(
     settings: AppSettings,
     query: string,
-    filters?: { statuses?: string[]; assignees?: string[]; includeClosed?: boolean },
+    filters?: TaskSearchFilters,
     _listId?: string,
     page: number = 0,
   ): Promise<ProviderResult<TaskManagerTask[]>> {
@@ -202,7 +202,17 @@ export class JiraProvider implements ITaskManagerProvider {
         jqlParts.push(`statusCategory != Done`);
       }
 
-      const jql = encodeURIComponent(`${jqlParts.join(' AND ')} ORDER BY updated DESC`);
+      // Map the cross-provider orderBy onto JQL. Default stays updated DESC.
+      const jqlOrderField: Record<NonNullable<TaskSearchFilters['orderBy']>, string> = {
+        id: 'key',
+        created: 'created',
+        updated: 'updated',
+        due_date: 'duedate',
+      };
+      const orderField = filters?.orderBy ? jqlOrderField[filters.orderBy] : 'updated';
+      // ClickUp semantics: no reverse = newest first → JQL DESC; reverse → ASC.
+      const orderDir = filters?.reverse ? 'ASC' : 'DESC';
+      const jql = encodeURIComponent(`${jqlParts.join(' AND ')} ORDER BY ${orderField} ${orderDir}`);
 
       const cacheKey = `jira-search-${jql}-${page}`;
       const cached = taskCache.get(cacheKey);
@@ -358,12 +368,25 @@ export class JiraProvider implements ITaskManagerProvider {
     }
   }
 
-  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; entries: any[] }>> {
+  async getTimeEntries(settings: AppSettings, taskId: string): Promise<ProviderResult<{ totalMs: number; todayMs: number; entries: any[] }>> {
     try {
       const data = await jiraFetch(settings, `/rest/api/3/issue/${taskId}/worklog`);
       const entries = data.worklogs || [];
       const totalMs = entries.reduce((sum: number, e: any) => sum + (e.timeSpentSeconds || 0) * 1000, 0);
-      return { success: true, data: { totalMs, entries } };
+
+      // Compute today's tracked time
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const todayMs = entries.reduce((sum: number, e: any) => {
+        const start = e.started ? new Date(e.started).getTime() : 0;
+        const dur = (e.timeSpentSeconds || 0) * 1000;
+        if (start >= todayStart) return sum + dur;
+        const end = start + dur;
+        if (end > todayStart) return sum + (end - todayStart);
+        return sum;
+      }, 0);
+
+      return { success: true, data: { totalMs, todayMs, entries } };
     } catch (error) {
       return {
         success: false,
