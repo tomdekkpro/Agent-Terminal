@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Bell,
   Activity as ActivityIcon,
@@ -115,15 +116,21 @@ export function NotificationBell() {
 
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Panel position — computed from the bell button so the portal-rendered
+  // panel stays anchored to it. Anchoring by `right` keeps the panel pinned
+  // to the bell's right edge on window resize.
+  const [panelPos, setPanelPos] = useState<{ top: number; right: number } | null>(null);
 
   const unread = items.reduce((n, i) => n + (i.read ? 0 : 1), 0);
 
   // Close on outside click + Escape. Allow Ctrl+B (from App) to toggle.
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      if (containerRef.current?.contains(target)) return;
+      if (panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
@@ -138,6 +145,20 @@ export function NotificationBell() {
       window.removeEventListener('agent-terminal:toggle-notifications', onToggle);
     };
   }, []);
+
+  // Anchor the panel to the bell whenever it opens (and re-anchor on resize —
+  // the top bar is fixed, so only window size changes can move the bell).
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = containerRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setPanelPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [open]);
 
   // Group by day (items already arrive newest-first from main).
   const groups: { key: string; items: ActivityEvent[] }[] = [];
@@ -173,8 +194,15 @@ export function NotificationBell() {
         )}
       </button>
 
-      {open && (
-        <div className="absolute top-full right-0 mt-1.5 z-50 w-[26rem] max-w-[calc(100vw-2rem)] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden flex flex-col">
+      {/* Portal + high z-index so the panel floats above modal overlays
+          (e.g. the Kanban task detail, which uses z-50) instead of being
+          painted over by them. */}
+      {open && panelPos && createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[110] w-[26rem] max-w-[calc(100vw-2rem)] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden flex flex-col"
+          style={{ top: panelPos.top, right: panelPos.right }}
+        >
           {/* Header */}
           <div className="px-4 py-2.5 border-b border-[var(--border)] flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -233,7 +261,8 @@ export function NotificationBell() {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

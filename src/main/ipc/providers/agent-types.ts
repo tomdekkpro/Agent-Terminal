@@ -70,6 +70,11 @@ export interface IAgentProvider {
   /** Return the list of models the user can choose from */
   getModels(): AgentModelOption[];
 
+  /** (Optional) Fetch the live model catalog from the provider's API so new
+   *  releases appear without an app update. Return null to fall back to the
+   *  static getModels() list (no credentials, offline, API error). */
+  fetchModels?(): Promise<AgentModelOption[] | null>;
+
   /** Return the default model id */
   getDefaultModel(): string;
 

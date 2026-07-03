@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -7,6 +8,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import QRCode from 'qrcode';
 import { registerOutputCallback, unregisterOutputCallback, getAndClearSavedBuffer, useTerminalStore, type Terminal } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
+import { useKanbanStore } from '../../stores/kanban-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
@@ -213,6 +215,137 @@ export function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRe
  *  Mirrors the Kanban SessionIdEditor — same UUID validation, same display
  *  format (first8…last4), so users get a consistent way to inspect and override
  *  the resume target across both surfaces. */
+/** Status chip + dropdown — change the linked task's ClickUp status straight
+ *  from the terminal toolbar. Statuses come from the Kanban store (the board's
+ *  columns). The write goes through moveTask when the task is on the board so
+ *  the Kanban view stays 1-1 (with its revert-on-reject handling); otherwise
+ *  it falls back to a direct ClickUp status update. */
+function TaskStatusChip({ terminal }: { terminal: Terminal }) {
+  const statuses = useKanbanStore((s) => s.statuses);
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Statuses may not be loaded yet if Terminal was opened before Kanban.
+  useEffect(() => {
+    if (statuses.length === 0) void useKanbanStore.getState().loadStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onScroll = () => setMenu(null);
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [menu]);
+
+  const task = terminal.task;
+  if (!task) return null;
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenu({ top: r.bottom + 4, left: r.left });
+  };
+
+  const pickStatus = async (e: React.MouseEvent, s: { name: string; color: string }) => {
+    e.stopPropagation();
+    setMenu(null);
+    if (s.name.trim().toLowerCase() === (task.status || '').trim().toLowerCase()) return;
+    setSaving(true);
+    try {
+      const kanban = useKanbanStore.getState();
+      const kanbanTask = kanban.tasks.find((t) => t.clickupTaskId === task.id);
+      let ok = false;
+      if (kanbanTask) {
+        await kanban.moveTask(kanbanTask.id, s.name);
+        const after = useKanbanStore.getState().tasks.find((t) => t.id === kanbanTask.id);
+        ok = (after?.clickupStatus || '').trim().toLowerCase() === s.name.trim().toLowerCase();
+      } else {
+        const result = await window.electronAPI.updateTaskStatus(task.id, s.name);
+        ok = !!result?.success;
+      }
+      if (ok) {
+        const current = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id);
+        if (current?.task) {
+          useTerminalStore.getState().updateTerminal(terminal.id, {
+            task: { ...current.task, status: s.name, statusColor: s.color },
+          });
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={openMenu}
+        disabled={saving || statuses.length === 0}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] shrink-0 hover:opacity-80 transition-opacity disabled:opacity-60"
+        style={{
+          backgroundColor: `${task.statusColor}20`,
+          color: task.statusColor,
+        }}
+        title="Change task status"
+      >
+        {saving ? (
+          <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+        ) : (
+          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: task.statusColor }} />
+        )}
+        <span className="truncate max-w-[100px] uppercase tracking-wide font-medium text-[9px]">{task.status}</span>
+        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+      </button>
+
+      {/* Portal so the toolbar's overflow doesn't clip the menu */}
+      {menu && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[100] min-w-[180px] max-h-72 overflow-y-auto glass-card border border-[var(--border)] rounded-lg shadow-xl py-1"
+          style={{ top: menu.top, left: menu.left }}
+        >
+          <div className="px-3 py-1 text-[9px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+            Set status
+          </div>
+          {statuses.map((s) => {
+            const active = s.name.trim().toLowerCase() === (task.status || '').trim().toLowerCase();
+            return (
+              <button
+                key={s.name}
+                onClick={(e) => void pickStatus(e, s)}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors',
+                  active && 'bg-[var(--accent-soft)]',
+                )}
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px 0 ${s.color}` }} />
+                <span className="truncate flex-1 text-left text-[var(--text-primary)]">{s.name}</span>
+                {active && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: boolean }) {
   const updateTerminal = useTerminalStore((s) => s.updateTerminal);
   const [editing, setEditing] = useState(false);
@@ -964,6 +1097,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
             </button>
           )}
+          {terminal.task && <TaskStatusChip terminal={terminal} />}
           {terminal.worktreePath && (
             <span
               className={cn(

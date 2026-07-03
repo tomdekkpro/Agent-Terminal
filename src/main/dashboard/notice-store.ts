@@ -70,6 +70,9 @@ export interface SaveNoticeInput {
   listId?: string;
   sources?: NoticeSource[];
   urls?: string[];
+  orderIndex?: number;
+  width?: number;
+  height?: number;
 }
 
 /** Create a new notice or update an existing one (when `id` is provided). */
@@ -91,6 +94,9 @@ export function saveNotice(input: SaveNoticeInput): DashboardNotice {
         listId: input.listId ?? existing.listId,
         sources: input.sources ?? existing.sources,
         urls: input.urls ?? existing.urls,
+        orderIndex: input.orderIndex ?? existing.orderIndex,
+        width: input.width ?? existing.width,
+        height: input.height ?? existing.height,
         updatedAt: now,
       };
       data.notices[idx] = updated;
@@ -109,6 +115,9 @@ export function saveNotice(input: SaveNoticeInput): DashboardNotice {
     listId: input.listId,
     sources: input.sources ?? ['clickup'],
     urls: input.urls,
+    orderIndex: input.orderIndex ?? Date.now(),
+    width: input.width,
+    height: input.height,
     status: 'idle',
     createdAt: now,
     updatedAt: now,

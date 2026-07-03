@@ -15,8 +15,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import * as os from 'os';
 import { join } from 'path';
-import type { KanbanTask, KanbanDailyCostBreakdown } from '../../shared/types';
-import { computeCost, type RawUsage } from './session-cost';
+import type { KanbanTask, KanbanDailyCostBreakdown, ModelUsageSummary } from '../../shared/types';
+import { computeCost, normalizeModelId, modelDisplayLabel, type RawUsage } from './session-cost';
 import { debugError } from '../../shared/utils';
 
 /** Mirrors `terminal-manager.ts` — Claude encodes project paths by replacing
@@ -41,12 +41,40 @@ function localDateKey(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** Running totals for one (day, model) bucket. */
+interface UsageTotals {
+  cost: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  messages: number;
+}
+
+/** day key → normalized model id → totals */
+type DayModelBuckets = Map<string, Map<string, UsageTotals>>;
+
 interface FileBuckets {
   size: number;
-  byDay: Map<string, number>;
+  byDay: DayModelBuckets;
 }
 
 const fileCache = new Map<string, FileBuckets>();
+
+function addUsage(buckets: DayModelBuckets, day: string, model: string, usage: RawUsage, cost: number): void {
+  let models = buckets.get(day);
+  if (!models) { models = new Map(); buckets.set(day, models); }
+  let t = models.get(model);
+  if (!t) { t = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, messages: 0 }; models.set(model, t); }
+  t.cost += cost;
+  t.input += usage.input_tokens || 0;
+  t.output += usage.output_tokens || 0;
+  t.cacheRead += usage.cache_read_input_tokens || 0;
+  t.cacheWrite += usage.cache_creation
+    ? (usage.cache_creation.ephemeral_5m_input_tokens || 0) + (usage.cache_creation.ephemeral_1h_input_tokens || 0)
+    : usage.cache_creation_input_tokens || 0;
+  t.messages += 1;
+}
 
 function listJsonlRecursive(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -68,7 +96,7 @@ function listJsonlRecursive(dir: string): string[] {
   return out;
 }
 
-function bucketFile(path: string): Map<string, number> {
+function bucketFile(path: string): DayModelBuckets {
   let stat;
   try {
     stat = statSync(path);
@@ -80,7 +108,7 @@ function bucketFile(path: string): Map<string, number> {
     return cached.byDay;
   }
 
-  const byDay = new Map<string, number>();
+  const byDay: DayModelBuckets = new Map();
   let text: string;
   try {
     text = readFileSync(path, 'utf-8');
@@ -106,9 +134,14 @@ function bucketFile(path: string): Map<string, number> {
     const date = new Date(ts);
     if (Number.isNaN(date.getTime())) continue;
 
+    // "<synthetic>" marks error/placeholder messages Claude writes with no
+    // real API call behind them — they carry no billable usage.
+    const rawModel: string | undefined = entry.message?.model;
+    if (rawModel === '<synthetic>') continue;
+
     const key = localDateKey(date);
-    const cost = computeCost(usage, entry.message?.model);
-    byDay.set(key, (byDay.get(key) || 0) + cost);
+    const cost = computeCost(usage, rawModel);
+    addUsage(byDay, key, normalizeModelId(rawModel || 'unknown'), usage, cost);
   }
 
   fileCache.set(path, { size: stat.size, byDay });
@@ -121,6 +154,8 @@ function bucketFile(path: string): Map<string, number> {
 export function computeDailyCostBreakdown(tasks: KanbanTask[]): KanbanDailyCostBreakdown {
   const seenFiles = new Set<string>();
   const totals = new Map<string, number>();
+  /** day key → model → totals, merged across all files (7-day rollup source). */
+  const dayModel: DayModelBuckets = new Map();
 
   for (const task of tasks) {
     if (!task.agentSessionId) continue;
@@ -150,8 +185,22 @@ export function computeDailyCostBreakdown(tasks: KanbanTask[]): KanbanDailyCostB
         if (!existsSync(file)) continue; // skip the wrong candidate dirs cheaply
         seenFiles.add(file);
         const bucket = bucketFile(file);
-        for (const [date, cost] of bucket) {
-          totals.set(date, (totals.get(date) || 0) + cost);
+        for (const [date, models] of bucket) {
+          let dayCost = 0;
+          for (const [model, t] of models) {
+            dayCost += t.cost;
+            let merged = dayModel.get(date);
+            if (!merged) { merged = new Map(); dayModel.set(date, merged); }
+            let mt = merged.get(model);
+            if (!mt) { mt = { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, messages: 0 }; merged.set(model, mt); }
+            mt.cost += t.cost;
+            mt.input += t.input;
+            mt.output += t.output;
+            mt.cacheRead += t.cacheRead;
+            mt.cacheWrite += t.cacheWrite;
+            mt.messages += t.messages;
+          }
+          totals.set(date, (totals.get(date) || 0) + dayCost);
         }
       }
     }
@@ -176,11 +225,41 @@ export function computeDailyCostBreakdown(tasks: KanbanTask[]): KanbanDailyCostB
   let total = 0;
   for (const c of totals.values()) total += c;
 
+  // Per-model rollup over the same 7-day window as byDay.
+  const weekKeys = new Set(byDay.map((e) => e.date));
+  const perModel = new Map<string, ModelUsageSummary>();
+  for (const [date, models] of dayModel) {
+    if (!weekKeys.has(date)) continue;
+    for (const [model, t] of models) {
+      let s = perModel.get(model);
+      if (!s) {
+        s = {
+          model,
+          label: modelDisplayLabel(model),
+          costToday: 0, costWeek: 0,
+          inputTokens: 0, outputTokens: 0,
+          cacheReadTokens: 0, cacheWriteTokens: 0,
+          messages: 0,
+        };
+        perModel.set(model, s);
+      }
+      s.costWeek += t.cost;
+      if (date === todayKey) s.costToday += t.cost;
+      s.inputTokens += t.input;
+      s.outputTokens += t.output;
+      s.cacheReadTokens += t.cacheRead;
+      s.cacheWriteTokens += t.cacheWrite;
+      s.messages += t.messages;
+    }
+  }
+  const byModel = [...perModel.values()].sort((a, b) => b.costWeek - a.costWeek);
+
   return {
     byDay,
     today: totals.get(todayKey) || 0,
     yesterday: totals.get(yesterdayKey) || 0,
     week: byDay.reduce((s, e) => s + e.cost, 0),
     total,
+    byModel,
   };
 }

@@ -122,6 +122,11 @@ export interface DashboardNotice {
   sources?: NoticeSource[];
   /** Websites to consult when the 'web' source is enabled. */
   urls?: string[];
+  /** Manual sort order on the Dashboard (drag to reorder). */
+  orderIndex?: number;
+  /** Persisted card size in px (drag the corner to resize). */
+  width?: number;
+  height?: number;
   status: 'idle' | 'running' | 'done' | 'error';
   /** Latest result, Markdown. */
   lastResult?: string;
@@ -329,6 +334,24 @@ export interface UsageCostData {
   timestamp: Date;
 }
 
+/** 7-day usage rollup for one model, derived from session JSONL entries. */
+export interface ModelUsageSummary {
+  /** Normalized model id (date suffix stripped), e.g. "claude-opus-4-8". */
+  model: string;
+  /** Human label, e.g. "Opus 4.8". */
+  label: string;
+  costToday: number;
+  /** Cost over the last 7 days inclusive of today. */
+  costWeek: number;
+  /** Token totals over the last 7 days. */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Assistant messages over the last 7 days. */
+  messages: number;
+}
+
 /** Per-day cost breakdown across all imported Kanban tasks, derived from
  *  Claude session JSONL timestamps. `byDay` is sorted oldest → newest and
  *  always covers the most recent 7 calendar days (entries with $0 included
@@ -342,6 +365,8 @@ export interface KanbanDailyCostBreakdown {
   week: number;
   /** Sum across the entire history found on disk. */
   total: number;
+  /** Per-model rollup for the last 7 days, sorted by costWeek desc. */
+  byModel: ModelUsageSummary[];
 }
 
 /** Cumulative per-terminal usage accumulated from the session JSONL.

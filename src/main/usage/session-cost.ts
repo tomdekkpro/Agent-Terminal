@@ -27,14 +27,20 @@ export interface ModelPricing {
 }
 
 const PRICING: Record<string, ModelPricing> = {
-  // Opus 4.6 / 4.7 / 4.8 — current generation
+  // Claude 5 family (Fable / Mythos)
+  'claude-fable-5': { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+  'claude-mythos-5': { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+
+  // Opus 4.5 – 4.8 — current generation
   'claude-opus-4-8': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   'claude-opus-4-7': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   'claude-opus-4-6': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  'claude-opus-4-5': { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
   // Opus 4 (legacy — 3x more expensive than 4.6/4.7)
   'claude-opus-4': { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 },
 
-  // Sonnet 4.x
+  // Sonnet 4.x / 5
+  'claude-sonnet-5': { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
   'claude-sonnet-4-5': { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
   'claude-sonnet-4': { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
@@ -57,11 +63,28 @@ export function getModelPricing(model?: string | null): ModelPricing {
     if (model.startsWith(k)) return PRICING[k];
   }
   // Family fallback
-  if (/opus-4(?:-[678])\b/.test(model)) return PRICING['claude-opus-4-6'];
+  if (model.includes('fable') || model.includes('mythos')) return PRICING['claude-fable-5'];
+  if (/opus-4(?:-[5678])\b/.test(model)) return PRICING['claude-opus-4-6'];
   if (model.includes('opus')) return PRICING['claude-opus-4'];
   if (model.includes('haiku')) return PRICING['claude-haiku-4-5'];
   if (model.includes('sonnet')) return PRICING['claude-sonnet-4-6'];
   return DEFAULT_PRICING;
+}
+
+/** Strip a trailing date suffix so `claude-haiku-4-5-20251001` and
+ *  `claude-haiku-4-5` aggregate into the same bucket. */
+export function normalizeModelId(model: string): string {
+  return model.replace(/-\d{8}$/, '');
+}
+
+/** "claude-opus-4-8" → "Opus 4.8", "claude-fable-5" → "Fable 5".
+ *  Unrecognized ids are returned as-is. */
+export function modelDisplayLabel(model: string): string {
+  const m = normalizeModelId(model);
+  const match = m.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
+  if (!match) return m;
+  const family = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+  return match[3] ? `${family} ${match[2]}.${match[3]}` : `${family} ${match[2]}`;
 }
 
 export interface RawUsage {

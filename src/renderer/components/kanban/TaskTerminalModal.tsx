@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   ExternalLink,
@@ -50,6 +51,128 @@ function toTerminalTask(t: KanbanTask): TerminalTask {
     // so downstream UI (PR title prefix, task-manager actions) skips them.
     provider: t.provider === 'local' ? 'none' : 'clickup',
   };
+}
+
+/** Status pill + dropdown — change the task's status straight from the task
+ *  detail header. Writes through the kanban store's moveTask so the board
+ *  stays 1-1 with ClickUp (optimistic move + revert-on-reject), and mirrors
+ *  the result onto any terminal linked to the same task so its toolbar chip
+ *  updates immediately instead of waiting for the next poll. */
+function TaskStatusDropdown({ task }: { task: KanbanTask }) {
+  const statuses = useKanbanStore((s) => s.statuses);
+  const moveTask = useKanbanStore((s) => s.moveTask);
+  const pendingStatus = useKanbanStore((s) => s.pendingMoves[task.id]);
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Statuses may not be loaded yet if the modal opens before the board did.
+  useEffect(() => {
+    if (statuses.length === 0) void useKanbanStore.getState().loadStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onScroll = () => setMenu(null);
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [menu]);
+
+  const statusColorFor = (name: string) =>
+    statuses.find((s) => s.name.trim().toLowerCase() === name.trim().toLowerCase())?.color;
+
+  // While a move is in flight, show the destination status (optimistic — the
+  // store reverts pendingMoves if ClickUp rejects the change).
+  const currentName = (pendingStatus || task.clickupStatus || '').trim();
+  const color = statusColorFor(currentName) || task.clickupStatusColor || '#94a3b8';
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenu({ top: r.bottom + 4, left: r.left });
+  };
+
+  const pickStatus = async (e: React.MouseEvent, name: string) => {
+    e.stopPropagation();
+    setMenu(null);
+    if (name.trim().toLowerCase() === (task.clickupStatus || '').trim().toLowerCase()) return;
+    await moveTask(task.id, name);
+    // Mirror the confirmed change onto any linked terminal's task chip.
+    const after = useKanbanStore.getState().tasks.find((t) => t.id === task.id);
+    if (!after || (after.clickupStatus || '').trim().toLowerCase() !== name.trim().toLowerCase()) return;
+    const newColor = statusColorFor(name) || after.clickupStatusColor || '#94a3b8';
+    const termStore = useTerminalStore.getState();
+    for (const term of termStore.terminals) {
+      if (term.task?.id === task.clickupTaskId) {
+        termStore.updateTerminal(term.id, {
+          task: { ...term.task, status: name, statusColor: newColor },
+        });
+      }
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={openMenu}
+        disabled={!!pendingStatus || statuses.length === 0}
+        className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide hover:opacity-80 transition-opacity disabled:opacity-60"
+        style={{
+          backgroundColor: `${color}20`,
+          color,
+        }}
+        title="Change task status"
+      >
+        {pendingStatus && <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />}
+        {currentName}
+        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+      </button>
+
+      {/* Portal so the header's overflow doesn't clip the menu */}
+      {menu && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[100] min-w-[180px] max-h-72 overflow-y-auto glass-card border border-[var(--border)] rounded-lg shadow-xl py-1"
+          style={{ top: menu.top, left: menu.left }}
+        >
+          <div className="px-3 py-1 text-[9px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+            Set status
+          </div>
+          {statuses.map((s) => {
+            const active = s.name.trim().toLowerCase() === currentName.toLowerCase();
+            return (
+              <button
+                key={s.name}
+                onClick={(e) => void pickStatus(e, s.name)}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors',
+                  active && 'bg-[var(--accent-soft)]',
+                )}
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px 0 ${s.color}` }} />
+                <span className="truncate flex-1 text-left text-[var(--text-primary)]">{s.name}</span>
+                {active && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
 }
 
 /** Short-form copy helper */
@@ -904,15 +1027,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   {task.clickupCustomId}
                 </code>
               )}
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide"
-                style={{
-                  backgroundColor: `${task.clickupStatusColor || '#94a3b8'}20`,
-                  color: task.clickupStatusColor || '#94a3b8',
-                }}
-              >
-                {task.clickupStatus}
-              </span>
+              <TaskStatusDropdown task={task} />
               {task.clickupPriority && (
                 <span
                   className="text-[10px] px-1.5 py-0.5 rounded font-medium"
