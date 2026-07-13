@@ -536,7 +536,9 @@ function buildReReviewPrompt(
   prNumber: number,
   taskSection: string,
 ): string {
-  return `The developer has updated PR #${prNumber} after your previous review. Please re-review the changes.
+  return `You are a code review agent. Your ONLY output must be a JSON object. Do not write any other text, explanation, or reasoning outside the JSON.
+
+The developer has updated PR #${prNumber} after your previous review. Please re-review the changes.
 
 1. Run \`gh pr diff ${prNumber}\` to see the current diff
 2. Compare against your previous findings — check which issues have been fixed
@@ -558,6 +560,80 @@ If all issues are resolved:
 
 {"passed": true, "findings": []}`;
 }
+
+/** Spawn a single `claude` review invocation and resolve with its stdout. */
+function runClaudeReviewProcess(
+  args: string[],
+  prompt: string,
+  projectPath: string,
+  taskId: string | undefined,
+  timeoutMs: number,
+): Promise<{ stdout: string; code: number; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+
+    const child = spawn('claude', args, {
+      env,
+      cwd: projectPath,
+      shell: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Track for cancellation
+    if (taskId) activeReviews.set(taskId, child);
+
+    // Write prompt to stdin (avoids command line length limits)
+    child.stdin?.write(prompt);
+    child.stdin?.end();
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      reject(new Error('Code review timed out after 20 minutes'));
+    }, timeoutMs);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('close', (code: number) => {
+      if (taskId) activeReviews.delete(taskId);
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ stdout, code, stderr });
+    });
+
+    child.on('error', (err: Error) => {
+      if (taskId) activeReviews.delete(taskId);
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+/** Nudge prompt used when the first review response wasn't valid JSON. */
+const JSON_ONLY_RETRY_PROMPT = `Your previous response was not valid JSON, so it could not be processed.
+
+Do NOT redo the review. Based on the review you just completed, output ONLY a single JSON object — no prose, no explanation, no markdown code fences, nothing before or after it.
+
+Use exactly this shape:
+{"passed": false, "findings": [{"severity": "critical", "file": "src/example.ts", "line": 42, "description": "What is wrong and why", "suggestion": "How to fix it"}]}
+
+If there are no remaining issues:
+{"passed": true, "findings": []}`;
 
 async function runAIReview(
   prNumber: number,
@@ -623,92 +699,54 @@ async function runAIReview(
     ? buildReReviewPrompt(prNumber, taskSection)
     : buildInitialReviewPrompt(prNumber, taskSection, reviewGuidelines);
 
-  return new Promise((resolve, reject) => {
-    const args: string[] = [];
+  // Claude fetches diff + reads files itself, so allow generous timeout (20 min)
+  const timeoutMs = 20 * 60_000;
 
-    if (isReReview) {
-      // Resume the existing session — Claude has full context from previous review
-      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--resume', sessionId);
+  // Build args for a run. `resume` reuses the existing session (full prior context);
+  // otherwise start a new session whose ID we can resume later.
+  const buildArgs = (resume: boolean): string[] => {
+    const args = ['--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p'];
+    if (resume) {
+      args.push('--resume', sessionId);
     } else {
-      // New session — pass session ID so we can resume later
-      args.push('--output-format', 'text', '--model', 'claude-sonnet-4-6', '-p', '--session-id', sessionId);
+      args.push('--session-id', sessionId);
     }
     args.push('--add-dir', projectPath);
+    return args;
+  };
 
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
+  // First attempt
+  const first = await runClaudeReviewProcess(buildArgs(isReReview), prompt, projectPath, taskId, timeoutMs);
+  if (first.code !== 0 && !first.stdout) {
+    throw new Error(first.stderr.trim() || `Claude exited with code ${first.code}`);
+  }
 
-    const child = spawn('claude', args, {
-      env,
-      cwd: projectPath,
-      shell: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+  try {
+    return parseReviewJSON(first.stdout);
+  } catch {
+    // Claude did the review but emitted prose instead of JSON. Resume the same
+    // session (so it keeps full context) and ask it to re-emit as JSON only.
+    debugLog('[CodeReview] First response was not valid JSON — retrying with JSON-only nudge');
+  }
 
-    // Track for cancellation
-    if (taskId) activeReviews.set(taskId, child);
+  const retry = await runClaudeReviewProcess(buildArgs(true), JSON_ONLY_RETRY_PROMPT, projectPath, taskId, timeoutMs);
 
-    // Write prompt to stdin (avoids command line length limits)
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    // Claude fetches diff + reads files itself, so allow generous timeout (20 min)
-    const timeoutMs = 20 * 60_000;
-
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGTERM');
-      reject(new Error('Code review timed out after 20 minutes'));
-    }, timeoutMs);
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    child.on('close', (code: number) => {
-      if (taskId) activeReviews.delete(taskId);
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-
-      if (code !== 0 && !stdout) {
-        reject(new Error(stderr.trim() || `Claude exited with code ${code}`));
-        return;
-      }
-
-      try {
-        const parsed = parseReviewJSON(stdout);
-        resolve(parsed);
-      } catch (parseErr: unknown) {
-        debugError('[CodeReview] Failed to parse AI response:', stdout.substring(0, 500));
-        resolve({
-          passed: false,
-          findings: [{
-            severity: 'minor',
-            file: 'unknown',
-            description: `Review completed but response could not be parsed. Raw output: ${stdout.substring(0, 300)}`,
-          }],
-        });
-      }
-    });
-
-    child.on('error', (err: Error) => {
-      if (taskId) activeReviews.delete(taskId);
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
+  try {
+    return parseReviewJSON(retry.stdout);
+  } catch {
+    // Surface the fuller raw output (retry preferred, else the original) so the
+    // finding at least carries the reviewer's actual conclusion.
+    const rawOutput = (retry.stdout.trim() || first.stdout.trim());
+    debugError('[CodeReview] Failed to parse AI response after retry:', rawOutput.substring(0, 800));
+    return {
+      passed: false,
+      findings: [{
+        severity: 'minor',
+        file: 'unknown',
+        description: `Review completed but response could not be parsed. Raw output: ${rawOutput.substring(0, 800)}`,
+      }],
+    };
+  }
 }
 
 /** Format findings into a readable comment */
