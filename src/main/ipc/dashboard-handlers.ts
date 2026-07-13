@@ -296,10 +296,13 @@ function tick(getWindow: () => BrowserWindow | null): void {
   const today = localDate(now);
   for (const notice of listNotices()) {
     if (!notice.enabled || !notice.scheduleTime) continue;
-    if (notice.scheduleTime !== hhmm) continue;
-    if (notice.lastRunDate === today) continue;
+    if (notice.lastRunDate === today) continue;   // already ran today
+    // Catch-up: fire once the scheduled minute has passed today, even if the
+    // exact minute was missed (app closed/asleep, poll drift). HH:mm strings are
+    // zero-padded, so lexicographic compare matches time-of-day ordering.
+    if (notice.scheduleTime > hhmm) continue;     // not due yet today
     if (runningIds.has(notice.id)) continue;
-    debugLog(`[Dashboard] Scheduler firing notice "${notice.title}" at ${hhmm}`);
+    debugLog(`[Dashboard] Scheduler firing notice "${notice.title}" (scheduled ${notice.scheduleTime}, now ${hhmm})`);
     void runNotice(notice.id, getWindow);
   }
 }
@@ -308,6 +311,9 @@ function startScheduler(getWindow: () => BrowserWindow | null): void {
   if (schedulerInterval) clearInterval(schedulerInterval);
   // Poll every minute — cheap, and time-of-day granularity is per-minute.
   schedulerInterval = setInterval(() => tick(getWindow), 60_000);
+  // Run once now so a notice already overdue at launch (app was closed/asleep at
+  // its scheduled time) fires immediately instead of waiting up to a minute.
+  tick(getWindow);
   debugLog('[Dashboard] Notice scheduler started');
 }
 
