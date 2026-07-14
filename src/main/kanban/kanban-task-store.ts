@@ -175,7 +175,9 @@ export function importKanbanTask(input: ImportTaskInput): KanbanTask {
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
     baseBranch: input.baseBranch || undefined,
-    useWorktree: input.useWorktree === false ? false : true,
+    // Default to current branch ("normal"); a worktree is opt-in per launch
+    // via the Start button (which persists useWorktree=true when chosen).
+    useWorktree: input.useWorktree === true ? true : false,
     orderIndex: nextOrderIndex(data.tasks),
     autoCodeState: 'idle',
     iterationCount: 0,
@@ -237,7 +239,9 @@ export function createLocalKanbanTask(input: CreateLocalTaskInput): KanbanTask {
     projectId: input.projectId,
     kanbanStatus: input.kanbanStatus || 'todo',
     baseBranch: input.baseBranch || undefined,
-    useWorktree: input.useWorktree === false ? false : true,
+    // Default to current branch ("normal"); a worktree is opt-in per launch
+    // via the Start button (which persists useWorktree=true when chosen).
+    useWorktree: input.useWorktree === true ? true : false,
     orderIndex: nextOrderIndex(data.tasks),
     autoCodeState: 'idle',
     iterationCount: 0,

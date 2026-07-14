@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, Plus, FolderOpen, ChevronDown, Loader2, GitBranch, GitFork } from 'lucide-react';
+import { X, Plus, FolderOpen, ChevronDown, Loader2 } from 'lucide-react';
 import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import type { KanbanTaskStatus } from '../../../shared/types';
@@ -25,7 +25,6 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
   const [description, setDescription] = useState('');
   const [projectPath, setProjectPath] = useState('');
   const [kanbanStatus, setKanbanStatus] = useState<KanbanTaskStatus>('todo');
-  const [useWorktree, setUseWorktree] = useState(true);
   const [baseBranch, setBaseBranch] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +38,6 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
     setName('');
     setDescription('');
     setKanbanStatus('todo');
-    setUseWorktree(true);
     setBaseBranch('');
     setError(null);
     const active = projects.find((p) => p.id === activeProjectId);
@@ -96,8 +94,7 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
       projectPath,
       projectId: selectedProject?.id,
       kanbanStatus,
-      baseBranch: useWorktree ? (baseBranch || undefined) : undefined,
-      useWorktree,
+      baseBranch: baseBranch || undefined,
     });
     setSubmitting(false);
     if (created) {
@@ -200,58 +197,15 @@ export function CreateLocalTaskModal({ open, onClose }: CreateLocalTaskModalProp
             )}
           </div>
 
-          {/* Workspace: dedicated worktree vs current branch */}
-          <div>
-            <label className="block text-xs font-medium text-[var(--text-muted)] mb-1.5">Workspace</label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setUseWorktree(true)}
-                className={cn(
-                  'flex items-start gap-2 px-3 py-2 rounded-lg border text-left transition-colors',
-                  useWorktree
-                    ? 'bg-[var(--accent)]/10 border-[var(--accent)] text-[var(--text-primary)]'
-                    : 'bg-[var(--bg-tertiary)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]',
-                )}
-              >
-                <GitFork className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                <span className="min-w-0">
-                  <span className="block text-xs font-medium">Worktree</span>
-                  <span className="block text-[10px] opacity-80 mt-0.5 leading-snug">
-                    Isolated branch, forked from base. Recommended.
-                  </span>
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setUseWorktree(false)}
-                className={cn(
-                  'flex items-start gap-2 px-3 py-2 rounded-lg border text-left transition-colors',
-                  !useWorktree
-                    ? 'bg-[var(--accent)]/10 border-[var(--accent)] text-[var(--text-primary)]'
-                    : 'bg-[var(--bg-tertiary)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]',
-                )}
-              >
-                <GitBranch className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                <span className="min-w-0">
-                  <span className="block text-xs font-medium">Current branch</span>
-                  <span className="block text-[10px] opacity-80 mt-0.5 leading-snug">
-                    Run in the project's checked-out branch — shares uncommitted state.
-                  </span>
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {/* Base branch — only relevant when forking a worktree */}
-          {useWorktree && (
-            <BaseBranchPicker
-              label="Base branch"
-              projectPath={projectPath}
-              value={baseBranch}
-              onChange={setBaseBranch}
-            />
-          )}
+          {/* Base branch — the fork point / merge target used when the task is
+              started in worktree mode. Worktree vs current branch is chosen on
+              the Start button, per launch. */}
+          <BaseBranchPicker
+            label="Base branch"
+            projectPath={projectPath}
+            value={baseBranch}
+            onChange={setBaseBranch}
+          />
 
           {/* Kanban column */}
           <div>

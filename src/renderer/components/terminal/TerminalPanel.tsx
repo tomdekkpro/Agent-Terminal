@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
+import { Bot, X, ExternalLink, GitBranch, GitFork, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -37,7 +37,7 @@ interface TerminalPanelProps {
   isSplit?: boolean;
   agentProviders: AgentProviderMeta[];
   skills?: import('../../../shared/types').ProjectSkill[];
-  onInvokeAgent: (skipPermissions?: boolean) => void;
+  onInvokeAgent: (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => void;
   onProviderChange: (provider: AgentProviderId) => void;
   onInvokeSkill?: (skill: import('../../../shared/types').ProjectSkill) => void;
   onMergeComplete?: () => void;
@@ -526,6 +526,14 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
 
+  // Start / YOLO mode dropdowns (worktree vs current branch, chosen at launch)
+  const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
+  const startMenuRef = useRef<HTMLDivElement>(null);
+  const yoloMenuRef = useRef<HTMLDivElement>(null);
+  // Primary Start/YOLO always runs on the current branch; a worktree is opt-in
+  // per launch via the dropdown.
+  const startDefaultWorktree = false;
+
   const initObserverRef = useRef<ResizeObserver | null>(null);
 
   // Remote control URL capture
@@ -619,6 +627,85 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showProviderMenu]);
+
+  // Close start / yolo dropdowns on outside click
+  useEffect(() => {
+    if (!startMenu) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (startMenuRef.current?.contains(t) || yoloMenuRef.current?.contains(t)) return;
+      setStartMenu(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [startMenu]);
+
+  // Split "Start" / "YOLO" control: primary click uses the task's default
+  // (current branch unless a worktree was explicitly chosen); the caret picks
+  // worktree vs current branch for this launch. YOLO adds skip-permissions.
+  const renderStartControl = (kind: 'start' | 'yolo') => {
+    const isYolo = kind === 'yolo';
+    const color = isYolo ? '#fbbf24' : (currentProvider?.color || '#6366f1');
+    const bg = isYolo ? '#f59e0b20' : `${currentProvider?.color || '#6366f1'}20`;
+    const label = isYolo ? 'YOLO' : 'Start';
+    const invoke = (mode?: 'worktree' | 'current') => onInvokeAgent({ mode, skipPermissions: isYolo });
+    const open = startMenu === kind;
+    return (
+      <div className="relative flex" ref={isYolo ? yoloMenuRef : startMenuRef}>
+        <button
+          onClick={(e) => { e.stopPropagation(); invoke(); }}
+          className="flex items-center gap-1.5 pl-2.5 pr-2 py-1 rounded-l-md text-xs transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title={`${label} ${startDefaultWorktree ? 'in an isolated worktree' : 'on the current branch'}${isYolo ? ' (skip permissions)' : ''}`}
+        >
+          <Bot className="w-3.5 h-3.5" />
+          {!isSplit && (<>{label}<span className="opacity-70">{startDefaultWorktree ? '· worktree' : '· branch'}</span></>)}
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); setStartMenu(open ? null : kind); }}
+          className="flex items-center px-1 py-1 rounded-r-md text-xs border-l border-black/20 transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title="Choose how to start"
+        >
+          <ChevronDown className="w-3 h-3" />
+        </button>
+        {open && (
+          <div className="absolute right-0 top-full mt-1 z-50 w-60 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl overflow-hidden">
+            <button
+              onClick={(e) => { e.stopPropagation(); setStartMenu(null); invoke('current'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+            >
+              <GitBranch className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} on current branch
+                  {!startDefaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Runs on the project's checked-out branch.
+                </span>
+              </span>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setStartMenu(null); invoke('worktree'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left border-t border-[var(--border)]"
+            >
+              <GitFork className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} in worktree
+                  {startDefaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Isolated branch, forked from base.
+                </span>
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Close base branch dropdown on outside click
   useEffect(() => {
@@ -1302,29 +1389,39 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               {skills && skills.length > 0 && onInvokeSkill && (
                 <SkillsDropdown skills={skills} onInvokeSkill={onInvokeSkill} />
               )}
-              {/* Start button */}
-              <button
-                onClick={(e) => { e.stopPropagation(); onInvokeAgent(); }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
-                style={{
-                  backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
-                  color: currentProvider?.color || '#6366f1',
-                }}
-                title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
-              >
-                <Bot className="w-3.5 h-3.5" />
-                {!isSplit && 'Start'}
-              </button>
-              {/* YOLO button — only for agents with yolo capability */}
-              {currentProvider?.capabilities.yolo && (
+              {/* Start button — for Claude task terminals a split button whose
+                  caret picks worktree vs current branch at launch. */}
+              {terminal.agentProvider === 'claude' && terminal.task ? (
+                renderStartControl('start')
+              ) : (
                 <button
-                  onClick={(e) => { e.stopPropagation(); onInvokeAgent(true); }}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
-                  title={`Start ${currentProvider.displayName} (skip permissions)`}
+                  onClick={(e) => { e.stopPropagation(); onInvokeAgent(); }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
+                  style={{
+                    backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
+                    color: currentProvider?.color || '#6366f1',
+                  }}
+                  title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
                 >
                   <Bot className="w-3.5 h-3.5" />
-                  {!isSplit && 'YOLO'}
+                  {!isSplit && 'Start'}
                 </button>
+              )}
+              {/* YOLO button — same worktree/current split as Start; only for
+                  agents with yolo capability. */}
+              {currentProvider?.capabilities.yolo && (
+                terminal.agentProvider === 'claude' && terminal.task ? (
+                  renderStartControl('yolo')
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onInvokeAgent({ skipPermissions: true }); }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
+                    title={`Start ${currentProvider.displayName} (skip permissions)`}
+                  >
+                    <Bot className="w-3.5 h-3.5" />
+                    {!isSplit && 'YOLO'}
+                  </button>
+                )
               )}
             </>
           )}

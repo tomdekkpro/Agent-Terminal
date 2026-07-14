@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, ChevronRight, GitBranch,
-  ArrowLeft, FolderGit2, Folder, Download, RefreshCw, List,
+  Folder, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, Zap, FolderOpen, Rocket,
 } from 'lucide-react';
 import { useTerminalStore } from '../../stores/terminal-store';
@@ -43,7 +43,6 @@ export function TaskPickerModal({
   const [loadingMore, setLoadingMore] = useState(false);
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState('');
-  const [selectedTask, setSelectedTask] = useState<TaskManagerTask | null>(null);
   const [includeClosed, setIncludeClosed] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
 
@@ -237,74 +236,8 @@ export function TaskPickerModal({
     return acc;
   }, {});
 
-  // Step 2: task selected — choose worktree or current branch
-  if (selectedTask) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="w-[440px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-[var(--border)]">
-            <div className="flex items-center gap-2 mb-2">
-              <button
-                onClick={() => setSelectedTask(null)}
-                className="w-6 h-6 rounded flex items-center justify-center hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-              </button>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                Working Directory
-              </h2>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <div
-                className="w-2 h-2 rounded-full shrink-0"
-                style={{ backgroundColor: selectedTask.status.color }}
-              />
-              <span className="text-xs text-[var(--text-secondary)] truncate">
-                {selectedTask.customId && <span className="font-mono mr-1.5">{selectedTask.customId}</span>}
-                {selectedTask.name}
-              </span>
-            </div>
-          </div>
-
-          <div className="p-3 space-y-2">
-            <button
-              onClick={() => onSelect(selectedTask, true)}
-              className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors text-left border border-[var(--border)]"
-            >
-              <FolderGit2 className="w-5 h-5 shrink-0 text-[var(--accent)] mt-0.5" />
-              <div>
-                <div className="text-sm font-medium text-[var(--text-primary)]">New Worktree</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                  Create an isolated branch for this task. Changes stay separate from main.
-                </div>
-              </div>
-            </button>
-            <button
-              onClick={() => onSelect(selectedTask, false)}
-              className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors text-left border border-[var(--border)]"
-            >
-              <Folder className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
-              <div>
-                <div className="text-sm font-medium text-[var(--text-primary)]">Current Branch</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                  Work directly on the current branch in the project directory.
-                </div>
-              </div>
-            </button>
-          </div>
-
-          <div className="p-3 border-t border-[var(--border)] flex items-center justify-end">
-            <button
-              onClick={onCancel}
-              className="px-3 py-1.5 rounded-md text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Picking a task starts it immediately — worktree vs current branch is now
+  // chosen on the Start button, per launch (see handleInvokeAgent).
 
   // Step 1: pick a task
   return (
@@ -491,7 +424,7 @@ export function TaskPickerModal({
               {tasks.map((task) => (
                 <button
                   key={task.id}
-                  onClick={() => mode === 'link' ? onSelect(task, false) : setSelectedTask(task)}
+                  onClick={() => onSelect(task, mode !== 'link')}
                   className="w-full text-left p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors"
                 >
                   <div className="flex items-center gap-3">
@@ -1015,27 +948,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             worktreePath: cwdOverride.worktreePath,
             worktreeBranch: cwdOverride.worktreeBranch,
           });
-        } else if (useWorktree && activeProject?.path) {
-          // Pre-create the worktree using Claude's native convention so
-          // <repo>/.claude/worktrees/<id> exists for git ops (status, push,
-          // PR). The terminal stays at the project root and `claude
-          // --worktree <id>` will reuse this worktree on launch.
-          const taskSlug = task.customId || task.id;
-          const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug, taskBaseBranch);
-          if (result.success && result.data) {
-            useTerminalStore.getState().updateTerminal(terminal.id, {
-              title,
-              task: terminalTask,
-              cwd, // project path — Claude handles cd into the worktree
-              worktreePath: result.data,
-              worktreeBranch: result.branch,
-            });
-          } else {
-            // Worktree failed (not a git repo, etc.) — use project dir
-            useTerminalStore.getState().updateTerminal(terminal.id, { title, task: terminalTask });
-          }
         } else {
-          // Use current branch / project directory
+          // Fresh task terminal — don't create a worktree yet. The Start button
+          // decides worktree vs current branch at launch and creates the
+          // worktree on demand only if the user picks it. The PTY opens at the
+          // project root either way; `claude --worktree` (added at Start) cd's
+          // into the worktree when that mode is chosen.
           useTerminalStore.getState().updateTerminal(terminal.id, { title, task: terminalTask });
         }
 
@@ -1281,7 +1199,9 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           worktreeBranch: resolved.isWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
-        await setupTerminalWithTask(terminal, taskForSetup, true);
+        // Honor the task's saved workspace choice — a "Current branch" task
+        // must not be forced into a worktree here.
+        await setupTerminalWithTask(terminal, taskForSetup, detail.useWorktree !== false);
       }
 
       // Carry over session + agent provider from the KanbanTask if we have them
@@ -1364,18 +1284,49 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
   const [cliError, setCliError] = useState<string | null>(null);
 
-  const handleInvokeAgent = useCallback(async (id: string, skipPermissions?: boolean) => {
+  const handleInvokeAgent = useCallback(async (id: string, opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => {
     const terminal = useTerminalStore.getState().getTerminal(id);
     if (!terminal) return;
+    const skipPermissions = opts?.skipPermissions;
     const agentId = terminal.agentProvider;
     const settings = useSettingsStore.getState().settings;
     // Project model override > app-wide model
     const model = activeProject?.agentModel || settings.agentModels?.[agentId] || undefined;
-    // Pass --worktree <id> for task terminals so Claude isolates the work
-    // in its own worktree (Claude-specific flag).
-    const worktreeName = terminal.task && agentId === 'claude'
-      ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+
+    // Worktree vs current branch is decided HERE, at Start. Default to the
+    // task's saved preference; an explicit Start-menu pick overrides it. Only
+    // Claude supports the --worktree flag, and only task terminals get one.
+    const kanbanTask = terminal.task
+      ? useKanbanStore.getState().tasks.find((t) => t.clickupTaskId === terminal.task!.id)
       : undefined;
+    // Default is always current branch ("normal"); a worktree is only used when
+    // explicitly picked from the Start/YOLO dropdown for this launch.
+    const mode: 'worktree' | 'current' = opts?.mode ?? 'current';
+    const canWorktree = !!terminal.task && agentId === 'claude' && !!activeProject;
+
+    let worktreeName: string | undefined;
+    if (mode === 'worktree' && canWorktree) {
+      const safeId = (terminal.task!.customId || terminal.task!.id).replace(/[^a-zA-Z0-9_-]/g, '-');
+      // Create the worktree on demand if it isn't there yet, so git ops resolve
+      // against it and `claude --worktree` reuses it.
+      let wtPath = terminal.worktreePath;
+      let wtBranch = terminal.worktreeBranch;
+      if (!wtPath) {
+        try {
+          const wt = await window.electronAPI.createTaskWorktree(activeProject!.path, safeId, kanbanTask?.baseBranch);
+          if (wt?.success && wt.data) { wtPath = wt.data; wtBranch = wt.branch || wtBranch; }
+        } catch { /* fall back to project root — claude --worktree creates it */ }
+      }
+      useTerminalStore.getState().updateTerminal(id, { worktreePath: wtPath, worktreeBranch: wtBranch });
+      worktreeName = safeId;
+    } else {
+      // Current branch: unbind any worktree so git ops target the checked-out tree.
+      useTerminalStore.getState().updateTerminal(id, { worktreePath: undefined, worktreeBranch: undefined });
+    }
+
+    // Remember the choice as this task's default for next time.
+    if (kanbanTask) void useKanbanStore.getState().updateTask(kanbanTask.id, { useWorktree: mode === 'worktree' });
+
     const result = await window.electronAPI.invokeAgent(id, agentId, {
       cwd: activeProject?.path,
       skipPermissions,
@@ -2081,7 +2032,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                       isSplit={true}
                       agentProviders={agentProviders}
                       skills={projectSkills}
-                      onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                      onInvokeAgent={(opts) => handleInvokeAgent(terminal.id, opts)}
                       onProviderChange={(p) => handleProviderChange(terminal.id, p)}
                       onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                       onMergeComplete={() => openCompleteTask(terminal)}
@@ -2114,7 +2065,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                     isActive={isCurrentGroup}
                     agentProviders={agentProviders}
                     skills={projectSkills}
-                    onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                    onInvokeAgent={(opts) => handleInvokeAgent(terminal.id, opts)}
                     onProviderChange={(p) => handleProviderChange(terminal.id, p)}
                     onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                     onMergeComplete={() => openCompleteTask(terminal)}

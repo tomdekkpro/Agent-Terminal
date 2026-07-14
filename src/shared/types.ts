@@ -760,10 +760,12 @@ export interface KanbanTask {
   worktreePath?: string;
   worktreeBranch?: string;
   baseBranch?: string;
-  /** When false, the agent runs directly against the project's current branch
-   *  — no worktree is created and `--worktree` is not passed to Claude. The
-   *  baseBranch + worktreeBranch fields are not used in that case. Undefined
-   *  defaults to worktree mode for back-compat with pre-1.23.5 records. */
+  /** Worktree mode is opt-in: a worktree is used only when this is explicitly
+   *  true (chosen via the Start button, which persists it). Default / undefined
+   *  / false → the agent runs directly against the project's current branch, no
+   *  worktree created and no `--worktree` passed to Claude. NOTE: records from
+   *  before this default flip are backfilled to true on load (see
+   *  kanban-task-store) so existing worktree tasks keep their behavior. */
   useWorktree?: boolean;
 
   /** Auto-fix loop state */
