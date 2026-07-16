@@ -163,12 +163,46 @@ interface FilesPanelProps {
   enablePull?: boolean;
 }
 
+const MIN_PANEL_WIDTH = 220;
+const MAX_PANEL_WIDTH = 720;
+const DEFAULT_PANEL_WIDTH = 288; // matches the old fixed w-72
+const WIDTH_STORAGE_KEY = 'filesPanel.width';
+
 export function FilesPanel({ docsPath, onClose, label = 'Files', enablePull = true }: FilesPanelProps) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [pullStatus, setPullStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [search, setSearch] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // Persisted, drag-resizable panel width.
+  const [width, setWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(WIDTH_STORAGE_KEY));
+    return saved >= MIN_PANEL_WIDTH && saved <= MAX_PANEL_WIDTH ? saved : DEFAULT_PANEL_WIDTH;
+  });
+
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+    let latest = startWidth;
+    const onMove = (ev: MouseEvent) => {
+      // Panel sits on the right; dragging its left edge leftward grows it.
+      latest = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + (startX - ev.clientX)));
+      setWidth(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem(WIDTH_STORAGE_KEY, String(Math.round(latest)));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [width]);
 
   const loadRoot = useCallback(async () => {
     if (!docsPath) return;
@@ -232,7 +266,16 @@ export function FilesPanel({ docsPath, onClose, label = 'Files', enablePull = tr
   const filtered = search ? filterEntries(entries, search) : entries;
 
   return (
-    <div className="flex flex-col h-full bg-[var(--bg-primary)] border-l border-[var(--border)]">
+    <div
+      className="relative flex flex-col h-full shrink-0 bg-[var(--bg-primary)] border-l border-[var(--border)]"
+      style={{ width }}
+    >
+      {/* Drag handle on the left edge to resize the panel */}
+      <div
+        onMouseDown={startResize}
+        title="Drag to resize"
+        className="absolute left-0 top-0 bottom-0 w-1.5 -ml-1 z-20 cursor-col-resize hover:bg-[var(--accent)]/40 transition-colors"
+      />
       {/* Toolbar */}
       <div className="h-9 bg-[var(--bg-card)] border-b border-[var(--border)] flex items-center px-2 gap-1 shrink-0">
         <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />

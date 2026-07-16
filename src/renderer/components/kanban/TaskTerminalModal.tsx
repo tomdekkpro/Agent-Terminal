@@ -1509,7 +1509,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           {/* Right-side files panel — browse the project's docs repo or its
               source tree. Drag files into the terminal to insert their path. */}
           {filesPanel === 'docs' && taskProject?.docsPath && (
-            <div className="w-72 shrink-0 min-h-0">
+            <div className="shrink-0 min-h-0">
               <FilesPanel
                 docsPath={taskProject.docsPath}
                 label="Documents"
@@ -1518,7 +1518,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             </div>
           )}
           {filesPanel === 'project' && taskProject?.path && (
-            <div className="w-72 shrink-0 min-h-0">
+            <div className="shrink-0 min-h-0">
               <FilesPanel
                 docsPath={taskProject.path}
                 label="Files"

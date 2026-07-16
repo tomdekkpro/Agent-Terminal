@@ -2124,7 +2124,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
       {/* Right-side panels */}
       {filesPanel === 'docs' && activeProject?.docsPath && (
-        <div className="w-72 shrink-0 min-h-0">
+        <div className="shrink-0 min-h-0">
           <FilesPanel
             docsPath={activeProject.docsPath}
             label="Documents"
@@ -2133,7 +2133,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         </div>
       )}
       {filesPanel === 'project' && activeProject?.path && (
-        <div className="w-72 shrink-0 min-h-0">
+        <div className="shrink-0 min-h-0">
           <FilesPanel
             docsPath={activeProject.path}
             label="Files"
