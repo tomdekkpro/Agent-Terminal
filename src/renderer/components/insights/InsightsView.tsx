@@ -6,6 +6,7 @@ import { useInsightsStore } from '../../stores/insights-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useTerminalStore } from '../../stores/terminal-store';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 import { ChatMessage } from './ChatMessage';
 import { ModelSelector } from './ModelSelector';
 import { SessionSidebar } from './SessionSidebar';
@@ -489,7 +490,7 @@ export function InsightsView() {
     // Send the spec as the first prompt after a brief delay
     setTimeout(() => {
       const prompt = `Please implement the following specification:\n\n${specContent}`;
-      window.electronAPI.sendTerminalInput(terminalId, prompt + '\n');
+      sendAgentPrompt(terminalId, prompt);
     }, 2000);
   };
 

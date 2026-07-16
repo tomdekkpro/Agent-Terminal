@@ -21,6 +21,7 @@ import { cn, csvToLowerSet, toggleInCsv } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
 
 const PICKER_PAGE_SIZE = 100;
@@ -1365,7 +1366,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           if (task.url) parts.push(`URL: ${task.url}`);
           const prompt = parts.join('\n');
           setTimeout(() => {
-            window.electronAPI.sendTerminalInput(id, prompt + '\n');
+            sendAgentPrompt(id, prompt);
           }, 3000);
         }).catch(() => { /* non-critical */ });
       }
@@ -1440,11 +1441,13 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Invoke agent first, then send skill prompt after it starts
       await handleInvokeAgent(terminalId);
       setTimeout(() => {
-        window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
+        // Don't submit — leave the (possibly multi-line) prompt in the input
+        // for the user to review/edit before sending.
+        sendAgentPrompt(terminalId, skill.prompt, { submit: false });
       }, 3000);
     } else {
-      // Agent already running — send prompt directly
-      window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
+      // Agent already running — send prompt directly (no auto-submit)
+      sendAgentPrompt(terminalId, skill.prompt, { submit: false });
     }
   }, [handleInvokeAgent]);
 

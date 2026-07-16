@@ -34,6 +34,7 @@ import { FilesPanel } from '../terminal/FilesPanel';
 import { cn } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 
 interface TaskTerminalModalProps {
   task: KanbanTask | null;
@@ -1029,7 +1030,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
           const prompt = parts.join('\n');
           setTimeout(() => {
-            window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+            sendAgentPrompt(terminal.id, prompt);
           }, 3000);
         } else {
           const taskId = terminal.task.id;
@@ -1048,7 +1049,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             if (t.url) parts.push(`URL: ${t.url}`);
             const prompt = parts.join('\n');
             setTimeout(() => {
-              window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+              sendAgentPrompt(terminal.id, prompt);
             }, 3000);
           }).catch(() => { /* non-critical */ });
         }
