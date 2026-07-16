@@ -826,7 +826,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [currentBranch, setCurrentBranch] = useState<string>('');
   const [fetchStatus, setFetchStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [pullStatus, setPullStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
-  const [filesOpen, setFilesOpen] = useState(false);
+  // Which side panel is open: docs repo files, project source tree, or none.
+  const [filesPanel, setFilesPanel] = useState<'docs' | 'project' | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [behindCount, setBehindCount] = useState<number>(0);
   const [pullMessage, setPullMessage] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -1595,12 +1596,28 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               </button>
               {activeProject?.docsPath && (
                 <button
-                  onClick={() => setFilesOpen((v) => !v)}
-                  title={filesOpen ? 'Close files panel' : 'Open project documents'}
+                  onClick={() => setFilesPanel((p) => (p === 'docs' ? null : 'docs'))}
+                  title={filesPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
                   className={cn(
                     'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
                     'hover:bg-[var(--bg-tertiary)] border border-transparent',
-                    filesOpen
+                    filesPanel === 'docs'
+                      ? 'text-amber-400 border-amber-500/20 bg-amber-500/10'
+                      : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>Documents</span>
+                </button>
+              )}
+              {activeProject?.path && (
+                <button
+                  onClick={() => setFilesPanel((p) => (p === 'project' ? null : 'project'))}
+                  title={filesPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
+                    'hover:bg-[var(--bg-tertiary)] border border-transparent',
+                    filesPanel === 'project'
                       ? 'text-amber-400 border-amber-500/20 bg-amber-500/10'
                       : 'text-[var(--text-muted)]',
                   )}
@@ -2103,11 +2120,22 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       </div>
 
       {/* Right-side panels */}
-      {filesOpen && activeProject?.docsPath && (
+      {filesPanel === 'docs' && activeProject?.docsPath && (
         <div className="w-72 shrink-0 min-h-0">
           <FilesPanel
             docsPath={activeProject.docsPath}
-            onClose={() => setFilesOpen(false)}
+            label="Documents"
+            onClose={() => setFilesPanel(null)}
+          />
+        </div>
+      )}
+      {filesPanel === 'project' && activeProject?.path && (
+        <div className="w-72 shrink-0 min-h-0">
+          <FilesPanel
+            docsPath={activeProject.path}
+            label="Files"
+            enablePull={false}
+            onClose={() => setFilesPanel(null)}
           />
         </div>
       )}

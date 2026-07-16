@@ -30,6 +30,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore, type AutoCodeLogEntry } from '../../stores/kanban-store';
 import { TerminalPanel, ActionsDropdown } from '../terminal/TerminalPanel';
 import { ChangesSplitLayout, TaskPickerModal } from '../terminal/TerminalView';
+import { FilesPanel } from '../terminal/FilesPanel';
 import { cn } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
@@ -583,6 +584,8 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     );
 
   const [isFullscreen, setIsFullscreen] = useState(true);
+  // Which side panel is open: docs repo files, project source tree, or none.
+  const [filesPanel, setFilesPanel] = useState<'docs' | 'project' | null>(null);
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
   const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
@@ -1373,6 +1376,36 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                 <div className="h-5 w-px bg-[var(--border)] mx-1" />
               </>
             )}
+            {taskProject?.docsPath && (
+              <button
+                onClick={() => setFilesPanel((p) => (p === 'docs' ? null : 'docs'))}
+                title={filesPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  filesPanel === 'docs'
+                    ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Documents
+              </button>
+            )}
+            {taskProject?.path && (
+              <button
+                onClick={() => setFilesPanel((p) => (p === 'project' ? null : 'project'))}
+                title={filesPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  filesPanel === 'project'
+                    ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Files
+              </button>
+            )}
             <button
               onClick={() => refreshClickup()}
               title="Refresh ClickUp snapshot"
@@ -1398,7 +1431,8 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div className="flex-1 flex min-h-0 overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {setupError && (
             <div className="m-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
               {setupError}
@@ -1469,6 +1503,28 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             </div>
           )}
           </>
+          )}
+          </div>
+          {/* Right-side files panel — browse the project's docs repo or its
+              source tree. Drag files into the terminal to insert their path. */}
+          {filesPanel === 'docs' && taskProject?.docsPath && (
+            <div className="w-72 shrink-0 min-h-0">
+              <FilesPanel
+                docsPath={taskProject.docsPath}
+                label="Documents"
+                onClose={() => setFilesPanel(null)}
+              />
+            </div>
+          )}
+          {filesPanel === 'project' && taskProject?.path && (
+            <div className="w-72 shrink-0 min-h-0">
+              <FilesPanel
+                docsPath={taskProject.path}
+                label="Files"
+                enablePull={false}
+                onClose={() => setFilesPanel(null)}
+              />
+            </div>
           )}
         </div>
         {/* CompleteTask modal — must live inside the stopPropagation wrapper so
