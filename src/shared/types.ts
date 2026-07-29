@@ -97,6 +97,9 @@ export interface TaskManagerTask {
   url: string;
   createdAt: string;
   updatedAt: string;
+  /** List the task lives in. Lets snapshot refreshes fetch many tasks with one
+   *  list-scoped query instead of one request per task. */
+  listId?: string;
   providerTaskId: string;
   provider: TaskManagerProvider;
 }
@@ -718,6 +721,10 @@ export interface KanbanTask {
   /** Selected "Release version" custom-field value (snapshot), if set. */
   clickupReleaseVersion?: string;
   clickupUpdatedAt?: string;
+  /** ClickUp list this task belongs to. Recorded on the first snapshot refresh
+   *  so later refreshes can batch every tracked task into a few list-scoped
+   *  queries instead of one request per task. */
+  clickupListId?: string;
 
   /** Local project path for worktree + gh CLI */
   projectPath: string;

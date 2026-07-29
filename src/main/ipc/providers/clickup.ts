@@ -1,34 +1,201 @@
 import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './types';
+import { debugLog, debugError } from '../../../shared/utils';
 
 const CLICKUP_API_BASE = 'https://api.clickup.com/api/v2';
 
 // 30-second cache
 const taskCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_TTL = 30000;
+// Workspace shape (lists, statuses, members) changes rarely and is re-read on
+// every board render — cache it far longer than task data.
+const STATIC_CACHE_TTL = 5 * 60_000;
 const MAX_SEARCH_PAGES = 10;
+const MAX_CACHE_ENTRIES = 500;
+// Snapshot batching: page cap keeps a huge list from costing more than the
+// per-task reads it replaces, and small boards skip batching entirely.
+const MAX_SNAPSHOT_PAGES = 15;
+const MIN_BULK_SNAPSHOT_TASKS = 5;
+
+// ─── Rate limiting ──────────────────────────────────────────────────────────
+// ClickUp enforces a per-token limit of 100 requests/minute on Free/Unlimited/
+// Business plans (1000 on Business Plus, 10000 on Enterprise). Several pollers
+// hit this provider independently (Kanban snapshot refresh, backlog poll,
+// dashboard notices, code-review scheduler, Auto Code), and some helpers fan out
+// to one request per task or per page — enough to burn a whole minute's budget
+// in one burst and get everything back a 429. So every request goes through a
+// token bucket + concurrency gate, and a 429 pauses ALL traffic until the window
+// the API told us about has passed.
+const REQUEST_BUDGET = 90; // headroom under the 100/min floor
+const BUDGET_WINDOW_MS = 60_000;
+const MAX_CONCURRENT = 4;
+const MAX_RETRIES = 3;
+const MAX_BACKOFF_MS = 60_000;
+
+let windowStart = 0;
+let windowCount = 0;
+let inFlight = 0;
+const concurrencyWaiters: (() => void)[] = [];
+/** Set when the API (or its rate-limit headers) tells us to hold off. */
+let pausedUntil = 0;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+/** Blocks until it is this caller's turn to issue a request. */
+async function acquireSlot(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    if (pausedUntil > now) {
+      await sleep(pausedUntil - now);
+      continue;
+    }
+    if (now - windowStart >= BUDGET_WINDOW_MS) {
+      windowStart = now;
+      windowCount = 0;
+    }
+    if (windowCount >= REQUEST_BUDGET) {
+      await sleep(windowStart + BUDGET_WINDOW_MS - now);
+      continue;
+    }
+    if (inFlight >= MAX_CONCURRENT) {
+      await new Promise<void>((resolve) => concurrencyWaiters.push(resolve));
+      continue;
+    }
+    windowCount++;
+    inFlight++;
+    return;
+  }
+}
+
+function releaseSlot(): void {
+  inFlight--;
+  concurrencyWaiters.shift()?.();
+}
+
+/** How long to wait after a 429, from Retry-After / X-RateLimit-Reset, else backoff. */
+function resolveRetryDelay(response: Response, attempt: number): number {
+  const retryAfter = Number(response.headers.get('retry-after'));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(retryAfter * 1000, MAX_BACKOFF_MS);
+  }
+  // ClickUp sends the reset as a unix timestamp in seconds
+  const reset = Number(response.headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(reset) && reset > 0) {
+    const ms = reset * 1000 - Date.now();
+    if (ms > 0) return Math.min(ms + 500, MAX_BACKOFF_MS);
+  }
+  return Math.min(5000 * 2 ** attempt, MAX_BACKOFF_MS);
+}
+
+/** Keep the local budget in step with what the API reports it has left. */
+function syncBudgetFromHeaders(response: Response): void {
+  const remaining = Number(response.headers.get('x-ratelimit-remaining'));
+  if (!Number.isFinite(remaining)) return;
+  if (remaining > 2) return;
+  // Nearly out — stop sending until the server's window rolls over.
+  const reset = Number(response.headers.get('x-ratelimit-reset'));
+  const until = Number.isFinite(reset) && reset > 0 ? reset * 1000 + 500 : Date.now() + 5000;
+  if (until > pausedUntil) {
+    pausedUntil = Math.min(until, Date.now() + MAX_BACKOFF_MS);
+    debugLog(`[ClickUp] ${remaining} request(s) left in window — pausing ${Math.ceil((pausedUntil - Date.now()) / 1000)}s`);
+  }
+}
+
+/** Concurrent GETs for the same endpoint share one request instead of racing. */
+const inflightGets = new Map<string, Promise<any>>();
 
 async function clickUpFetch(apiKey: string, endpoint: string, options: RequestInit = {}) {
   if (!apiKey) throw new Error('ClickUp API key not configured');
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET') return sendRequest(apiKey, endpoint, options);
 
-  const response = await fetch(`${CLICKUP_API_BASE}${endpoint}`, {
-    ...options,
-    signal: controller.signal,
-    headers: {
-      Authorization: apiKey,
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  }).finally(() => clearTimeout(timeoutId));
+  const key = `${apiKey}:${endpoint}`;
+  const existing = inflightGets.get(key);
+  if (existing) return existing;
 
-  if (!response.ok) {
-    throw new Error(`ClickUp API error: ${response.status} ${response.statusText}`);
+  const promise = sendRequest(apiKey, endpoint, options).finally(() => {
+    inflightGets.delete(key);
+  });
+  inflightGets.set(key, promise);
+  return promise;
+}
+
+async function sendRequest(apiKey: string, endpoint: string, options: RequestInit): Promise<any> {
+  for (let attempt = 0; ; attempt++) {
+    await acquireSlot();
+
+    let response: Response;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    try {
+      response = await fetch(`${CLICKUP_API_BASE}${endpoint}`, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          Authorization: apiKey,
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      releaseSlot();
+    }
+
+    if (response.status === 429) {
+      const delay = resolveRetryDelay(response, attempt);
+      // Hold every other caller too — the limit is per token, not per request.
+      pausedUntil = Math.max(pausedUntil, Date.now() + delay);
+      if (attempt >= MAX_RETRIES) {
+        debugError(`[ClickUp] Rate limited on ${endpoint} — giving up after ${MAX_RETRIES} retries`);
+        throw new Error(
+          `ClickUp rate limit reached (429). Retried ${MAX_RETRIES} times — try again in ${Math.ceil(delay / 1000)}s.`,
+        );
+      }
+      debugLog(`[ClickUp] 429 on ${endpoint} — retrying in ${Math.ceil(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+      continue;
+    }
+
+    syncBudgetFromHeaders(response);
+
+    if (!response.ok) {
+      throw new Error(`ClickUp API error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
   }
+}
 
-  return response.json();
+function cacheGet(key: string, ttl: number = CACHE_TTL): any | undefined {
+  const hit = taskCache.get(key);
+  if (!hit) return undefined;
+  if (Date.now() - hit.timestamp >= ttl) {
+    taskCache.delete(key);
+    return undefined;
+  }
+  return hit.data;
+}
+
+function cacheSet(key: string, data: any): void {
+  if (taskCache.size >= MAX_CACHE_ENTRIES) {
+    const now = Date.now();
+    for (const [k, v] of taskCache) {
+      if (now - v.timestamp >= CACHE_TTL) taskCache.delete(k);
+    }
+    // Still full of fresh entries — drop the oldest insertions to bound growth.
+    while (taskCache.size >= MAX_CACHE_ENTRIES) {
+      const oldest = taskCache.keys().next();
+      if (oldest.done) break;
+      taskCache.delete(oldest.value);
+    }
+  }
+  taskCache.set(key, { data, timestamp: Date.now() });
+}
+
+/** Drop cached copies of a task after we write to it, so the next read is fresh. */
+function invalidateTask(taskId: string): void {
+  taskCache.delete(`task-${taskId}`);
 }
 
 /** Resolve the "Release version" custom field to its display value. Handles
@@ -79,9 +246,23 @@ function normalizeClickUpTask(raw: any): TaskManagerTask {
     url: raw.url,
     createdAt: raw.date_created,
     updatedAt: raw.date_updated,
+    listId: raw.list?.id ? String(raw.list.id) : undefined,
     providerTaskId: raw.id,
     provider: 'clickup',
   };
+}
+
+/** Cached `/task/{id}` read. The board refreshes a snapshot per tracked task and
+ *  several features re-read the same task moments apart, so this is where the
+ *  request count adds up fastest. */
+async function fetchTaskRaw(settings: AppSettings, taskId: string): Promise<any> {
+  const cacheKey = `task-${taskId}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const data = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}`);
+  cacheSet(cacheKey, data);
+  return data;
 }
 
 export class ClickUpProvider implements ITaskManagerProvider {
@@ -122,10 +303,8 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (!teamId) throw new Error('Workspace ID not configured');
 
       const cacheKey = `lists-${teamId}`;
-      const cached = taskCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        return { success: true, data: cached.data };
-      }
+      const cached = cacheGet(cacheKey, STATIC_CACHE_TTL);
+      if (cached) return { success: true, data: cached };
 
       const spacesRes = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/space?archived=false`);
       const lists: TaskManagerList[] = [];
@@ -146,7 +325,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
         }
       }
 
-      taskCache.set(cacheKey, { data: lists, timestamp: Date.now() });
+      cacheSet(cacheKey, lists);
       return { success: true, data: lists };
     } catch (error) {
       return {
@@ -162,17 +341,15 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (!targetListId) throw new Error('No list ID configured');
 
       const cacheKey = `tasks-${targetListId}-${page}`;
-      const cached = taskCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        return { success: true, data: cached.data.map(normalizeClickUpTask) };
-      }
+      const cached = cacheGet(cacheKey);
+      if (cached) return { success: true, data: cached.map(normalizeClickUpTask) };
 
       const data = await clickUpFetch(
         settings.clickupApiKey,
         `/list/${targetListId}/task?include_closed=true&subtasks=true&page=${page}`,
       );
       const tasks = data.tasks || [];
-      taskCache.set(cacheKey, { data: tasks, timestamp: Date.now() });
+      cacheSet(cacheKey, tasks);
       return { success: true, data: tasks.map(normalizeClickUpTask) };
     } catch (error) {
       return {
@@ -214,11 +391,11 @@ export class ClickUpProvider implements ITaskManagerProvider {
       // When just browsing/filtering, use single-page pagination.
       if (hasQuery) {
         const allCacheKey = `search-all-${targetListId}-${params.toString()}`;
-        const cached = taskCache.get(allCacheKey);
+        const cached = cacheGet(allCacheKey);
         let allTasks: any[];
 
-        if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-          allTasks = cached.data;
+        if (cached) {
+          allTasks = cached;
         } else {
           allTasks = [];
           for (let p = 0; p < MAX_SEARCH_PAGES; p++) {
@@ -230,7 +407,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
             allTasks.push(...pageTasks);
             if (pageTasks.length === 0) break;
           }
-          taskCache.set(allCacheKey, { data: allTasks, timestamp: Date.now() });
+          cacheSet(allCacheKey, allTasks);
         }
 
         const q = query.toLowerCase();
@@ -247,18 +424,18 @@ export class ClickUpProvider implements ITaskManagerProvider {
 
       // No text query — single page for infinite scroll
       const cacheKey = `search-${targetListId}-${params.toString()}-${page}`;
-      const cached = taskCache.get(cacheKey);
+      const cached = cacheGet(cacheKey);
       let tasks: any[];
 
-      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        tasks = cached.data;
+      if (cached) {
+        tasks = cached;
       } else {
         const data = await clickUpFetch(
           settings.clickupApiKey,
           `/list/${targetListId}/task?${params.toString()}&page=${page}`,
         );
         tasks = data.tasks || [];
-        taskCache.set(cacheKey, { data: tasks, timestamp: Date.now() });
+        cacheSet(cacheKey, tasks);
       }
 
       return { success: true, data: tasks.map(normalizeClickUpTask) };
@@ -272,12 +449,100 @@ export class ClickUpProvider implements ITaskManagerProvider {
 
   async getTask(settings: AppSettings, taskId: string): Promise<ProviderResult<TaskManagerTask>> {
     try {
-      const data = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}`);
+      const data = await fetchTaskRaw(settings, taskId);
       return { success: true, data: normalizeClickUpTask(data) };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch task',
+      };
+    }
+  }
+
+  /**
+   * Bulk-read many tasks with as few requests as possible, for the snapshot
+   * refreshes that keep the Kanban board in step with ClickUp.
+   *
+   * One request per task blows the 100/min token budget on any board with ~100
+   * tracked tasks, so this uses the list-scoped "filtered team tasks" endpoint
+   * (100 tasks/page, `list_ids[]` accepts several lists at once) and stops as
+   * soon as every wanted task has been seen. `task_ids[]` is not supported by
+   * the API, hence the list-then-match approach.
+   *
+   * Returns a map of ClickUp task id → task, covering as many of `refs` as were
+   * found. Callers MUST fall back to `getTask` for anything missing (archived
+   * tasks, a list bigger than the page cap, or a task in an unknown list).
+   *
+   * NOTE: results are deliberately NOT shared with `getTask`'s cache — the
+   * bulk payload is only trusted for the snapshot fields (name/status/assignees/
+   * priority/tags/release version), not for `description`, which agent prompts
+   * read via `getTask`.
+   */
+  async getTaskSnapshots(
+    settings: AppSettings,
+    refs: Array<{ taskId: string; listId?: string }>,
+  ): Promise<ProviderResult<Record<string, TaskManagerTask>>> {
+    try {
+      // Below this, individual reads are cheaper than paging whole lists.
+      if (refs.length < MIN_BULK_SNAPSHOT_TASKS) return { success: true, data: {} };
+
+      const teamId = settings.clickupWorkspaceId;
+      if (!teamId) return { success: true, data: {} };
+
+      // Lists we know tracked tasks live in, plus the configured board lists as
+      // a fallback for tasks whose list hasn't been recorded yet.
+      const listIds = [
+        ...new Set(
+          [
+            ...refs.map((r) => r.listId),
+            settings.clickupListId,
+            settings.kanbanBacklogListId,
+          ]
+            .map((id) => (id || '').trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (listIds.length === 0) return { success: true, data: {} };
+
+      const cacheKey = `snapshots-${[...listIds].sort().join(',')}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) return { success: true, data: cached };
+
+      const params = new URLSearchParams();
+      params.set('include_closed', 'true');
+      params.set('subtasks', 'true');
+      for (const id of listIds) params.append('list_ids[]', id);
+
+      const wanted = new Set(refs.map((r) => r.taskId));
+      const byId: Record<string, TaskManagerTask> = {};
+      let pages = 0;
+
+      for (let page = 0; page < MAX_SNAPSHOT_PAGES; page++) {
+        const data = await clickUpFetch(
+          settings.clickupApiKey,
+          `/team/${teamId}/task?${params.toString()}&page=${page}`,
+        );
+        const tasks: any[] = data.tasks || [];
+        pages++;
+        for (const raw of tasks) {
+          if (wanted.has(raw.id)) byId[raw.id] = normalizeClickUpTask(raw);
+        }
+        // Every tracked task accounted for, or the last page reached.
+        if (Object.keys(byId).length >= wanted.size) break;
+        if (tasks.length < 100) break;
+      }
+
+      cacheSet(cacheKey, byId);
+      debugLog(
+        `[ClickUp] Snapshot batch: ${Object.keys(byId).length}/${wanted.size} task(s) in ${pages} request(s) across ${listIds.length} list(s)`,
+      );
+      return { success: true, data: byId };
+    } catch (error) {
+      // Non-fatal: callers fall back to per-task reads.
+      debugError('[ClickUp] Snapshot batch failed:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to batch-fetch tasks',
       };
     }
   }
@@ -318,6 +583,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
         method: 'PUT',
         body: JSON.stringify({ status }),
       });
+      invalidateTask(taskId);
       return { success: true, data };
     } catch (error) {
       return {
@@ -359,6 +625,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
       const data = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}/tag/${encodeURIComponent(tagName)}`, {
         method: 'POST',
       });
+      invalidateTask(taskId);
       return { success: true, data };
     } catch (error) {
       return {
@@ -373,6 +640,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
       const data = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}/tag/${encodeURIComponent(tagName)}`, {
         method: 'DELETE',
       });
+      invalidateTask(taskId);
       return { success: true, data };
     } catch (error) {
       return {
@@ -428,16 +696,11 @@ export class ClickUpProvider implements ITaskManagerProvider {
   async getTaskStatuses(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>> {
     try {
       // Fetch the task to get its list.id, then fetch that list for statuses
-      const task = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}`);
+      const task = await fetchTaskRaw(settings, taskId);
       const listId = task.list?.id;
       if (!listId) throw new Error('Could not determine task list');
 
-      const list = await clickUpFetch(settings.clickupApiKey, `/list/${listId}`);
-      const statuses: { name: string; color: string }[] = (list.statuses || []).map((s: any) => ({
-        name: s.status as string,
-        color: (s.color as string) || '#999',
-      }));
-      return { success: true, data: statuses };
+      return this.getListStatuses(settings, listId);
     } catch (error) {
       return {
         success: false,
@@ -452,10 +715,8 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (!teamId) throw new Error('Workspace ID not configured');
 
       const cacheKey = `members-${teamId}`;
-      const cached = taskCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        return { success: true, data: cached.data };
-      }
+      const cached = cacheGet(cacheKey, STATIC_CACHE_TTL);
+      if (cached) return { success: true, data: cached };
 
       const data = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}`);
       const members: WorkspaceMember[] = (data.team?.members || []).map((m: any) => {
@@ -481,7 +742,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
       // Sort alphabetically by username for stable dropdowns
       unique.sort((a, b) => a.username.localeCompare(b.username));
 
-      taskCache.set(cacheKey, { data: unique, timestamp: Date.now() });
+      cacheSet(cacheKey, unique);
       return { success: true, data: unique };
     } catch (error) {
       return {
@@ -496,17 +757,15 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (!listId) throw new Error('List ID is required');
 
       const cacheKey = `list-statuses-${listId}`;
-      const cached = taskCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-        return { success: true, data: cached.data };
-      }
+      const cached = cacheGet(cacheKey, STATIC_CACHE_TTL);
+      if (cached) return { success: true, data: cached };
 
       const list = await clickUpFetch(settings.clickupApiKey, `/list/${listId}`);
       const statuses: { name: string; color: string }[] = (list.statuses || []).map((s: any) => ({
         name: s.status as string,
         color: (s.color as string) || '#999',
       }));
-      taskCache.set(cacheKey, { data: statuses, timestamp: Date.now() });
+      cacheSet(cacheKey, statuses);
       return { success: true, data: statuses };
     } catch (error) {
       return {
