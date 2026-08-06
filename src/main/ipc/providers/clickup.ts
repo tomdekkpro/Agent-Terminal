@@ -344,23 +344,30 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (cached) return { success: true, data: cached };
 
       const spacesRes = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/space?archived=false`);
-      const lists: TaskManagerList[] = [];
 
-      for (const space of spacesRes.spaces || []) {
-        // Folderless lists in this space
-        const folderlessRes = await clickUpFetch(settings.clickupApiKey, `/space/${space.id}/list?archived=false`);
-        for (const list of folderlessRes.lists || []) {
-          lists.push({ id: list.id, name: list.name, space: space.name });
-        }
-
-        // Folders → lists
-        const foldersRes = await clickUpFetch(settings.clickupApiKey, `/space/${space.id}/folder?archived=false`);
-        for (const folder of foldersRes.folders || []) {
-          for (const list of folder.lists || []) {
-            lists.push({ id: list.id, name: list.name, space: space.name, folder: folder.name });
+      // Folderless lists and folders for every space in parallel — walking
+      // them one request at a time made the first open of any list picker
+      // take (2 × spaces) round-trips back to back.
+      const spaces: any[] = spacesRes.spaces || [];
+      const perSpace = await Promise.all(
+        spaces.map(async (space: any) => {
+          const [folderlessRes, foldersRes] = await Promise.all([
+            clickUpFetch(settings.clickupApiKey, `/space/${space.id}/list?archived=false`),
+            clickUpFetch(settings.clickupApiKey, `/space/${space.id}/folder?archived=false`),
+          ]);
+          const spaceLists: TaskManagerList[] = [];
+          for (const list of folderlessRes.lists || []) {
+            spaceLists.push({ id: list.id, name: list.name, space: space.name });
           }
-        }
-      }
+          for (const folder of foldersRes.folders || []) {
+            for (const list of folder.lists || []) {
+              spaceLists.push({ id: list.id, name: list.name, space: space.name, folder: folder.name });
+            }
+          }
+          return spaceLists;
+        }),
+      );
+      const lists: TaskManagerList[] = perSpace.flat();
 
       cacheSet(cacheKey, lists);
       return { success: true, data: lists };
@@ -435,14 +442,32 @@ export class ClickUpProvider implements ITaskManagerProvider {
           allTasks = cached;
         } else {
           allTasks = [];
-          for (let p = 0; p < MAX_SEARCH_PAGES; p++) {
-            const data = await clickUpFetch(
-              settings.clickupApiKey,
-              `/list/${targetListId}/task?${params.toString()}&page=${p}`,
+          // Pages in parallel chunks (the rate gate caps real concurrency) —
+          // serial paging made the first text search wait out up to 10
+          // round-trips. A page under 100 tasks is the last one.
+          const PAGE_CHUNK = 5;
+          let lastPageSeen = false;
+          for (let start = 0; start < MAX_SEARCH_PAGES && !lastPageSeen; start += PAGE_CHUNK) {
+            const pageNums = Array.from(
+              { length: Math.min(PAGE_CHUNK, MAX_SEARCH_PAGES - start) },
+              (_, i) => start + i,
             );
-            const pageTasks = data.tasks || [];
-            allTasks.push(...pageTasks);
-            if (pageTasks.length === 0) break;
+            const pages = await Promise.all(
+              pageNums.map((p) =>
+                clickUpFetch(
+                  settings.clickupApiKey,
+                  `/list/${targetListId}/task?${params.toString()}&page=${p}`,
+                ),
+              ),
+            );
+            for (const data of pages) {
+              const pageTasks = data.tasks || [];
+              allTasks.push(...pageTasks);
+              if (pageTasks.length < 100) {
+                lastPageSeen = true;
+                break;
+              }
+            }
           }
           cacheSet(allCacheKey, allTasks);
         }

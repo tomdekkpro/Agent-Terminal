@@ -220,8 +220,20 @@ async function extractPRsFromComments(taskId: string): Promise<PRInfo[]> {
   return [];
 }
 
-/** Try all methods to find PRs: task fields first, then comments, then branch matching */
-async function findPRsForTask(task: { id: string; customId?: string; description?: string; name?: string }, projectPath?: string): Promise<PRInfo[]> {
+/**
+ * Try all methods to find PRs: task fields first, then comments, then branch/
+ * title matching against the open-PR list.
+ *
+ * `openPRs` is the result of ONE `fetchOpenPRMetadata` call shared by every
+ * task in the batch — this used to shell out to `gh pr list` up to four times
+ * PER TASK, which made the Code Review page take minutes to load once a dozen
+ * tasks sat in review. Pass `null` when gh is unavailable; branch matching and
+ * open-filtering are then skipped (comment/description PRs pass through).
+ */
+async function findPRsForTask(
+  task: { id: string; customId?: string; description?: string; name?: string },
+  openPRs: Map<number, PRMetadata> | null,
+): Promise<PRInfo[]> {
   const seen = new Set<number>();
   const results: PRInfo[] = [];
 
@@ -240,84 +252,29 @@ async function findPRsForTask(task: { id: string; customId?: string; description
   // 2. Check task comments
   addPRs(await extractPRsFromComments(task.id));
 
-  // 3. Try gh CLI search — match task custom ID in PR title or branch name
-  if (projectPath && task.customId) {
-    try {
-      try {
-        const searchResult = await ghExec(
-          `gh pr list --search "${task.customId}" --state open --json number,url,headRefName,title --limit 10`,
-          projectPath,
-        );
-        const searchPrs = JSON.parse(searchResult);
-        const taskIdLower = task.customId.toLowerCase();
-        for (const pr of searchPrs) {
-          if (
-            (pr.title || '').toLowerCase().includes(taskIdLower) ||
-            (pr.headRefName || '').toLowerCase().includes(taskIdLower)
-          ) {
-            addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
-          }
-        }
-      } catch {
-        // search flag might fail, fall through to full list scan
+  if (openPRs) {
+    // 3. Match the custom ID (e.g. DP2-1234) against open PR titles and branch
+    //    names, and the internal task id against branches (e.g. task/86d28ttjq).
+    const customLower = task.customId?.toLowerCase();
+    const sanitizedId = task.customId?.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    const internalLower = task.id.toLowerCase();
+    for (const [prNumber, meta] of openPRs) {
+      const branch = (meta.branch || '').toLowerCase();
+      const title = (meta.title || '').toLowerCase();
+      const matchesCustomId =
+        !!customLower && !!sanitizedId &&
+        (branch.includes(customLower) || branch.includes(sanitizedId) ||
+          title.includes(customLower) || title.includes(sanitizedId));
+      if (matchesCustomId || branch.includes(internalLower)) {
+        addPRs([{ prNumber, prUrl: meta.url ?? null }]);
       }
-
-      // Fallback: scan all open PRs by branch name pattern
-      const prList = await ghExec(
-        `gh pr list --state open --json number,url,headRefName,title --limit 100`,
-        projectPath,
-      );
-      const prs = JSON.parse(prList);
-      const taskIdLower = task.customId.toLowerCase();
-      const sanitizedId = task.customId.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-      for (const pr of prs) {
-        const branch = (pr.headRefName || '').toLowerCase();
-        const title = (pr.title || '').toLowerCase();
-        if (
-          branch.includes(taskIdLower) || branch.includes(sanitizedId) ||
-          title.includes(taskIdLower) || title.includes(sanitizedId)
-        ) {
-          addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
-        }
-      }
-    } catch {
-      // gh CLI not available or not in a repo — skip
     }
-  }
 
-  // 4. Try matching by task internal ID in branch (e.g. task/86d28ttjq)
-  if (projectPath) {
-    try {
-      const prList = await ghExec(
-        `gh pr list --state open --json number,url,headRefName --limit 100`,
-        projectPath,
-      );
-      const prs = JSON.parse(prList);
-      const taskIdLower = task.id.toLowerCase();
-      for (const pr of prs) {
-        const branch = (pr.headRefName || '').toLowerCase();
-        if (branch.includes(taskIdLower)) {
-          addPRs([{ prNumber: pr.number, prUrl: pr.url }]);
-        }
-      }
-    } catch {
-      // skip
-    }
-  }
-
-  // Filter to only open PRs by checking against gh pr list
-  if (results.length > 0 && projectPath) {
-    try {
-      const openPrList = await ghExec(
-        `gh pr list --state open --json number --limit 200`,
-        projectPath,
-      );
-      const openNumbers = new Set<number>(JSON.parse(openPrList).map((p: any) => p.number));
-      const filtered = results.filter((pr) => openNumbers.has(pr.prNumber));
+    // 4. Keep only PRs that are still open
+    if (results.length > 0) {
+      const filtered = results.filter((pr) => openPRs.has(pr.prNumber));
       debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}, ${filtered.length} open: ${filtered.map((p) => `#${p.prNumber}`).join(', ')}`);
       return filtered;
-    } catch {
-      // gh CLI not available — return all and let the review handler skip closed ones
     }
   }
 
@@ -356,14 +313,16 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
 /** PR metadata shown in the review list (branch, base branch, author, title) */
 type PRMetadata = { url?: string; branch?: string; baseBranch?: string; author?: string; title?: string };
 
-/** Fetch metadata for all open PRs in one gh call, keyed by PR number */
-async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRMetadata>> {
-  const map = new Map<number, PRMetadata>();
+/** Fetch metadata for all open PRs in one gh call, keyed by PR number.
+ *  Returns null when gh is unavailable so callers can tell "no open PRs"
+ *  apart from "couldn't ask". */
+async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRMetadata> | null> {
   try {
     const json = await ghExec(
       `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit 200`,
       projectPath,
     );
+    const map = new Map<number, PRMetadata>();
     for (const pr of JSON.parse(json)) {
       map.set(pr.number, {
         url: pr.url,
@@ -373,10 +332,11 @@ async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRM
         title: pr.title,
       });
     }
+    return map;
   } catch {
     // gh CLI not available or not in a repo — list will just lack metadata
+    return null;
   }
-  return map;
 }
 
 /** Run AI code review on a PR diff using Claude CLI */
@@ -858,6 +818,10 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
     debugLog(`[CodeReview] Scheduler: found ${tasks.length} tasks`);
 
+    // One open-PR listing for the whole cycle — findPRsForTask matches
+    // against it in memory instead of shelling out to gh per task.
+    const cycleOpenPRs = await fetchOpenPRMetadata(projectPath);
+
     // 2. Review each task
     stopAllRequested = false;
     for (const task of tasks) {
@@ -894,7 +858,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       }
 
       // Find all PRs for this task
-      const prs = await findPRsForTask(task, projectPath);
+      const prs = await findPRsForTask(task, cycleOpenPRs);
 
       // No PR found — ask for it via comment
       if (prs.length === 0) {
@@ -1096,12 +1060,15 @@ export function registerCodeReviewHandlers(
 
         const statuses = reviewStatuses || ['ready for review', 'in review', 'review'];
 
-        // Fetch tasks across every selected list, de-duplicating by task id
-        // (ClickUp allows a task to live in multiple lists).
+        // Fetch tasks across every selected list in parallel (the provider's
+        // rate gate caps concurrency), de-duplicating by task id (ClickUp
+        // allows a task to live in multiple lists).
+        const perList = await Promise.all(
+          targetListIds.map((lid) => fetchAllReviewTasks(settings, statuses, lid)),
+        );
         const seen = new Set<string>();
         const allTasks: TaskManagerTask[] = [];
-        for (const lid of targetListIds) {
-          const listTasks = await fetchAllReviewTasks(settings, statuses, lid);
+        for (const listTasks of perList) {
           for (const task of listTasks) {
             if (!seen.has(task.id)) {
               seen.add(task.id);
@@ -1129,38 +1096,42 @@ export function registerCodeReviewHandlers(
         // Each task contains a prs array with all its open PRs
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
 
-        // Fetch metadata (branch, base branch, author) for all open PRs in one gh call
+        // Fetch metadata (branch, base branch, author) for all open PRs in one
+        // gh call — findPRsForTask matches against it in memory, and each
+        // task's remaining comment lookup runs in parallel behind the
+        // provider's rate gate.
         const prMeta = effectiveProjectPath
           ? await fetchOpenPRMetadata(effectiveProjectPath)
-          : new Map();
+          : null;
 
-        const items: CodeReviewItem[] = [];
-        for (const task of filteredTasks) {
-          const foundPRs = await findPRsForTask(task, effectiveProjectPath);
-          items.push({
-            taskId: task.id,
-            taskName: task.name,
-            taskUrl: task.url,
-            customId: task.customId,
-            prNumber: foundPRs.length === 1 ? foundPRs[0].prNumber : undefined,
-            prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
-            status: 'pending' as const,
-            findings: [],
-            prs: foundPRs.map((pr) => {
-              const meta = prMeta.get(pr.prNumber);
-              return {
-                prNumber: pr.prNumber,
-                prUrl: pr.prUrl ?? meta?.url ?? undefined,
-                prTitle: meta?.title,
-                prBranch: meta?.branch,
-                prBaseBranch: meta?.baseBranch,
-                prAuthor: meta?.author,
-                status: 'pending' as const,
-                findings: [],
-              };
-            }),
-          });
-        }
+        const items: CodeReviewItem[] = await Promise.all(
+          filteredTasks.map(async (task) => {
+            const foundPRs = await findPRsForTask(task, prMeta);
+            return {
+              taskId: task.id,
+              taskName: task.name,
+              taskUrl: task.url,
+              customId: task.customId,
+              prNumber: foundPRs.length === 1 ? foundPRs[0].prNumber : undefined,
+              prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
+              status: 'pending' as const,
+              findings: [],
+              prs: foundPRs.map((pr) => {
+                const meta = prMeta?.get(pr.prNumber);
+                return {
+                  prNumber: pr.prNumber,
+                  prUrl: pr.prUrl ?? meta?.url ?? undefined,
+                  prTitle: meta?.title,
+                  prBranch: meta?.branch,
+                  prBaseBranch: meta?.baseBranch,
+                  prAuthor: meta?.author,
+                  status: 'pending' as const,
+                  findings: [],
+                };
+              }),
+            };
+          }),
+        );
 
         return { success: true, data: items };
       } catch (error) {
