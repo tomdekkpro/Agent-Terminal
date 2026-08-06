@@ -16,6 +16,24 @@ const MAX_CACHE_ENTRIES = 500;
 // per-task reads it replaces, and small boards skip batching entirely.
 const MAX_SNAPSHOT_PAGES = 15;
 const MIN_BULK_SNAPSHOT_TASKS = 5;
+// After the first full page-through, snapshot refreshes only ask ClickUp for
+// tasks updated since the last sync (usually zero or one small page) and serve
+// everything else from the store below. A periodic full resync catches
+// anything the incremental filter can miss (e.g. tasks moved between lists).
+const SNAPSHOT_FULL_RESYNC_MS = 15 * 60_000;
+// Overlap on the date_updated_gt watermark to absorb clock skew between this
+// machine and ClickUp's servers.
+const SNAPSHOT_WATERMARK_OVERLAP_MS = 60_000;
+
+type SnapshotStore = {
+  byId: Map<string, TaskManagerTask>;
+  /** Start time of the last successful sync — next incremental watermark. */
+  lastSyncMs: number;
+  /** When the last full page-through ran. */
+  fullSyncMs: number;
+};
+/** Keyed by the sorted list-id set the snapshot covers. */
+const snapshotStores = new Map<string, SnapshotStore>();
 
 // ─── Rate limiting ──────────────────────────────────────────────────────────
 // ClickUp enforces a per-token limit of 100 requests/minute on Free/Unlimited/
@@ -27,6 +45,10 @@ const MIN_BULK_SNAPSHOT_TASKS = 5;
 // token bucket + concurrency gate, and a 429 pauses ALL traffic until the window
 // the API told us about has passed.
 const REQUEST_BUDGET = 90; // headroom under the 100/min floor
+// Background pollers (snapshot refresh, schedulers) may not spend the last
+// slice of the budget — it is reserved so a user click never has to wait a
+// whole window because polling drained the bucket first.
+const BACKGROUND_BUDGET = 60;
 const BUDGET_WINDOW_MS = 60_000;
 const MAX_CONCURRENT = 4;
 const MAX_RETRIES = 3;
@@ -35,14 +57,17 @@ const MAX_BACKOFF_MS = 60_000;
 let windowStart = 0;
 let windowCount = 0;
 let inFlight = 0;
-const concurrencyWaiters: (() => void)[] = [];
+// Interactive requests (a user opening a task, dragging a status) always jump
+// ahead of queued background traffic.
+const interactiveWaiters: (() => void)[] = [];
+const backgroundWaiters: (() => void)[] = [];
 /** Set when the API (or its rate-limit headers) tells us to hold off. */
 let pausedUntil = 0;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
 /** Blocks until it is this caller's turn to issue a request. */
-async function acquireSlot(): Promise<void> {
+async function acquireSlot(background: boolean): Promise<void> {
   for (;;) {
     const now = Date.now();
     if (pausedUntil > now) {
@@ -53,12 +78,14 @@ async function acquireSlot(): Promise<void> {
       windowStart = now;
       windowCount = 0;
     }
-    if (windowCount >= REQUEST_BUDGET) {
+    if (windowCount >= (background ? BACKGROUND_BUDGET : REQUEST_BUDGET)) {
       await sleep(windowStart + BUDGET_WINDOW_MS - now);
       continue;
     }
     if (inFlight >= MAX_CONCURRENT) {
-      await new Promise<void>((resolve) => concurrencyWaiters.push(resolve));
+      await new Promise<void>((resolve) =>
+        (background ? backgroundWaiters : interactiveWaiters).push(resolve),
+      );
       continue;
     }
     windowCount++;
@@ -69,7 +96,7 @@ async function acquireSlot(): Promise<void> {
 
 function releaseSlot(): void {
   inFlight--;
-  concurrencyWaiters.shift()?.();
+  (interactiveWaiters.shift() || backgroundWaiters.shift())?.();
 }
 
 /** How long to wait after a 429, from Retry-After / X-RateLimit-Reset, else backoff. */
@@ -104,26 +131,36 @@ function syncBudgetFromHeaders(response: Response): void {
 /** Concurrent GETs for the same endpoint share one request instead of racing. */
 const inflightGets = new Map<string, Promise<any>>();
 
-async function clickUpFetch(apiKey: string, endpoint: string, options: RequestInit = {}) {
+async function clickUpFetch(
+  apiKey: string,
+  endpoint: string,
+  options: RequestInit = {},
+  background = false,
+) {
   if (!apiKey) throw new Error('ClickUp API key not configured');
 
   const method = (options.method || 'GET').toUpperCase();
-  if (method !== 'GET') return sendRequest(apiKey, endpoint, options);
+  if (method !== 'GET') return sendRequest(apiKey, endpoint, options, background);
 
   const key = `${apiKey}:${endpoint}`;
   const existing = inflightGets.get(key);
   if (existing) return existing;
 
-  const promise = sendRequest(apiKey, endpoint, options).finally(() => {
+  const promise = sendRequest(apiKey, endpoint, options, background).finally(() => {
     inflightGets.delete(key);
   });
   inflightGets.set(key, promise);
   return promise;
 }
 
-async function sendRequest(apiKey: string, endpoint: string, options: RequestInit): Promise<any> {
+async function sendRequest(
+  apiKey: string,
+  endpoint: string,
+  options: RequestInit,
+  background: boolean,
+): Promise<any> {
   for (let attempt = 0; ; attempt++) {
-    await acquireSlot();
+    await acquireSlot(background);
 
     let response: Response;
     const controller = new AbortController();
@@ -465,9 +502,11 @@ export class ClickUpProvider implements ITaskManagerProvider {
    *
    * One request per task blows the 100/min token budget on any board with ~100
    * tracked tasks, so this uses the list-scoped "filtered team tasks" endpoint
-   * (100 tasks/page, `list_ids[]` accepts several lists at once) and stops as
-   * soon as every wanted task has been seen. `task_ids[]` is not supported by
-   * the API, hence the list-then-match approach.
+   * (100 tasks/page, `list_ids[]` accepts several lists at once). `task_ids[]`
+   * is not supported by the API, hence the list-then-match approach. After the
+   * first full page-through the result is kept in a persistent store and later
+   * calls only fetch tasks updated since the last sync (`date_updated_gt`) —
+   * normally a single small request — merging them over the stored snapshots.
    *
    * Returns a map of ClickUp task id → task, covering as many of `refs` as were
    * found. Callers MUST fall back to `getTask` for anything missing (archived
@@ -504,39 +543,70 @@ export class ClickUpProvider implements ITaskManagerProvider {
       ];
       if (listIds.length === 0) return { success: true, data: {} };
 
-      const cacheKey = `snapshots-${[...listIds].sort().join(',')}`;
+      const storeKey = [...listIds].sort().join(',');
+      const cacheKey = `snapshots-${storeKey}`;
       const cached = cacheGet(cacheKey);
       if (cached) return { success: true, data: cached };
 
       const params = new URLSearchParams();
       params.set('include_closed', 'true');
       params.set('subtasks', 'true');
+      // Most-recently-updated first — tracked board tasks are the active ones,
+      // so a full sync usually covers them all within a page or two.
+      params.set('order_by', 'updated');
       for (const id of listIds) params.append('list_ids[]', id);
 
       const wanted = new Set(refs.map((r) => r.taskId));
-      const byId: Record<string, TaskManagerTask> = {};
+      const syncStart = Date.now();
+      const store = snapshotStores.get(storeKey);
+      const fullSync = !store || syncStart - store.fullSyncMs >= SNAPSHOT_FULL_RESYNC_MS;
+      if (!fullSync) {
+        params.set(
+          'date_updated_gt',
+          String(Math.max(0, store.lastSyncMs - SNAPSHOT_WATERMARK_OVERLAP_MS)),
+        );
+      }
+
+      // Full sync rebuilds the store; incremental merges updates into it, so
+      // unchanged tasks keep serving their last-known snapshot with zero
+      // additional requests.
+      const byId = fullSync ? new Map<string, TaskManagerTask>() : store.byId;
       let pages = 0;
 
       for (let page = 0; page < MAX_SNAPSHOT_PAGES; page++) {
         const data = await clickUpFetch(
           settings.clickupApiKey,
           `/team/${teamId}/task?${params.toString()}&page=${page}`,
+          {},
+          true, // background — never starve interactive requests
         );
         const tasks: any[] = data.tasks || [];
         pages++;
         for (const raw of tasks) {
-          if (wanted.has(raw.id)) byId[raw.id] = normalizeClickUpTask(raw);
+          byId.set(raw.id, normalizeClickUpTask(raw));
         }
-        // Every tracked task accounted for, or the last page reached.
-        if (Object.keys(byId).length >= wanted.size) break;
+        // Last page reached, or (on a full sync) every tracked task seen.
         if (tasks.length < 100) break;
+        if (fullSync && [...wanted].every((id) => byId.has(id))) break;
       }
 
-      cacheSet(cacheKey, byId);
+      snapshotStores.set(storeKey, {
+        byId,
+        lastSyncMs: syncStart,
+        fullSyncMs: fullSync ? syncStart : store.fullSyncMs,
+      });
+
+      const result: Record<string, TaskManagerTask> = {};
+      for (const id of wanted) {
+        const hit = byId.get(id);
+        if (hit) result[id] = hit;
+      }
+
+      cacheSet(cacheKey, result);
       debugLog(
-        `[ClickUp] Snapshot batch: ${Object.keys(byId).length}/${wanted.size} task(s) in ${pages} request(s) across ${listIds.length} list(s)`,
+        `[ClickUp] Snapshot ${fullSync ? 'full' : 'incremental'} sync: ${Object.keys(result).length}/${wanted.size} task(s) in ${pages} request(s) across ${listIds.length} list(s)`,
       );
-      return { success: true, data: byId };
+      return { success: true, data: result };
     } catch (error) {
       // Non-fatal: callers fall back to per-task reads.
       debugError('[ClickUp] Snapshot batch failed:', error);
