@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, TaskManagerTask } from '../../shared/types';
+import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewSeverity, TaskManagerTask } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
@@ -221,8 +221,10 @@ async function extractPRsFromComments(taskId: string): Promise<PRInfo[]> {
 }
 
 /**
- * Try all methods to find PRs: task fields first, then comments, then branch/
- * title matching against the open-PR list.
+ * Try all methods to find PRs, cheapest first: task fields, then branch/title
+ * matching against the open-PR list, and only then the task's comment thread.
+ * The first two are pure in-memory work, so a task whose PR is named in its
+ * description or matched by branch never costs a ClickUp request at all.
  *
  * `openPRs` is the result of ONE `fetchOpenPRMetadata` call shared by every
  * task in the batch — this used to shell out to `gh pr list` up to four times
@@ -232,7 +234,7 @@ async function extractPRsFromComments(taskId: string): Promise<PRInfo[]> {
  */
 async function findPRsForTask(
   task: { id: string; customId?: string; description?: string; name?: string },
-  openPRs: Map<number, PRMetadata> | null,
+  openPRs: OpenPRList | null,
 ): Promise<PRInfo[]> {
   const seen = new Set<number>();
   const results: PRInfo[] = [];
@@ -246,19 +248,17 @@ async function findPRsForTask(
     }
   }
 
-  // 1. Check task name + description
+  // 1. Check task name + description — already in memory, costs nothing.
   addPRs(extractPRsFromTask(task));
 
-  // 2. Check task comments
-  addPRs(await extractPRsFromComments(task.id));
-
+  // 2. Match the custom ID (e.g. DP2-1234) against open PR titles and branch
+  //    names, and the internal task id against branches (e.g. task/86d28ttjq).
+  //    Also free: one `gh pr list` is shared by the whole batch.
   if (openPRs) {
-    // 3. Match the custom ID (e.g. DP2-1234) against open PR titles and branch
-    //    names, and the internal task id against branches (e.g. task/86d28ttjq).
     const customLower = task.customId?.toLowerCase();
     const sanitizedId = task.customId?.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
     const internalLower = task.id.toLowerCase();
-    for (const [prNumber, meta] of openPRs) {
+    for (const [prNumber, meta] of openPRs.byNumber) {
       const branch = (meta.branch || '').toLowerCase();
       const title = (meta.title || '').toLowerCase();
       const matchesCustomId =
@@ -269,13 +269,23 @@ async function findPRsForTask(
         addPRs([{ prNumber, prUrl: meta.url ?? null }]);
       }
     }
+  }
 
-    // 4. Keep only PRs that are still open
-    if (results.length > 0) {
-      const filtered = results.filter((pr) => openPRs.has(pr.prNumber));
-      debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}, ${filtered.length} open: ${filtered.map((p) => `#${p.prNumber}`).join(', ')}`);
-      return filtered;
-    }
+  // 3. Only when neither turned anything up is the comment thread worth
+  //    reading — that's an uncached ClickUp round-trip per task, and it used to
+  //    run for every task even when the PR was already known.
+  if (results.length === 0) {
+    addPRs(await extractPRsFromComments(task.id));
+  }
+
+  // 4. Keep only PRs that are still open. Skipped when the listing was
+  //    truncated at OPEN_PR_LIMIT — there, a PR missing from `byNumber` may
+  //    simply be past the cap, and dropping it would leave the task showing
+  //    "No open PR found" even though the PR is open.
+  if (openPRs?.complete && results.length > 0) {
+    const filtered = results.filter((pr) => openPRs.byNumber.has(pr.prNumber));
+    debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id}, ${filtered.length} open: ${filtered.map((p) => `#${p.prNumber}`).join(', ')}`);
+    return filtered;
   }
 
   if (results.length > 0) {
@@ -313,18 +323,36 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
 /** PR metadata shown in the review list (branch, base branch, author, title) */
 type PRMetadata = { url?: string; branch?: string; baseBranch?: string; author?: string; title?: string };
 
+/** The open-PR listing plus whether it covers every open PR in the repo.
+ *  `complete` is false when the repo has more open PRs than OPEN_PR_LIMIT, in
+ *  which case absence from `byNumber` does NOT prove a PR is closed. */
+type OpenPRList = { byNumber: Map<number, PRMetadata>; complete: boolean };
+
+/** gh pages the GitHub API 100 at a time, so this is the main cost of the
+ *  listing. 200 covers the recently-touched PRs that tasks in review point at. */
+const OPEN_PR_LIMIT = 200;
+
+/** `gh pr list` is a ~2s shell round-trip and the same listing serves every
+ *  task in a load, a Refresh click and the scheduler cycle behind it. */
+const OPEN_PR_CACHE_TTL = 30_000;
+const openPRCache = new Map<string, { list: OpenPRList; timestamp: number }>();
+
 /** Fetch metadata for all open PRs in one gh call, keyed by PR number.
  *  Returns null when gh is unavailable so callers can tell "no open PRs"
  *  apart from "couldn't ask". */
-async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRMetadata> | null> {
+async function fetchOpenPRMetadata(projectPath: string): Promise<OpenPRList | null> {
+  const hit = openPRCache.get(projectPath);
+  if (hit && Date.now() - hit.timestamp < OPEN_PR_CACHE_TTL) return hit.list;
+
   try {
     const json = await ghExec(
-      `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit 200`,
+      `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit ${OPEN_PR_LIMIT}`,
       projectPath,
     );
-    const map = new Map<number, PRMetadata>();
-    for (const pr of JSON.parse(json)) {
-      map.set(pr.number, {
+    const parsed = JSON.parse(json);
+    const byNumber = new Map<number, PRMetadata>();
+    for (const pr of parsed) {
+      byNumber.set(pr.number, {
         url: pr.url,
         branch: pr.headRefName,
         baseBranch: pr.baseRefName,
@@ -332,7 +360,13 @@ async function fetchOpenPRMetadata(projectPath: string): Promise<Map<number, PRM
         title: pr.title,
       });
     }
-    return map;
+    const complete = parsed.length < OPEN_PR_LIMIT;
+    if (!complete) {
+      debugLog(`[CodeReview] Open-PR listing hit the ${OPEN_PR_LIMIT} cap — skipping the open-only filter so PRs past the cap aren't dropped`);
+    }
+    const list: OpenPRList = { byNumber, complete };
+    openPRCache.set(projectPath, { list, timestamp: Date.now() });
+    return list;
   } catch {
     // gh CLI not available or not in a repo — list will just lack metadata
     return null;
@@ -375,6 +409,85 @@ async function fetchTaskContext(taskId: string): Promise<{ description: string; 
   return { description, comments };
 }
 
+const SEVERITIES: CodeReviewSeverity[] = ['critical', 'major', 'minor', 'suggestion'];
+
+/** Keys the model has been seen to use in place of the ones the prompt asks for. */
+const DESCRIPTION_KEYS = ['description', 'message', 'issue', 'problem', 'details', 'detail', 'summary', 'text'];
+const SUGGESTION_KEYS = ['suggestion', 'fix', 'recommendation', 'remediation'];
+const FILE_KEYS = ['file', 'path', 'filename'];
+
+/** First non-empty string among `keys`, trimmed. */
+function pickString(raw: any, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = raw?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Coerce one raw finding from the model into a CodeReviewFinding.
+ *
+ * The prompt asks for a fixed shape but nothing guarantees it, and the result
+ * goes straight into a ClickUp comment and a GitHub PR comment. An entry whose
+ * `description` was missing used to be posted as the literal text "undefined",
+ * and an unrecognised `severity` dropped out of every group in the formatted
+ * comment while still counting toward the "N issue(s) found" header.
+ *
+ * Returns null for an entry with no readable description — that tells the
+ * developer nothing, so it is worse than reporting no finding at all.
+ */
+function normalizeFinding(raw: any): CodeReviewFinding | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const description = pickString(raw, DESCRIPTION_KEYS);
+  if (!description) return null;
+
+  const rawSeverity = String(raw.severity ?? '').toLowerCase().trim();
+  const severity = (SEVERITIES as string[]).includes(rawSeverity)
+    ? (rawSeverity as CodeReviewSeverity)
+    : 'minor'; // unknown severity is still shown, just conservatively ranked
+
+  const lineNumber = Number(raw.line);
+
+  return {
+    severity,
+    file: pickString(raw, FILE_KEYS) ?? 'unknown',
+    line: Number.isFinite(lineNumber) && lineNumber > 0 ? Math.trunc(lineNumber) : undefined,
+    description,
+    suggestion: pickString(raw, SUGGESTION_KEYS),
+  };
+}
+
+/** Validate a parsed review payload, discarding findings we can't render. */
+function toReviewResult(result: any): { passed: boolean; findings: CodeReviewFinding[] } {
+  const rawFindings: any[] = Array.isArray(result.findings) ? result.findings : [];
+  const findings = rawFindings
+    .map(normalizeFinding)
+    .filter((f): f is CodeReviewFinding => f !== null);
+
+  const dropped = rawFindings.length - findings.length;
+  if (dropped > 0) {
+    debugError(`[CodeReview] Discarded ${dropped} malformed finding(s) with no readable description`);
+  }
+
+  const passed = !!result.passed;
+  // Every finding was unusable but the reviewer still failed the PR. Say so
+  // plainly instead of posting a failure with an empty body.
+  if (!passed && findings.length === 0 && rawFindings.length > 0) {
+    return {
+      passed: false,
+      findings: [{
+        severity: 'minor',
+        file: 'PR',
+        description: `The reviewer flagged ${rawFindings.length} issue(s) but returned no readable description for any of them. Re-run the review.`,
+      }],
+    };
+  }
+
+  return { passed, findings };
+}
+
 /** Try multiple strategies to extract JSON from Claude's response */
 function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeReviewFinding[] } {
   const raw = stdout.trim();
@@ -383,7 +496,7 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
   try {
     const result = JSON.parse(raw);
     if (typeof result === 'object' && result !== null && 'passed' in result) {
-      return { passed: !!result.passed, findings: Array.isArray(result.findings) ? result.findings : [] };
+      return toReviewResult(result);
     }
   } catch { /* continue to next strategy */ }
 
@@ -393,7 +506,7 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
     try {
       const result = JSON.parse(fenceMatch[1].trim());
       if (typeof result === 'object' && result !== null && 'passed' in result) {
-        return { passed: !!result.passed, findings: Array.isArray(result.findings) ? result.findings : [] };
+        return toReviewResult(result);
       }
     } catch { /* continue to next strategy */ }
   }
@@ -406,7 +519,7 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
       try {
         const result = JSON.parse(match);
         if (typeof result === 'object' && result !== null && 'passed' in result) {
-          return { passed: !!result.passed, findings: Array.isArray(result.findings) ? result.findings : [] };
+          return toReviewResult(result);
         }
       } catch { /* try next match */ }
     }
@@ -417,7 +530,7 @@ function parseReviewJSON(stdout: string): { passed: boolean; findings: CodeRevie
   if (greedyMatch) {
     const result = JSON.parse(greedyMatch[0]);
     if (typeof result === 'object' && result !== null && 'passed' in result) {
-      return { passed: !!result.passed, findings: Array.isArray(result.findings) ? result.findings : [] };
+      return toReviewResult(result);
     }
   }
 
@@ -773,6 +886,49 @@ async function fetchAllReviewTasks(
   return all;
 }
 
+/**
+ * Fetch all review-status tasks across every selected list, de-duplicated
+ * (ClickUp allows a task to live in more than one list).
+ *
+ * Prefers the single `list_ids[]` query, which returns the whole set 100 at a
+ * time regardless of how many lists are selected. Per-list paging is kept as a
+ * fallback for workspaces where the team id isn't configured.
+ */
+async function fetchReviewTasks(
+  settings: AppSettings,
+  statuses: string[],
+  listIds: string[],
+): Promise<TaskManagerTask[]> {
+  const ids = [...new Set(listIds.map((id) => (id || '').trim()).filter(Boolean))];
+  if (ids.length === 0) return [];
+
+  let tasks: TaskManagerTask[] | null = null;
+
+  if (settings.clickupWorkspaceId) {
+    const bulk = await clickUpProvider.searchTasksInLists(settings, statuses, ids);
+    if (bulk.success) {
+      tasks = bulk.data;
+    } else {
+      debugError('[CodeReview] Multi-list fetch failed, falling back to per-list paging:', bulk.error);
+    }
+  }
+
+  if (!tasks) {
+    const perList = await Promise.all(ids.map((lid) => fetchAllReviewTasks(settings, statuses, lid)));
+    tasks = perList.flat();
+  }
+
+  const seen = new Set<string>();
+  const unique: TaskManagerTask[] = [];
+  for (const task of tasks) {
+    if (!seen.has(task.id)) {
+      seen.add(task.id);
+      unique.push(task);
+    }
+  }
+  return unique;
+}
+
 // ─── Auto-review: run a full cycle ───────────────────────────
 async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promise<void> {
   if (schedulerRunning) {
@@ -803,10 +959,15 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
   });
 
   try {
+    // One open-PR listing for the whole cycle, started alongside the task
+    // fetch — findPRsForTask matches against it in memory instead of shelling
+    // out to gh per task.
+    const cycleOpenPRsPromise = fetchOpenPRMetadata(projectPath);
+
     // 1. Fetch ALL reviewable tasks across pages (a single page caps at 100)
     let tasks: TaskManagerTask[];
     try {
-      tasks = await fetchAllReviewTasks(settings, statuses, settings.clickupListId);
+      tasks = await fetchReviewTasks(settings, statuses, [settings.clickupListId]);
     } catch (err) {
       debugError('[CodeReview] Scheduler: failed to fetch tasks:', err);
       return; // `finally` resets schedulerRunning
@@ -818,9 +979,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
     debugLog(`[CodeReview] Scheduler: found ${tasks.length} tasks`);
 
-    // One open-PR listing for the whole cycle — findPRsForTask matches
-    // against it in memory instead of shelling out to gh per task.
-    const cycleOpenPRs = await fetchOpenPRMetadata(projectPath);
+    const cycleOpenPRs = await cycleOpenPRsPromise;
 
     // 2. Review each task
     stopAllRequested = false;
@@ -1059,23 +1218,18 @@ export function registerCodeReviewHandlers(
         if (targetListIds.length === 0) return { success: false, error: 'No ClickUp list configured' };
 
         const statuses = reviewStatuses || ['ready for review', 'in review', 'review'];
+        const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
 
-        // Fetch tasks across every selected list in parallel (the provider's
-        // rate gate caps concurrency), de-duplicating by task id (ClickUp
-        // allows a task to live in multiple lists).
-        const perList = await Promise.all(
-          targetListIds.map((lid) => fetchAllReviewTasks(settings, statuses, lid)),
-        );
-        const seen = new Set<string>();
-        const allTasks: TaskManagerTask[] = [];
-        for (const listTasks of perList) {
-          for (const task of listTasks) {
-            if (!seen.has(task.id)) {
-              seen.add(task.id);
-              allTasks.push(task);
-            }
-          }
-        }
+        // Start the open-PR listing NOW rather than after the tasks land. It's
+        // an independent ~2s shell round-trip to GitHub, and running it after
+        // the ClickUp fetch simply added its latency to the total.
+        // fetchOpenPRMetadata resolves to null on failure, so this never
+        // rejects unhandled while the task fetch is in flight.
+        const prMetaPromise = effectiveProjectPath
+          ? fetchOpenPRMetadata(effectiveProjectPath)
+          : Promise.resolve(null);
+
+        const allTasks = await fetchReviewTasks(settings, statuses, targetListIds);
 
         // Filter out tasks that already have the reviewpass tag, or are flagged for manual review
         const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();
@@ -1092,17 +1246,11 @@ export function registerCodeReviewHandlers(
           return true;
         });
 
-        // Resolve PR info for each task (checks description, comments, and branch matching)
-        // Each task contains a prs array with all its open PRs
-        const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
-
-        // Fetch metadata (branch, base branch, author) for all open PRs in one
-        // gh call — findPRsForTask matches against it in memory, and each
-        // task's remaining comment lookup runs in parallel behind the
-        // provider's rate gate.
-        const prMeta = effectiveProjectPath
-          ? await fetchOpenPRMetadata(effectiveProjectPath)
-          : null;
+        // Resolve PR info for each task (checks description, branch matching,
+        // then comments as a fallback). Each task carries a prs array.
+        // The gh listing was kicked off above and has usually landed by now;
+        // findPRsForTask matches against it in memory.
+        const prMeta = await prMetaPromise;
 
         const items: CodeReviewItem[] = await Promise.all(
           filteredTasks.map(async (task) => {
@@ -1117,7 +1265,7 @@ export function registerCodeReviewHandlers(
               status: 'pending' as const,
               findings: [],
               prs: foundPRs.map((pr) => {
-                const meta = prMeta?.get(pr.prNumber);
+                const meta = prMeta?.byNumber.get(pr.prNumber);
                 return {
                   prNumber: pr.prNumber,
                   prUrl: pr.prUrl ?? meta?.url ?? undefined,

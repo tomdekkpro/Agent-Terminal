@@ -39,9 +39,10 @@ const INTERVAL_OPTIONS = [
 ];
 
 /** Render text that may contain inline `code` or ```code blocks``` */
-function RichText({ text, className }: { text: string; className?: string }) {
-  // Split on fenced code blocks (```...```) and inline code (`...`)
-  const parts = text.split(/(```[\s\S]*?```|`[^`]+`)/g);
+function RichText({ text, className }: { text?: string; className?: string }) {
+  // Findings ultimately come from model output, so tolerate a missing string
+  // rather than taking the whole view down with it.
+  const parts = String(text ?? '').split(/(```[\s\S]*?```|`[^`]+`)/g);
   return (
     <span className={className}>
       {parts.map((part, i) => {
@@ -67,7 +68,7 @@ function RichText({ text, className }: { text: string; className?: string }) {
 }
 
 function FindingCard({ finding }: { finding: CodeReviewFinding }) {
-  const config = SEVERITY_CONFIG[finding.severity];
+  const config = SEVERITY_CONFIG[finding.severity] || SEVERITY_CONFIG.minor;
   const Icon = config.icon;
 
   return (

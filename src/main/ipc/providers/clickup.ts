@@ -11,6 +11,8 @@ const CACHE_TTL = 30000;
 // every board render — cache it far longer than task data.
 const STATIC_CACHE_TTL = 5 * 60_000;
 const MAX_SEARCH_PAGES = 10;
+// Safety cap for the multi-list review fetch (3000 tasks across all lists).
+const MAX_REVIEW_PAGES = 30;
 const MAX_CACHE_ENTRIES = 500;
 // Snapshot batching: page cap keeps a huge list from costing more than the
 // per-task reads it replaces, and small boards skip batching entirely.
@@ -505,6 +507,61 @@ export class ClickUpProvider implements ITaskManagerProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to search tasks',
+      };
+    }
+  }
+
+  /**
+   * Fetch every task sitting in the given statuses across several lists at
+   * once, for the Code Review page.
+   *
+   * Paging each list separately costs at least one request per list — twelve
+   * selected lists is twelve requests, gated to four at a time, so three
+   * round-trips elapse before a single PR is looked up. The "filtered team
+   * tasks" endpoint accepts `list_ids[]`, so the same set comes back 100 at a
+   * time no matter how many lists it spans.
+   */
+  async searchTasksInLists(
+    settings: AppSettings,
+    statuses: string[],
+    listIds: string[],
+  ): Promise<ProviderResult<TaskManagerTask[]>> {
+    try {
+      const teamId = settings.clickupWorkspaceId;
+      if (!teamId) throw new Error('Workspace ID not configured');
+
+      const ids = [...new Set(listIds.map((id) => (id || '').trim()).filter(Boolean))];
+      if (ids.length === 0) throw new Error('No list ID configured');
+
+      const sortedIds = [...ids].sort();
+      const cacheKey = `review-tasks-${sortedIds.join(',')}-${[...statuses].sort().join(',')}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) return { success: true, data: cached.map(normalizeClickUpTask) };
+
+      const params = new URLSearchParams();
+      params.set('include_closed', 'false');
+      params.set('subtasks', 'true');
+      for (const s of statuses) params.append('statuses[]', s);
+      for (const id of ids) params.append('list_ids[]', id);
+
+      const all: any[] = [];
+      for (let page = 0; page < MAX_REVIEW_PAGES; page++) {
+        const data = await clickUpFetch(
+          settings.clickupApiKey,
+          `/team/${teamId}/task?${params.toString()}&page=${page}`,
+        );
+        const tasks: any[] = data.tasks || [];
+        all.push(...tasks);
+        if (tasks.length < 100) break;
+      }
+
+      cacheSet(cacheKey, all);
+      debugLog(`[ClickUp] Review fetch: ${all.length} task(s) across ${ids.length} list(s)`);
+      return { success: true, data: all.map(normalizeClickUpTask) };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch tasks across lists',
       };
     }
   }
