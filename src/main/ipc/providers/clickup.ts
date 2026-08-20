@@ -70,6 +70,13 @@ const BUDGET_WINDOW_MS = 60_000;
 // a single round-trip.
 const MAX_CONCURRENT = 8;
 const MAX_RETRIES = 3;
+// A user click must not sit through three 60s backoffs. Background pollers can
+// afford to wait out a full window; something a person is watching cannot, so
+// it retries once and then reports the limit instead of hanging for ~3 minutes.
+const INTERACTIVE_MAX_RETRIES = 1;
+// Longest an interactive caller will block waiting for the gate before giving
+// up with a clear message. Blocking beyond this reads as a frozen UI.
+const INTERACTIVE_MAX_WAIT_MS = 15_000;
 const MAX_BACKOFF_MS = 60_000;
 
 let windowStart = 0;
@@ -79,17 +86,41 @@ let inFlight = 0;
 // ahead of queued background traffic.
 const interactiveWaiters: (() => void)[] = [];
 const backgroundWaiters: (() => void)[] = [];
-/** Set when the API (or its rate-limit headers) tells us to hold off. */
+/** Hard pause: the API answered 429, so every caller must hold off — the limit
+ *  is per token and sending more would only earn another 429. */
 let pausedUntil = 0;
+/** Soft pause: the rate-limit headers say the window is nearly spent. Applies
+ *  to background traffic only, so the last requests in a window go to whatever
+ *  the user just clicked rather than to a poller. */
+let backgroundPausedUntil = 0;
+
+/** Thrown instead of blocking when an interactive caller would have to wait out
+ *  a rate-limit window. Carries a user-readable delay. */
+class RateLimitedError extends Error {
+  constructor(waitMs: number) {
+    super(
+      `ClickUp rate limit reached — too many requests in the last minute. Try again in ${Math.ceil(waitMs / 1000)}s.`,
+    );
+    this.name = 'RateLimitedError';
+  }
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
-/** Blocks until it is this caller's turn to issue a request. */
+/** Blocks until it is this caller's turn to issue a request.
+ *  Interactive callers give up with a RateLimitedError rather than block past
+ *  INTERACTIVE_MAX_WAIT_MS; background callers wait as long as it takes. */
 async function acquireSlot(background: boolean): Promise<void> {
+  const deadline = background ? Infinity : Date.now() + INTERACTIVE_MAX_WAIT_MS;
   for (;;) {
     const now = Date.now();
-    if (pausedUntil > now) {
-      await sleep(pausedUntil - now);
+    // A 429 holds everyone; the pre-emptive header warning holds pollers only.
+    const waitUntil = background
+      ? Math.max(pausedUntil, backgroundPausedUntil)
+      : pausedUntil;
+    if (waitUntil > now) {
+      if (waitUntil > deadline) throw new RateLimitedError(waitUntil - now);
+      await sleep(waitUntil - now);
       continue;
     }
     if (now - windowStart >= BUDGET_WINDOW_MS) {
@@ -97,7 +128,9 @@ async function acquireSlot(background: boolean): Promise<void> {
       windowCount = 0;
     }
     if (windowCount >= (background ? BACKGROUND_BUDGET : REQUEST_BUDGET)) {
-      await sleep(windowStart + BUDGET_WINDOW_MS - now);
+      const until = windowStart + BUDGET_WINDOW_MS;
+      if (until > deadline) throw new RateLimitedError(until - now);
+      await sleep(until - now);
       continue;
     }
     if (inFlight >= MAX_CONCURRENT) {
@@ -137,12 +170,15 @@ function syncBudgetFromHeaders(response: Response): void {
   const remaining = Number(response.headers.get('x-ratelimit-remaining'));
   if (!Number.isFinite(remaining)) return;
   if (remaining > 2) return;
-  // Nearly out — stop sending until the server's window rolls over.
+  // Nearly out. Hold back background traffic only — this is a warning, not a
+  // refusal, so the requests still left in the window belong to whatever the
+  // user is waiting on rather than to a poller. Draining can also be caused by
+  // something else using the same token, which we cannot see or control.
   const reset = Number(response.headers.get('x-ratelimit-reset'));
   const until = Number.isFinite(reset) && reset > 0 ? reset * 1000 + 500 : Date.now() + 5000;
-  if (until > pausedUntil) {
-    pausedUntil = Math.min(until, Date.now() + MAX_BACKOFF_MS);
-    debugLog(`[ClickUp] ${remaining} request(s) left in window — pausing ${Math.ceil((pausedUntil - Date.now()) / 1000)}s`);
+  if (until > backgroundPausedUntil) {
+    backgroundPausedUntil = Math.min(until, Date.now() + MAX_BACKOFF_MS);
+    debugLog(`[ClickUp] ${remaining} request(s) left in window — pausing background traffic ${Math.ceil((backgroundPausedUntil - Date.now()) / 1000)}s`);
   }
 }
 
@@ -202,13 +238,14 @@ async function sendRequest(
       const delay = resolveRetryDelay(response, attempt);
       // Hold every other caller too — the limit is per token, not per request.
       pausedUntil = Math.max(pausedUntil, Date.now() + delay);
-      if (attempt >= MAX_RETRIES) {
-        debugError(`[ClickUp] Rate limited on ${endpoint} — giving up after ${MAX_RETRIES} retries`);
-        throw new Error(
-          `ClickUp rate limit reached (429). Retried ${MAX_RETRIES} times — try again in ${Math.ceil(delay / 1000)}s.`,
-        );
+      // Interactive callers retry once, then report; three 60s backoffs behind
+      // a click is a three-minute freeze, which is worse than a clear error.
+      const maxRetries = background ? MAX_RETRIES : INTERACTIVE_MAX_RETRIES;
+      if (attempt >= maxRetries) {
+        debugError(`[ClickUp] Rate limited on ${endpoint} — giving up after ${maxRetries} retr${maxRetries === 1 ? 'y' : 'ies'}`);
+        throw new RateLimitedError(delay);
       }
-      debugLog(`[ClickUp] 429 on ${endpoint} — retrying in ${Math.ceil(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+      debugLog(`[ClickUp] 429 on ${endpoint} — retrying in ${Math.ceil(delay / 1000)}s (attempt ${attempt + 1}/${maxRetries})`);
       continue;
     }
 
@@ -595,12 +632,16 @@ export class ClickUpProvider implements ITaskManagerProvider {
       for (const id of ids) params.append('list_ids[]', id);
 
       // Pages in parallel chunks. Strictly serial paging cost one full
-      // round-trip per page before the next could start — with 165 tasks in
-      // review statuses that was two ~750ms requests back to back for a set
-      // that fits in one. A page under 100 tasks is the last one, so the chunk
-      // stops there and no further chunk is issued.
+      // round-trip per page before the next could start — two ~750ms requests
+      // back to back for a set that arrives in one.
+      //
+      // The chunk is deliberately 2, not larger: every page in a chunk is
+      // fired before any of them answers, so a chunk wider than the data costs
+      // requests that come back empty. Two covers 200 tasks in review statuses
+      // in a single round-trip, which is the realistic case; beyond that the
+      // next chunk is issued only because the previous one was genuinely full.
       const all: any[] = [];
-      const PAGE_CHUNK = 4;
+      const PAGE_CHUNK = 2;
       let lastPageSeen = false;
       for (let start = 0; start < MAX_REVIEW_PAGES && !lastPageSeen; start += PAGE_CHUNK) {
         const pageNums = Array.from(
@@ -618,7 +659,10 @@ export class ClickUpProvider implements ITaskManagerProvider {
         for (const data of pages) {
           const tasks: any[] = data.tasks || [];
           all.push(...tasks);
-          if (tasks.length < 100) {
+          // ClickUp states this outright; the length check is a fallback for
+          // endpoints/versions that omit the flag. Trusting `last_page` also
+          // avoids a needless extra chunk when a final page holds exactly 100.
+          if (data.last_page === true || tasks.length < 100) {
             lastPageSeen = true;
             break;
           }
