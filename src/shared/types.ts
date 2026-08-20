@@ -458,6 +458,15 @@ export interface ProjectSkill {
   agentProvider?: AgentProviderId;
   icon?: string;
   color?: string;
+  /** Where a disk-discovered skill came from. Absent for skills configured by
+   *  hand in project settings. */
+  source?: 'project' | 'user' | 'plugin';
+  /** Absolute path of the backing SKILL.md. The panel reads this directly
+   *  instead of reconstructing a path from the id, which only ever worked for
+   *  project-local skills. */
+  filePath?: string;
+  /** Owning plugin for `source: 'plugin'`, e.g. `dp` for `dp:ship`. */
+  pluginName?: string;
 }
 
 export interface Project {
