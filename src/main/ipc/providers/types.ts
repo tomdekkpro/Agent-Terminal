@@ -1,4 +1,12 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
+import type {
+  AppSettings,
+  TaskManagerTask,
+  TaskManagerList,
+  TaskSearchFilters,
+  TaskComment,
+  TaskCommentCursor,
+  TaskCommentThread,
+} from '../../../shared/types';
 
 export type ProviderResult<T> =
   | { success: true; data: T }
@@ -42,6 +50,28 @@ export interface ITaskManagerProvider {
   removeTag?(settings: AppSettings, taskId: string, tagName: string): Promise<ProviderResult<any>>;
 
   getComments?(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>>;
+
+  /** Normalized comment thread (oldest first) for the comments panel, paged
+   *  backwards through `before`. Distinct from getComments, which hands back
+   *  the provider's raw payload for the automation that greps it. */
+  getTaskComments?(
+    settings: AppSettings,
+    taskId: string,
+    opts?: { before?: TaskCommentCursor | null; background?: boolean; maxPages?: number },
+  ): Promise<ProviderResult<TaskCommentThread>>;
+
+  getCommentReplies?(
+    settings: AppSettings,
+    commentId: string,
+    opts?: { background?: boolean },
+  ): Promise<ProviderResult<TaskComment[]>>;
+
+  postCommentReply?(
+    settings: AppSettings,
+    commentId: string,
+    comment: string,
+    taskId?: string,
+  ): Promise<ProviderResult<any>>;
 
   getTaskStatuses?(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
 

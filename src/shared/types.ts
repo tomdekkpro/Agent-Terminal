@@ -104,6 +104,98 @@ export interface TaskManagerTask {
   provider: TaskManagerProvider;
 }
 
+// ─── Task comments (ClickUp thread) ───────────────────────────
+
+/** One run of comment content. ClickUp stores a comment as an array of these
+ *  blocks (rich text, @mentions, attachments), and `comment_text` is only a
+ *  flattened copy — rendering the blocks keeps links, mentions and images. */
+export interface TaskCommentBlock {
+  /** 'mention' covers @user, task references and task embeds — anything that
+   *  renders as a chip; 'attachment' covers files, pasted images and video
+   *  frames; 'divider' is a rule with no content. */
+  kind: 'text' | 'mention' | 'attachment' | 'divider';
+  /** Text run, or the mention's display name. */
+  text?: string;
+  /** Set when the run is a link (or the chip opens something). */
+  url?: string;
+  bold?: boolean;
+  italic?: boolean;
+  strike?: boolean;
+  underline?: boolean;
+  code?: boolean;
+  attachment?: {
+    id?: string;
+    title?: string;
+    url?: string;
+    thumbnailUrl?: string;
+    extension?: string;
+    isImage?: boolean;
+  };
+}
+
+export interface TaskCommentAuthor {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
+}
+
+/** A normalized comment from the task manager, provider-agnostic. */
+export interface TaskComment {
+  id: string;
+  /** Flattened plain text — used for search, copy, and the AI prompt. */
+  text: string;
+  blocks: TaskCommentBlock[];
+  user: TaskCommentAuthor;
+  createdAtMs: number;
+  resolved?: boolean;
+  assignee?: { id: string; username: string } | null;
+  /** Threaded replies hanging off this comment (loaded on demand). */
+  replyCount: number;
+  reactions?: Array<{ reaction: string; count: number }>;
+  /** True when the comment was posted by this app's own automation. */
+  bot?: boolean;
+  /** Set on replies — the comment they belong to. */
+  parentId?: string;
+}
+
+/** Cursor for the next (older) page of a comment thread. */
+export interface TaskCommentCursor {
+  start: number;
+  startId: string;
+}
+
+export interface TaskCommentThread {
+  /** Oldest first — the order the panel renders them in. */
+  comments: TaskComment[];
+  /** Pass back as `before` to fetch the next older page. */
+  older?: TaskCommentCursor | null;
+  hasMore: boolean;
+  /** The task-manager account this API key belongs to, so the UI can tell
+   *  the user's own comments from everyone else's. */
+  me?: { id: string; username: string } | null;
+}
+
+/** One AI-drafted reply offered in the comments panel. */
+export interface CommentSuggestion {
+  /** Short label for the angle taken, e.g. "Ask for repro steps". */
+  title: string;
+  text: string;
+}
+
+export type CommentAssistKind = 'suggest' | 'summarize';
+
+export interface CommentAssistResult {
+  kind: CommentAssistKind;
+  suggestions?: CommentSuggestion[];
+  /** Markdown digest for kind === 'summarize'. */
+  summary?: string;
+  /** Model output that could not be parsed as JSON — shown as-is. */
+  raw?: string;
+}
+
 /** Data sources a Dashboard Notice's AI run is allowed to use. */
 export type NoticeSource = 'clickup' | 'github' | 'web';
 

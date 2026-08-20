@@ -10,7 +10,9 @@ import { registerOutputCallback, unregisterOutputCallback, getAndClearSavedBuffe
 import { useSettingsStore } from '../../stores/settings-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
-import { cn } from '../../../shared/utils';
+import { cn, isLocalTaskId } from '../../../shared/utils';
+import { CommentsPanel } from '../comments';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 import { SkillsDropdown } from './SkillsDropdown';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 
@@ -514,6 +516,11 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const readyRef = useRef(false);
   const bufferRef = useRef<string[]>([]);
   const needsResumRef = useRef(terminal.needsResume ?? false);
+
+  // ClickUp comments drawer — slides over the terminal on the right so opening
+  // it never resizes the PTY mid-session.
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const taskCommentsAvailable = !!terminal.task && !isLocalTaskId(terminal.task.id) && !hideToolbar;
 
   // Drag and drop state
   const [isDragOver, setIsDragOver] = useState(false);
@@ -1464,6 +1471,22 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               </button>
             </>
           )}
+          {/* ClickUp comments */}
+          {taskCommentsAvailable && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setCommentsOpen((v) => !v); }}
+              className={cn(
+                'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                commentsOpen
+                  ? 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
+                  : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+              )}
+              title={commentsOpen ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              {!isSplit && 'Comments'}
+            </button>
+          )}
           {/* Changes toggle */}
           <button
             onClick={(e) => {
@@ -1493,6 +1516,27 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
         </div>
       </div>
+      )}
+
+      {/* Comments drawer — overlays the terminal instead of shrinking it, so
+          xterm keeps its geometry while the thread is open. */}
+      {commentsOpen && terminal.task && taskCommentsAvailable && (
+        <div className="absolute top-9 right-0 bottom-0 z-30 w-[420px] max-w-full flex shadow-2xl">
+          <CommentsPanel
+            fill
+            taskId={terminal.task.id}
+            taskLabel={terminal.task.customId || terminal.task.id}
+            taskName={terminal.task.name}
+            taskUrl={terminal.task.url}
+            projectPath={terminal.worktreePath || terminal.cwd}
+            onClose={() => setCommentsOpen(false)}
+            onSendToAgent={
+              terminal.isClaudeMode
+                ? (text) => sendAgentPrompt(terminal.id, text, { submit: false })
+                : undefined
+            }
+          />
+        </div>
       )}
 
       {/* Remote control dialog */}

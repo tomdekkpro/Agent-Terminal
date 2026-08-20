@@ -1,4 +1,13 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
+import type {
+  AppSettings,
+  TaskManagerTask,
+  TaskManagerList,
+  TaskSearchFilters,
+  TaskComment,
+  TaskCommentBlock,
+  TaskCommentCursor,
+  TaskCommentThread,
+} from '../../../shared/types';
 import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './types';
 import { debugLog, debugError } from '../../../shared/utils';
 import { logApiRequest } from '../../logging/api-log';
@@ -360,6 +369,214 @@ function cacheSet(key: string, data: any): void {
 /** Drop cached copies of a task after we write to it, so the next read is fresh. */
 function invalidateTask(taskId: string): void {
   taskCache.delete(`task-${taskId}`);
+}
+
+/** Drop every cached page of a task's comment thread. Posting a comment (or a
+ *  reply) changes the thread, and the paged reads below cache per cursor — so
+ *  clearing only the first page would leave a stale tail behind. */
+function invalidateComments(taskId: string): void {
+  for (const key of taskCache.keys()) {
+    if (key === `comments-${taskId}` || key.startsWith(`comments-${taskId}-`)) {
+      taskCache.delete(key);
+    }
+  }
+}
+
+// ─── Comment normalization ──────────────────────────────────────────────────
+// ClickUp keeps a comment twice: `comment_text` (flattened plain text) and
+// `comment` (an array of runs carrying links, @mentions and attachments). The
+// panel renders the runs, so both are kept — the flat text is what the AI
+// helpers and copy/quote actions use.
+
+/** Footers this app signs its own automated comments with. Used to tint bot
+ *  comments in the panel so a human reply is never confused for one. */
+const BOT_COMMENT_FOOTERS = [
+  '_automated fix attempt by agent terminal_',
+  '_automated by agent terminal_',
+  '_automated review by agent terminal_',
+  '_approved via agent terminal_',
+];
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif']);
+
+/** ClickUp pages comments 25 at a time and has no "total" — a full page means
+ *  there is probably an older one behind it. */
+const COMMENT_PAGE_SIZE = 25;
+/** How many pages one read may walk. A thread longer than this is paged into
+ *  the panel with "Load older" instead, so opening a task never turns into a
+ *  dozen requests against the shared ClickUp budget. */
+const MAX_COMMENT_PAGES = 3;
+
+/** ClickUp task URLs are addressable by id alone — enough to make a task
+ *  mention or embed clickable without spending a request to resolve it. */
+function clickUpTaskUrl(taskRef: string): string {
+  return `https://app.clickup.com/t/${taskRef}`;
+}
+
+function commentBlocks(raw: any): TaskCommentBlock[] {
+  const runs = Array.isArray(raw?.comment) ? raw.comment : [];
+  const blocks: TaskCommentBlock[] = [];
+
+  for (const run of runs) {
+    if (!run) continue;
+    const type = run.type || 'text';
+
+    // ── Media: uploaded files, pasted images, recorded video frames ─────────
+    const attach = run.attachment || (type === 'attachment' ? run : null);
+    if (attach && (attach.url || attach.thumbnail_medium || attach.title)) {
+      const extension = String(attach.extension || '').toLowerCase();
+      blocks.push({
+        kind: 'attachment',
+        attachment: {
+          id: attach.id ? String(attach.id) : undefined,
+          title: attach.title || attach.name || 'attachment',
+          url: attach.url,
+          thumbnailUrl: attach.thumbnail_medium || attach.thumbnail_small || undefined,
+          extension: extension || undefined,
+          isImage: IMAGE_EXTENSIONS.has(extension) || !!attach.thumbnail_medium,
+        },
+      });
+      continue;
+    }
+
+    if (type === 'image' && run.image) {
+      const img = run.image;
+      blocks.push({
+        kind: 'attachment',
+        attachment: {
+          id: img.id ? String(img.id) : undefined,
+          title: img.title || img.name || 'image',
+          url: img.url,
+          thumbnailUrl: img.thumbnail_medium || img.thumbnail_large || img.thumbnail_small || undefined,
+          extension: String(img.type || '').toLowerCase() || undefined,
+          isImage: true,
+        },
+      });
+      continue;
+    }
+
+    // A frame is an embedded recording (ClickUp Clip, Loom…). Its `text` is the
+    // raw asset URL, which is useless to read — show it as a link chip instead.
+    if (type === 'frame' && run.frame) {
+      blocks.push({
+        kind: 'attachment',
+        attachment: {
+          title: run.frame.service === 'clickup_video' ? 'Video clip' : (run.frame.service || 'Embed'),
+          url: run.frame.url || run.frame.src,
+          isImage: false,
+        },
+      });
+      continue;
+    }
+
+    if (type === 'divider') {
+      blocks.push({ kind: 'divider' });
+      continue;
+    }
+
+    // ── Chips: references to people and to other tasks ─────────────────────
+    if (type === 'task_mention' && run.task_mention?.task_id) {
+      blocks.push({
+        kind: 'mention',
+        text: `#${run.task_mention.task_id}`,
+        url: clickUpTaskUrl(run.task_mention.task_id),
+      });
+      continue;
+    }
+
+    if (type === 'task_embed' && run.task_embed?.taskId) {
+      blocks.push({
+        kind: 'mention',
+        text: `#${run.task_embed.taskId}`,
+        url: clickUpTaskUrl(run.task_embed.taskId),
+      });
+      continue;
+    }
+
+    // ── Unfurled links: bookmarks and previews carry the URL, not just text ─
+    const linkUrl = type === 'bookmark'
+      ? run.bookmark?.url
+      : type === 'link_preview'
+        ? run.link_preview?.url
+        : undefined;
+    if (linkUrl) {
+      blocks.push({ kind: 'text', text: run.text || linkUrl, url: linkUrl });
+      continue;
+    }
+
+    const text = typeof run.text === 'string' ? run.text : '';
+    if (!text) continue;
+
+    // A mention run carries the mentioned user; ClickUp writes its display name
+    // into `text` already, so it only needs different styling.
+    if (type === 'tag' || run.user) {
+      blocks.push({ kind: 'mention', text });
+      continue;
+    }
+
+    const attrs = run.attributes || {};
+    blocks.push({
+      kind: 'text',
+      text,
+      url: typeof attrs.link === 'string' ? attrs.link : undefined,
+      bold: !!attrs.bold,
+      italic: !!attrs.italic,
+      strike: !!attrs.strike,
+      underline: !!attrs.underline,
+      code: !!attrs.code || !!attrs['code-block'],
+    });
+  }
+
+  return blocks;
+}
+
+/** Flatten to plain text, preferring ClickUp's own `comment_text`. */
+function commentText(raw: any, blocks: TaskCommentBlock[]): string {
+  if (typeof raw?.comment_text === 'string' && raw.comment_text.trim()) {
+    return raw.comment_text;
+  }
+  return blocks
+    .map((b) => (b.kind === 'attachment' ? (b.attachment?.title || '') : b.text || ''))
+    .join('')
+    .trim();
+}
+
+function normalizeComment(raw: any, parentId?: string): TaskComment {
+  const blocks = commentBlocks(raw);
+  const text = commentText(raw, blocks);
+  const lower = text.toLowerCase();
+  const user = raw?.user || {};
+  return {
+    id: String(raw?.id ?? ''),
+    text,
+    blocks,
+    user: {
+      id: String(user.id ?? ''),
+      username: user.username || user.email || 'Unknown',
+      email: user.email || undefined,
+      initials: user.initials || undefined,
+      color: user.color || undefined,
+      profilePicture: user.profilePicture || undefined,
+    },
+    createdAtMs: Number(raw?.date) || 0,
+    resolved: !!raw?.resolved,
+    assignee: raw?.assignee
+      ? { id: String(raw.assignee.id ?? ''), username: raw.assignee.username || '' }
+      : null,
+    replyCount: Number(raw?.reply_count) || 0,
+    reactions: Array.isArray(raw?.reactions) && raw.reactions.length > 0
+      ? Object.entries(
+          raw.reactions.reduce((acc: Record<string, number>, r: any) => {
+            const key = r?.reaction || '';
+            if (!key) return acc;
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+          }, {}),
+        ).map(([reaction, count]) => ({ reaction, count: count as number }))
+      : undefined,
+    bot: BOT_COMMENT_FOOTERS.some((footer) => lower.includes(footer)),
+    parentId,
+  };
 }
 
 /** Resolve the "Release version" custom field to its display value. Handles
@@ -977,7 +1194,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
         method: 'POST',
         body: JSON.stringify({ comment_text: comment }),
       });
-      taskCache.delete(`comments-${taskId}`);
+      invalidateComments(taskId);
       return { success: true, data };
     } catch (error) {
       return {
@@ -1079,6 +1296,154 @@ export class ClickUpProvider implements ITaskManagerProvider {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch comments',
+      };
+    }
+  }
+
+  /** The ClickUp account this API key belongs to. Cached for the static TTL —
+   *  it never changes for a running app, and the comments panel asks for it on
+   *  every open to tell the user's own comments from everyone else's. */
+  private async getCurrentUser(settings: AppSettings): Promise<{ id: string; username: string } | null> {
+    try {
+      const cacheKey = 'current-user';
+      const cached = cacheGet(cacheKey, STATIC_CACHE_TTL);
+      if (cached) return cached;
+      const data = await clickUpFetch(settings.clickupApiKey, '/user');
+      const user = data?.user;
+      if (!user) return null;
+      const me = { id: String(user.id ?? ''), username: user.username || user.email || '' };
+      cacheSet(cacheKey, me);
+      return me;
+    } catch {
+      // Not knowing who "me" is only costs the own-comment highlight.
+      return null;
+    }
+  }
+
+  /**
+   * Read a task's comment thread, normalized and oldest-first.
+   *
+   * ClickUp hands back the 25 newest comments per request and pages backwards
+   * through `start`/`start_id` (the date + id of the oldest comment you already
+   * have). This walks up to MAX_COMMENT_PAGES of them in one call so a normal
+   * thread arrives complete in a single request, and reports `hasMore` with the
+   * cursor for anything older so the panel can fetch the tail on demand.
+   *
+   * `background` routes the read to the poller lane — the panel's periodic
+   * refresh must never spend budget a user click is waiting on.
+   */
+  async getTaskComments(
+    settings: AppSettings,
+    taskId: string,
+    opts?: { before?: TaskCommentCursor | null; background?: boolean; maxPages?: number },
+  ): Promise<ProviderResult<TaskCommentThread>> {
+    try {
+      const before = opts?.before || null;
+      const background = !!opts?.background;
+      const maxPages = Math.max(1, opts?.maxPages ?? MAX_COMMENT_PAGES);
+
+      const collected: TaskComment[] = [];
+      let cursor: TaskCommentCursor | null = before;
+      let hasMore = false;
+
+      for (let page = 0; page < maxPages; page++) {
+        const cacheKey = cursor
+          ? `comments-${taskId}-${cursor.start}-${cursor.startId}`
+          : `comments-${taskId}-head`;
+        let raw = cacheGet(cacheKey);
+        if (!raw) {
+          const query = cursor ? `?start=${cursor.start}&start_id=${encodeURIComponent(cursor.startId)}` : '';
+          const data = await clickUpFetch(
+            settings.clickupApiKey,
+            `/task/${taskId}/comment${query}`,
+            {},
+            background,
+          );
+          raw = Array.isArray(data?.comments) ? data.comments : [];
+          cacheSet(cacheKey, raw);
+        }
+
+        // ClickUp returns newest first; keep walking backwards in time.
+        for (const item of raw) collected.push(normalizeComment(item));
+
+        const oldest = raw[raw.length - 1];
+        const full = raw.length >= COMMENT_PAGE_SIZE && !!oldest;
+        cursor = full
+          ? { start: Number(oldest.date) || 0, startId: String(oldest.id ?? '') }
+          : null;
+        hasMore = full;
+        if (!full) break;
+      }
+
+      const me = await this.getCurrentUser(settings);
+
+      // Oldest first — the panel reads top-to-bottom like a chat.
+      collected.sort((a, b) => a.createdAtMs - b.createdAtMs);
+
+      return {
+        success: true,
+        data: { comments: collected, older: hasMore ? cursor : null, hasMore, me },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch comments',
+      };
+    }
+  }
+
+  /** Threaded replies hanging off one comment. ClickUp keeps these out of the
+   *  task-level list, so they are only fetched when a thread is expanded. */
+  async getCommentReplies(
+    settings: AppSettings,
+    commentId: string,
+    opts?: { background?: boolean },
+  ): Promise<ProviderResult<TaskComment[]>> {
+    try {
+      const cacheKey = `comment-replies-${commentId}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) return { success: true, data: cached };
+
+      const data = await clickUpFetch(
+        settings.clickupApiKey,
+        `/comment/${commentId}/reply`,
+        {},
+        !!opts?.background,
+      );
+      const replies = (Array.isArray(data?.comments) ? data.comments : [])
+        .map((item: any) => normalizeComment(item, commentId))
+        .sort((a: TaskComment, b: TaskComment) => a.createdAtMs - b.createdAtMs);
+      cacheSet(cacheKey, replies);
+      return { success: true, data: replies };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch replies',
+      };
+    }
+  }
+
+  /** Reply inside an existing comment thread rather than starting a new one.
+   *  `taskId` is only used to drop the task's cached pages (the reply bumps
+   *  its parent's reply_count). */
+  async postCommentReply(
+    settings: AppSettings,
+    commentId: string,
+    comment: string,
+    taskId?: string,
+  ): Promise<ProviderResult<any>> {
+    try {
+      const data = await clickUpFetch(settings.clickupApiKey, `/comment/${commentId}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ comment_text: comment }),
+      });
+      taskCache.delete(`comment-replies-${commentId}`);
+      if (taskId) invalidateComments(taskId);
+      return { success: true, data };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to post reply',
       };
     }
   }

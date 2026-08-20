@@ -22,6 +22,7 @@ import {
   GitCommitVertical,
   Search,
   Rocket,
+  MessageSquare,
 } from 'lucide-react';
 import type { KanbanTask, AgentProviderMeta, AgentProviderId, TaskManagerTask, TerminalTask } from '../../../shared/types';
 import { useTerminalStore, type Terminal } from '../../stores/terminal-store';
@@ -31,7 +32,8 @@ import { useKanbanStore, type AutoCodeLogEntry } from '../../stores/kanban-store
 import { TerminalPanel, ActionsDropdown } from '../terminal/TerminalPanel';
 import { ChangesSplitLayout, TaskPickerModal } from '../terminal/TerminalView';
 import { FilesPanel } from '../terminal/FilesPanel';
-import { cn } from '../../../shared/utils';
+import { CommentsPanel } from '../comments';
+import { cn, isLocalTaskId } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
 import { sendAgentPrompt } from '../../lib/send-agent-prompt';
@@ -585,8 +587,9 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     );
 
   const [isFullscreen, setIsFullscreen] = useState(true);
-  // Which side panel is open: docs repo files, project source tree, or none.
-  const [filesPanel, setFilesPanel] = useState<'docs' | 'project' | null>(null);
+  // Which side panel is open: the ClickUp comment thread, the docs repo files,
+  // the project source tree, or none. One slot — they compete for the same space.
+  const [rightPanel, setRightPanel] = useState<'comments' | 'docs' | 'project' | null>(null);
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
   const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
@@ -1149,6 +1152,9 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
   // attach a terminal / resume a session.
   const isAutoCoding = task.autoCodeState === 'coding';
 
+  // Comments live in ClickUp — a board-only task has no thread to show.
+  const isClickupLinked = task.provider !== 'local' && !isLocalTaskId(task.clickupTaskId);
+
   return (
     <div
       onClick={onClose}
@@ -1377,13 +1383,28 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                 <div className="h-5 w-px bg-[var(--border)] mx-1" />
               </>
             )}
-            {taskProject?.docsPath && (
+            {isClickupLinked && (
               <button
-                onClick={() => setFilesPanel((p) => (p === 'docs' ? null : 'docs'))}
-                title={filesPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
+                onClick={() => setRightPanel((p) => (p === 'comments' ? null : 'comments'))}
+                title={rightPanel === 'comments' ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
                 className={cn(
                   'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
-                  filesPanel === 'docs'
+                  rightPanel === 'comments'
+                    ? 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                Comments
+              </button>
+            )}
+            {taskProject?.docsPath && (
+              <button
+                onClick={() => setRightPanel((p) => (p === 'docs' ? null : 'docs'))}
+                title={rightPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  rightPanel === 'docs'
                     ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
                     : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
                 )}
@@ -1394,11 +1415,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             )}
             {taskProject?.path && (
               <button
-                onClick={() => setFilesPanel((p) => (p === 'project' ? null : 'project'))}
-                title={filesPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
+                onClick={() => setRightPanel((p) => (p === 'project' ? null : 'project'))}
+                title={rightPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
                 className={cn(
                   'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
-                  filesPanel === 'project'
+                  rightPanel === 'project'
                     ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
                     : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
                 )}
@@ -1508,22 +1529,39 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           </div>
           {/* Right-side files panel — browse the project's docs repo or its
               source tree. Drag files into the terminal to insert their path. */}
-          {filesPanel === 'docs' && taskProject?.docsPath && (
+          {rightPanel === 'comments' && isClickupLinked && (
+            <div className="shrink-0 min-h-0">
+              <CommentsPanel
+                taskId={task.clickupTaskId}
+                taskLabel={task.clickupCustomId || task.clickupTaskId}
+                taskName={task.clickupName}
+                taskUrl={task.clickupUrl}
+                projectPath={taskProject?.path}
+                onClose={() => setRightPanel(null)}
+                onSendToAgent={
+                  terminal?.isClaudeMode
+                    ? (text) => sendAgentPrompt(terminal.id, text, { submit: false })
+                    : undefined
+                }
+              />
+            </div>
+          )}
+          {rightPanel === 'docs' && taskProject?.docsPath && (
             <div className="shrink-0 min-h-0">
               <FilesPanel
                 docsPath={taskProject.docsPath}
                 label="Documents"
-                onClose={() => setFilesPanel(null)}
+                onClose={() => setRightPanel(null)}
               />
             </div>
           )}
-          {filesPanel === 'project' && taskProject?.path && (
+          {rightPanel === 'project' && taskProject?.path && (
             <div className="shrink-0 min-h-0">
               <FilesPanel
                 docsPath={taskProject.path}
                 label="Files"
                 enablePull={false}
-                onClose={() => setFilesPanel(null)}
+                onClose={() => setRightPanel(null)}
               />
             </div>
           )}

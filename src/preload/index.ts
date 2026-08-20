@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC_CHANNELS } from '../shared/constants';
-import type { TaskSearchFilters } from '../shared/types';
+import type {
+  AgentProviderId,
+  CommentAssistKind,
+  TaskCommentCursor,
+  TaskSearchFilters,
+} from '../shared/types';
 
 const electronAPI = {
   // Terminal
@@ -75,6 +80,22 @@ const electronAPI = {
   getTaskManagerTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK, taskId),
   createTaskManagerTask: (listId: string, data: any) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_CREATE_TASK, listId, data),
   postTaskComment: (taskId: string, comment: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_COMMENT, taskId, comment),
+  getTaskComments: (
+    taskId: string,
+    opts?: { before?: TaskCommentCursor | null; background?: boolean; maxPages?: number },
+  ) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_COMMENTS, taskId, opts),
+  getTaskCommentReplies: (commentId: string, opts?: { background?: boolean }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_COMMENT_REPLIES, commentId, opts),
+  postTaskCommentReply: (commentId: string, comment: string, taskId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_COMMENT_REPLY, commentId, comment, taskId),
+  taskCommentAssist: (req: {
+    taskId: string;
+    kind: CommentAssistKind;
+    draft?: string;
+    projectPath?: string;
+    provider?: AgentProviderId;
+    model?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_COMMENT_ASSIST, req),
   updateTaskStatus: (taskId: string, status: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_UPDATE_STATUS, taskId, status),
   postTaskTimeEntry: (taskId: string, startMs: number, durationMs: number, description?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_POST_TIME_ENTRY, taskId, startMs, durationMs, description),
