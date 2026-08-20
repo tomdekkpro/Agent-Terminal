@@ -6,6 +6,7 @@ import {
   Folder, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, Zap, FolderOpen, Rocket,
 } from 'lucide-react';
+import { isLocalTaskId } from '../../../shared/utils';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import { useSettingsStore } from '../../stores/settings-store';
@@ -640,28 +641,43 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       .catch(() => {});
   }, []);
 
-  // Refresh task status colors from API so tabs reflect current status
+  // Refresh task status colors so tabs reflect current status.
+  //
+  // This used to issue one /task/{id} per task-linked terminal on every tick.
+  // With 110 such terminals that was 110 requests a minute — more than the
+  // whole interactive budget, so it crowded out anything the user clicked and
+  // kept the token bucket permanently drained. One bulk read now covers the
+  // set, on the background lane, sharing its store with the Kanban refresh.
+  //
+  // Tasks the bulk read cannot see keep their current colour rather than
+  // triggering a per-task read, which is exactly the fan-out being removed.
   useEffect(() => {
-    const refresh = () => {
+    const refresh = async () => {
       const terms = useTerminalStore.getState().terminals;
-      for (const t of terms) {
-        if (!t.task) continue;
-        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
-          if (!res.success || !res.data) return;
-          const task = res.data;
-          const newStatus = task.status.name;
-          const newColor = task.status.color;
-          const newRelease = task.releaseVersion;
-          if (newStatus !== t.task!.status || newColor !== t.task!.statusColor || newRelease !== t.task!.releaseVersion) {
-            useTerminalStore.getState().updateTerminal(t.id, {
-              task: { ...t.task!, status: newStatus, statusColor: newColor, releaseVersion: newRelease },
-            });
-          }
-        }).catch(() => {});
+      const linked = terms.filter((t) => t.task && !isLocalTaskId(t.task.id));
+      if (linked.length === 0) return;
+
+      const res = await window.electronAPI
+        .getTaskManagerTaskSnapshots?.([...new Set(linked.map((t) => t.task!.id))])
+        .catch(() => null);
+      const snapshots = res?.success ? res.data : null;
+      if (!snapshots) return;
+
+      for (const t of linked) {
+        const task = snapshots[t.task!.id];
+        if (!task) continue;
+        const newStatus = task.status.name;
+        const newColor = task.status.color;
+        const newRelease = task.releaseVersion;
+        if (newStatus !== t.task!.status || newColor !== t.task!.statusColor || newRelease !== t.task!.releaseVersion) {
+          useTerminalStore.getState().updateTerminal(t.id, {
+            task: { ...t.task!, status: newStatus, statusColor: newColor, releaseVersion: newRelease },
+          });
+        }
       }
     };
-    refresh();
-    const iv = setInterval(refresh, 60_000);
+    void refresh();
+    const iv = setInterval(() => { void refresh(); }, 60_000);
     return () => clearInterval(iv);
   }, []);
 
@@ -1346,7 +1362,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         useTerminalStore.getState().updateTerminal(id, { skipPermissions: true });
       }
       // Send task context as first prompt if terminal is linked to a task
-      if (terminal.task) {
+      if (terminal.task && !isLocalTaskId(terminal.task.id)) {
         const taskId = terminal.task.id;
         window.electronAPI.getTaskManagerTask(taskId).then((taskResult: any) => {
           if (!taskResult.success || !taskResult.data) return;

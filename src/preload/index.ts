@@ -351,6 +351,8 @@ const electronAPI = {
   openExternal: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.OPEN_EXTERNAL, url),
   openPath: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.OPEN_PATH, filePath),
   getApiLogPath: () => ipcRenderer.invoke(IPC_CHANNELS.API_LOG_PATH),
+  getTaskManagerTaskSnapshots: (taskIds: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TASK_MANAGER_GET_TASK_SNAPSHOTS, taskIds),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

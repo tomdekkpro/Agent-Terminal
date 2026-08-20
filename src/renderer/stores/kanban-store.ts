@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { KanbanTask, KanbanTaskStatus, TaskManagerTask, TaskSearchFilters } from '../../shared/types';
 import { BACKLOG_SORT_API_PARAMS } from '../../shared/types';
+import { isLocalTaskId } from '../../shared/utils';
 import { useSettingsStore } from './settings-store';
 import { useTerminalStore } from './terminal-store';
 import { useProjectStore } from './project-store';
@@ -256,7 +257,13 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     if (settings.taskManagerProvider !== 'clickup') return 0;
 
     const terminals = useTerminalStore.getState().terminals;
-    const taskLinkedTerminals = terminals.filter((term) => term.task?.id);
+    // Local-only tasks have no ClickUp counterpart, so the import path below
+    // cannot resolve them — it would spend a request per boot to be told 401.
+    // A terminal whose local task was deleted from the board stays unlinked;
+    // silently recreating a card the user removed would be worse.
+    const taskLinkedTerminals = terminals.filter(
+      (term) => term.task?.id && !isLocalTaskId(term.task.id),
+    );
     if (taskLinkedTerminals.length === 0) return 0;
 
     const projects = useProjectStore.getState().projects;

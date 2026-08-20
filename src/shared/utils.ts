@@ -5,6 +5,17 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Prefix that marks a board task with no counterpart in the task manager.
+ *  Set by createLocalTask; see kanban-task-store. */
+export const LOCAL_TASK_ID_PREFIX = 'local:';
+
+/** True for a task that exists only on the local board. Sending one of these
+ *  to ClickUp is always a wasted request that comes back 401/404, so every
+ *  boundary that forwards a task id needs to check. */
+export function isLocalTaskId(taskId: string | undefined | null): boolean {
+  return !!taskId && taskId.startsWith(LOCAL_TASK_ID_PREFIX);
+}
+
 /** Parse a comma-separated list into a lowercased, trimmed Set (drops empties). */
 export function csvToLowerSet(csv: string | undefined): Set<string> {
   return new Set((csv || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));

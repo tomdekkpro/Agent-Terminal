@@ -48,6 +48,13 @@ export interface ITaskManagerProvider {
   getListStatuses?(settings: AppSettings, listId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
 
   getWorkspaceMembers?(settings: AppSettings): Promise<ProviderResult<WorkspaceMember[]>>;
+
+  /** Resolve many tasks in as few requests as possible, keyed by task id.
+   *  Tasks the bulk read cannot see are simply absent from the result. */
+  getTaskSnapshots?(
+    settings: AppSettings,
+    refs: Array<{ taskId: string; listId?: string }>,
+  ): Promise<ProviderResult<Record<string, TaskManagerTask>>>;
 }
 
 export interface WorkspaceMember {

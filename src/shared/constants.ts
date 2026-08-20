@@ -200,4 +200,5 @@ export const IPC_CHANNELS = {
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',
   API_LOG_PATH: 'app:api-log-path',
+  TASK_MANAGER_GET_TASK_SNAPSHOTS: 'task-manager:get-task-snapshots',
 } as const;
