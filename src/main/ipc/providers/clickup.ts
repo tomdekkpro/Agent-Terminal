@@ -366,6 +366,13 @@ async function fetchTaskRaw(settings: AppSettings, taskId: string): Promise<any>
   return data;
 }
 
+/** A custom task id as ClickUp renders it, e.g. DP2-21173. Requires the
+ *  `-<digits>` tail, so an ordinary search word can never match. */
+const CUSTOM_TASK_ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+/** A raw ClickUp task id, e.g. 86d28ttjq. Anchored on a leading digit so
+ *  ordinary words (which never start with one) cannot match. */
+const RAW_TASK_ID_RE = /^[0-9][0-9a-z]{5,11}$/;
+
 export class ClickUpProvider implements ITaskManagerProvider {
   async checkConnection(settings: AppSettings): Promise<ProviderResult<any>> {
     try {
@@ -518,7 +525,17 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (filters?.orderBy) params.set('order_by', filters.orderBy);
       if (filters?.reverse) params.set('reverse', 'true');
 
-      const hasQuery = !!query.trim();
+      const trimmedQuery = query.trim();
+      const hasQuery = !!trimmedQuery;
+
+      // An exact task id resolves in ONE request. The paged path below can only
+      // ever see the first MAX_SEARCH_PAGES * 100 tasks of a list, so on a list
+      // bigger than that, searching for an older task returned nothing at all
+      // even though the task existed. A direct read has no such horizon.
+      if (hasQuery) {
+        const direct = await this.lookupTaskById(settings, trimmedQuery);
+        if (direct) return { success: true, data: [direct] };
+      }
 
       // When there's a text query, fetch all pages (ClickUp has no server-side text search).
       // When just browsing/filtering, use single-page pagination.
@@ -595,6 +612,48 @@ export class ClickUpProvider implements ITaskManagerProvider {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to search tasks',
       };
+    }
+  }
+
+  /**
+   * Resolve a query that is itself a task id — custom (DP2-21173) or raw
+   * (86d28ttjq) — with a single read, bypassing the paged text search.
+   *
+   * Returns undefined when the query is not id-shaped or no such task exists,
+   * in which case the caller falls back to the paged scan. Both outcomes are
+   * cached: a typed-in id arrives one keystroke at a time, and every prefix
+   * would otherwise re-issue its own failing lookup.
+   */
+  private async lookupTaskById(
+    settings: AppSettings,
+    query: string,
+  ): Promise<TaskManagerTask | undefined> {
+    const isCustom = CUSTOM_TASK_ID_RE.test(query);
+    if (!isCustom && !RAW_TASK_ID_RE.test(query)) return undefined;
+
+    const teamId = settings.clickupWorkspaceId;
+    // Custom ids are only resolvable with a workspace to scope them to.
+    if (isCustom && !teamId) return undefined;
+
+    const cacheKey = `id-lookup-${isCustom ? `${teamId}:` : ''}${query}`;
+    const cached = cacheGet(cacheKey);
+    if (cached !== undefined) return cached === null ? undefined : cached;
+
+    const endpoint = isCustom
+      ? `/task/${encodeURIComponent(query)}?custom_task_ids=true&team_id=${teamId}`
+      : `/task/${encodeURIComponent(query)}`;
+
+    try {
+      const raw = await clickUpFetch(settings.clickupApiKey, endpoint);
+      const task = normalizeClickUpTask(raw);
+      cacheSet(cacheKey, task);
+      debugLog(`[ClickUp] Resolved "${query}" by id in 1 request`);
+      return task;
+    } catch {
+      // No such task (404) or the id was a false positive — remember the miss
+      // so the next keystroke does not repeat it, and let the caller page.
+      cacheSet(cacheKey, null);
+      return undefined;
     }
   }
 
