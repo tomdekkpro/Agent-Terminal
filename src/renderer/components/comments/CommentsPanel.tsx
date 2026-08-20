@@ -492,6 +492,9 @@ export function CommentsPanel({
 
   const suggestions = assist?.suggestions || [];
   const assistRunning = !!assist?.running;
+  const summarizing = assistRunning && assist?.kind === 'summarize';
+  const drafting = assistRunning && assist?.kind === 'suggest';
+  const hasDigest = !!(assist?.summary || (assist?.kind === 'summarize' && assist?.raw));
 
   return (
     <div
@@ -570,6 +573,49 @@ export function CommentsPanel({
         </div>
       )}
 
+      {/* Thread digest — pinned under the header rather than placed in the
+          scrolling thread: the thread opens scrolled to the newest comment, so
+          a card added at the top would appear off-screen and the Summarize
+          button would look like it did nothing. */}
+      {(summarizing || hasDigest) && (
+        <div className="mx-2 mt-2 rounded-lg border border-amber-500/25 bg-amber-500/5 overflow-hidden shrink-0">
+          <div className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] text-amber-300">
+            {summarizing
+              ? <Loader2 className="w-3 h-3 animate-spin" />
+              : <ScrollText className="w-3 h-3" />}
+            <span className="font-medium uppercase tracking-wide">
+              {summarizing ? 'Summarizing thread…' : 'Thread digest'}
+            </span>
+            <div className="flex-1" />
+            {hasDigest && (
+              <>
+                <button
+                  onClick={() => setShowSummary((v) => !v)}
+                  title={showSummary ? 'Collapse' : 'Expand'}
+                  className="p-0.5 rounded hover:bg-amber-500/15"
+                >
+                  {showSummary ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                </button>
+                <button
+                  onClick={() => clearAssist(taskId)}
+                  title="Dismiss digest"
+                  className="p-0.5 rounded hover:bg-amber-500/15"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </>
+            )}
+          </div>
+          {hasDigest && showSummary && (
+            <div className="px-2.5 pb-2.5 max-h-[40vh] overflow-y-auto text-[11px] text-[var(--text-secondary)] leading-relaxed [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_strong]:text-[var(--text-primary)] [&_p]:mb-1.5 [&_li]:mb-0.5">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {assist?.summary || assist?.raw || ''}
+              </ReactMarkdown>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Thread */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-2.5 py-3 space-y-4">
         {thread?.hasMore && (
@@ -581,27 +627,6 @@ export function CommentsPanel({
             {thread.loadingOlder ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowUp className="w-3 h-3" />}
             Load older comments
           </button>
-        )}
-
-        {(assist?.summary || (assist?.kind === 'summarize' && assist?.raw)) && (
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 overflow-hidden">
-            <button
-              onClick={() => setShowSummary((v) => !v)}
-              className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] text-amber-300 hover:bg-amber-500/10 transition-colors"
-            >
-              <ScrollText className="w-3 h-3" />
-              <span className="font-medium uppercase tracking-wide">Thread digest</span>
-              <div className="flex-1" />
-              {showSummary ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            </button>
-            {showSummary && (
-              <div className="px-2.5 pb-2.5 text-[11px] text-[var(--text-secondary)] leading-relaxed [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_strong]:text-[var(--text-primary)] [&_p]:mb-1.5 [&_li]:mb-0.5">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {assist.summary || assist.raw || ''}
-                </ReactMarkdown>
-              </div>
-            )}
-          </div>
         )}
 
         {thread?.loading && comments.length === 0 && (
@@ -634,12 +659,14 @@ export function CommentsPanel({
       </div>
 
       {/* AI suggestions */}
-      {(suggestions.length > 0 || (assist?.kind === 'suggest' && assist?.raw) || assist?.error) && (
+      {(drafting || suggestions.length > 0 || (assist?.kind === 'suggest' && assist?.raw) || assist?.error) && (
         <div className="border-t border-[var(--border)] bg-[var(--bg-card)]/60 px-2.5 py-2 space-y-1.5 max-h-[42%] overflow-y-auto shrink-0">
           <div className="flex items-center gap-1.5">
-            <Sparkles className="w-3 h-3 text-violet-400" />
+            {drafting
+              ? <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
+              : <Sparkles className="w-3 h-3 text-violet-400" />}
             <span className="text-[10px] uppercase tracking-wide text-violet-300 font-medium">
-              Suggested replies
+              {drafting ? 'Drafting replies…' : 'Suggested replies'}
             </span>
             <div className="flex-1" />
             <button
@@ -706,7 +733,9 @@ export function CommentsPanel({
           <button
             onClick={() => runAssist(taskId, 'summarize', { projectPath })}
             disabled={assistRunning || comments.length === 0}
-            title="Summarize the thread: state, decisions, open questions"
+            title={comments.length === 0
+              ? 'Nothing to summarize yet — this task has no comments'
+              : 'Summarize the thread: state, decisions, open questions'}
             className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors disabled:opacity-60"
           >
             {assistRunning && assist?.kind === 'summarize'

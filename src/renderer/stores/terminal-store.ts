@@ -71,6 +71,9 @@ export interface Terminal {
   previewUrl?: string;
   /** Whether the preview panel is currently open */
   previewOpen?: boolean;
+  /** Whether the ClickUp comments panel is currently open (splits the terminal
+   *  the same way previewOpen does). */
+  commentsOpen?: boolean;
 }
 
 // Output callback registry
@@ -221,6 +224,8 @@ interface TerminalState {
   discardTerminal: (id: string) => void;
   /** Toggle the preview panel open/closed for a terminal */
   togglePreview: (id: string) => void;
+  /** Toggle the ClickUp comments panel open/closed for a terminal */
+  toggleComments: (id: string) => void;
   /** Set the preview URL for a terminal */
   setPreviewUrl: (id: string, url: string) => void;
   /** Mark a terminal so the global exit listener will run cleanupWorktree. */
@@ -915,6 +920,14 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, previewOpen: !t.previewOpen } : t
+      ),
+    }));
+  },
+
+  toggleComments: (id: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, commentsOpen: !t.commentsOpen } : t
       ),
     }));
   },

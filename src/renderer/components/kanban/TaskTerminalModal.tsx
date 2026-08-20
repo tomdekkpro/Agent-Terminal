@@ -32,7 +32,7 @@ import { useKanbanStore, type AutoCodeLogEntry } from '../../stores/kanban-store
 import { TerminalPanel, ActionsDropdown } from '../terminal/TerminalPanel';
 import { ChangesSplitLayout, TaskPickerModal } from '../terminal/TerminalView';
 import { FilesPanel } from '../terminal/FilesPanel';
-import { CommentsPanel } from '../comments';
+import { CommentsSplitLayout } from '../comments';
 import { cn, isLocalTaskId } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
@@ -587,9 +587,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     );
 
   const [isFullscreen, setIsFullscreen] = useState(true);
-  // Which side panel is open: the ClickUp comment thread, the docs repo files,
-  // the project source tree, or none. One slot — they compete for the same space.
-  const [rightPanel, setRightPanel] = useState<'comments' | 'docs' | 'project' | null>(null);
+  // Which side panel is open: docs repo files, project source tree, or none.
+  const [rightPanel, setRightPanel] = useState<'docs' | 'project' | null>(null);
+  // Comments split the main area beside the terminal (like Changes) rather than
+  // taking the right-hand rail, so both can be open at once.
+  const [commentsOpen, setCommentsOpen] = useState(false);
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
   const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
@@ -1385,11 +1387,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             )}
             {isClickupLinked && (
               <button
-                onClick={() => setRightPanel((p) => (p === 'comments' ? null : 'comments'))}
-                title={rightPanel === 'comments' ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
+                onClick={() => setCommentsOpen((v) => !v)}
+                title={commentsOpen ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
                 className={cn(
                   'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
-                  rightPanel === 'comments'
+                  commentsOpen
                     ? 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
                     : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
                 )}
@@ -1454,7 +1456,11 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
 
         {/* Body */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {(() => {
+          // The main column: the terminal (or the Auto Code progress panel)
+          // plus the banners above it.
+          const mainColumn = (
+            <div className="flex-1 h-full flex flex-col min-h-0 overflow-hidden">
           {setupError && (
             <div className="m-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
               {setupError}
@@ -1526,26 +1532,33 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           )}
           </>
           )}
-          </div>
-          {/* Right-side files panel — browse the project's docs repo or its
-              source tree. Drag files into the terminal to insert their path. */}
-          {rightPanel === 'comments' && isClickupLinked && (
-            <div className="shrink-0 min-h-0">
-              <CommentsPanel
+            </div>
+          );
+          // Comments open beside the main column with a draggable splitter,
+          // the same way Changes does — not as a right-hand rail.
+          if (!commentsOpen || !isClickupLinked) return mainColumn;
+          return (
+            <div className="flex-1 min-w-0 min-h-0">
+              <CommentsSplitLayout
                 taskId={task.clickupTaskId}
                 taskLabel={task.clickupCustomId || task.clickupTaskId}
                 taskName={task.clickupName}
                 taskUrl={task.clickupUrl}
                 projectPath={taskProject?.path}
-                onClose={() => setRightPanel(null)}
+                onClose={() => setCommentsOpen(false)}
                 onSendToAgent={
                   terminal?.isClaudeMode
                     ? (text) => sendAgentPrompt(terminal.id, text, { submit: false })
                     : undefined
                 }
-              />
+              >
+                {mainColumn}
+              </CommentsSplitLayout>
             </div>
-          )}
+          );
+          })()}
+          {/* Right-side files panel — browse the project's docs repo or its
+              source tree. Drag files into the terminal to insert their path. */}
           {rightPanel === 'docs' && taskProject?.docsPath && (
             <div className="shrink-0 min-h-0">
               <FilesPanel

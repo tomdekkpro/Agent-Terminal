@@ -23,6 +23,7 @@ import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta 
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { sendAgentPrompt } from '../../lib/send-agent-prompt';
+import { CommentsSplitLayout } from '../comments';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
 
 const PICKER_PAGE_SIZE = 100;
@@ -716,6 +717,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const reorderTerminalsInGroup = useTerminalStore((s) => s.reorderTerminalsInGroup);
+  const toggleComments = useTerminalStore((s) => s.toggleComments);
 
   // Tree sidebar — search + collapsed categories (persisted)
   const [treeSearch, setTreeSearch] = useState('');
@@ -2028,6 +2030,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               : groupTerminals.find((t) => t.previewOpen);
             const hasChanges = !!changesTerminal;
 
+            // Same shape for the comments panel — a task-linked terminal with
+            // it open splits the group's width, Changes-style.
+            const canComment = (t: typeof activeTerminalObj) =>
+              !!t?.commentsOpen && !!t.task && !isLocalTaskId(t.task.id);
+            const commentsTerminal = canComment(activeTerminalObj)
+              ? activeTerminalObj
+              : groupTerminals.find((t) => canComment(t));
+
             const terminalContent = isGroupSplit ? (
               /* Grid layout for split terminals */
               <div className={cn('grid h-full gap-1 p-1', getGridClass(groupTerminals.length))}>
@@ -2123,15 +2133,36 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                   !isCurrentGroup && 'invisible pointer-events-none'
                 )}
               >
-                {hasChanges ? (
-                  <ChangesSplitLayout
-                    terminal={changesTerminal!}
-                  >
-                    {terminalContent}
-                  </ChangesSplitLayout>
-                ) : (
-                  terminalContent
-                )}
+                {(() => {
+                  const withChanges = hasChanges ? (
+                    <ChangesSplitLayout
+                      terminal={changesTerminal!}
+                    >
+                      {terminalContent}
+                    </ChangesSplitLayout>
+                  ) : (
+                    terminalContent
+                  );
+                  if (!commentsTerminal?.task) return withChanges;
+                  const task = commentsTerminal.task;
+                  return (
+                    <CommentsSplitLayout
+                      taskId={task.id}
+                      taskLabel={task.customId || task.id}
+                      taskName={task.name}
+                      taskUrl={task.url}
+                      projectPath={commentsTerminal.worktreePath || commentsTerminal.cwd}
+                      onClose={() => toggleComments(commentsTerminal.id)}
+                      onSendToAgent={
+                        commentsTerminal.isClaudeMode
+                          ? (text) => sendAgentPrompt(commentsTerminal.id, text, { submit: false })
+                          : undefined
+                      }
+                    >
+                      {withChanges}
+                    </CommentsSplitLayout>
+                  );
+                })()}
               </div>
             );
           })

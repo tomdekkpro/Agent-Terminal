@@ -11,8 +11,6 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
 import { cn, isLocalTaskId } from '../../../shared/utils';
-import { CommentsPanel } from '../comments';
-import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 import { SkillsDropdown } from './SkillsDropdown';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 
@@ -517,9 +515,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const bufferRef = useRef<string[]>([]);
   const needsResumRef = useRef(terminal.needsResume ?? false);
 
-  // ClickUp comments drawer — slides over the terminal on the right so opening
-  // it never resizes the PTY mid-session.
-  const [commentsOpen, setCommentsOpen] = useState(false);
+  // ClickUp comments open beside the terminal, exactly like Changes: the flag
+  // lives on the terminal (so it survives tab switches) and the parent surface
+  // renders CommentsSplitLayout around this panel.
+  const commentsOpen = !!terminal.commentsOpen;
   const taskCommentsAvailable = !!terminal.task && !isLocalTaskId(terminal.task.id) && !hideToolbar;
 
   // Drag and drop state
@@ -1474,7 +1473,10 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           {/* ClickUp comments */}
           {taskCommentsAvailable && (
             <button
-              onClick={(e) => { e.stopPropagation(); setCommentsOpen((v) => !v); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                useTerminalStore.getState().toggleComments(terminal.id);
+              }}
               className={cn(
                 'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
                 commentsOpen
@@ -1516,27 +1518,6 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           )}
         </div>
       </div>
-      )}
-
-      {/* Comments drawer — overlays the terminal instead of shrinking it, so
-          xterm keeps its geometry while the thread is open. */}
-      {commentsOpen && terminal.task && taskCommentsAvailable && (
-        <div className="absolute top-9 right-0 bottom-0 z-30 w-[420px] max-w-full flex shadow-2xl">
-          <CommentsPanel
-            fill
-            taskId={terminal.task.id}
-            taskLabel={terminal.task.customId || terminal.task.id}
-            taskName={terminal.task.name}
-            taskUrl={terminal.task.url}
-            projectPath={terminal.worktreePath || terminal.cwd}
-            onClose={() => setCommentsOpen(false)}
-            onSendToAgent={
-              terminal.isClaudeMode
-                ? (text) => sendAgentPrompt(terminal.id, text, { submit: false })
-                : undefined
-            }
-          />
-        </div>
       )}
 
       {/* Remote control dialog */}
