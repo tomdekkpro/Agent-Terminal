@@ -689,11 +689,24 @@ let rateLimitedUntil = 0;
 /** Exposes the rate-limit backoff timestamp so the handler can adjust polling */
 export function getRateLimitedUntil(): number { return rateLimitedUntil; }
 
+/** One fetch in flight at a time. Two callers arriving together (the ipc
+ *  handler and the 60s poller) both used to reach the API before either had
+ *  recorded a 429, so a cold start inside a rate-limit window spent two
+ *  requests to learn the same thing. */
+let inflightFetch: Promise<UsageSnapshot> | null = null;
+
 /**
  * Fetch usage data — OAuth API only, with CLI fallback when no token exists.
  * On 429 the rate-limit backoff is recorded and cached data is returned.
+ * Concurrent callers share a single in-flight fetch.
  */
-export async function fetchUsageData(): Promise<UsageSnapshot> {
+export function fetchUsageData(): Promise<UsageSnapshot> {
+  if (inflightFetch) return inflightFetch;
+  inflightFetch = doFetchUsageData().finally(() => { inflightFetch = null; });
+  return inflightFetch;
+}
+
+async function doFetchUsageData(): Promise<UsageSnapshot> {
   // If we're still in a rate-limit backoff window, do not call the API at all.
   //
   // This used to also require `lastSuccessfulUsage`, so a cold start inside a
