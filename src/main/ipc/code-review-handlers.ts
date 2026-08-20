@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewSeverity, TaskManagerTask } from '../../shared/types';
+import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewPR, CodeReviewSeverity, TaskManagerTask } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
@@ -205,7 +205,9 @@ async function extractPRsFromComments(taskId: string): Promise<PRInfo[]> {
     const result = await clickUpProvider.getComments(settings, taskId);
     if (!result.success || !result.data) return [];
 
-    const allText = result.data
+    // Copy before reversing - getComments hands back its cached array, and
+    // reversing in place would scramble it for every later reader.
+    const allText = [...result.data]
       .reverse()
       .map((c: any) => c.comment_text || '')
       .join('\n');
@@ -328,22 +330,53 @@ type PRMetadata = { url?: string; branch?: string; baseBranch?: string; author?:
  *  which case absence from `byNumber` does NOT prove a PR is closed. */
 type OpenPRList = { byNumber: Map<number, PRMetadata>; complete: boolean };
 
-/** gh pages the GitHub API 100 at a time, so this is the main cost of the
- *  listing. 200 covers the recently-touched PRs that tasks in review point at. */
-const OPEN_PR_LIMIT = 200;
+/** gh pages the GitHub API 100 at a time (~750ms per page), so this is the
+ *  whole cost of the listing. It was 200, which truncates on any repo with more
+ *  open PRs than that — and a truncated listing disables the open-only filter,
+ *  so tasks whose PR sat past the cap kept their PR but lost the closed check.
+ *  Now that the listing no longer blocks the first paint it can afford to be
+ *  complete. */
+const OPEN_PR_LIMIT = 1000;
 
-/** `gh pr list` is a ~2s shell round-trip and the same listing serves every
- *  task in a load, a Refresh click and the scheduler cycle behind it. */
-const OPEN_PR_CACHE_TTL = 30_000;
+/** `gh pr list` is a multi-second shell round-trip and the same listing serves
+ *  every task in a load, a Refresh click and the scheduler cycle behind it.
+ *  Open PRs change on the order of minutes, so a stale entry is served
+ *  immediately with a refresh started behind it rather than waited on. */
+const OPEN_PR_CACHE_TTL = 5 * 60_000;
+/** Past this an entry is too old to serve even optimistically. */
+const OPEN_PR_STALE_TTL = 30 * 60_000;
 const openPRCache = new Map<string, { list: OpenPRList; timestamp: number }>();
+/** At most one gh listing in flight per repo; concurrent callers share it. */
+const openPRInflight = new Map<string, Promise<OpenPRList | null>>();
 
 /** Fetch metadata for all open PRs in one gh call, keyed by PR number.
  *  Returns null when gh is unavailable so callers can tell "no open PRs"
- *  apart from "couldn't ask". */
+ *  apart from "couldn't ask".
+ *
+ *  Fresh within OPEN_PR_CACHE_TTL: returned outright. Between that and
+ *  OPEN_PR_STALE_TTL: returned immediately and refreshed behind the caller, so
+ *  reopening the Code Review page never waits on gh again. */
 async function fetchOpenPRMetadata(projectPath: string): Promise<OpenPRList | null> {
   const hit = openPRCache.get(projectPath);
-  if (hit && Date.now() - hit.timestamp < OPEN_PR_CACHE_TTL) return hit.list;
+  const age = hit ? Date.now() - hit.timestamp : Infinity;
+  if (hit && age < OPEN_PR_CACHE_TTL) return hit.list;
 
+  let refresh = openPRInflight.get(projectPath);
+  if (!refresh) {
+    refresh = loadOpenPRMetadata(projectPath).finally(() => openPRInflight.delete(projectPath));
+    openPRInflight.set(projectPath, refresh);
+  }
+
+  if (hit && age < OPEN_PR_STALE_TTL) {
+    void refresh.catch(() => {});
+    return hit.list;
+  }
+  return refresh;
+}
+
+/** The actual gh call. Always resolves (null on failure) so background
+ *  revalidation can never surface an unhandled rejection. */
+async function loadOpenPRMetadata(projectPath: string): Promise<OpenPRList | null> {
   try {
     const json = await ghExec(
       `gh pr list --state open --json number,url,headRefName,baseRefName,title,author --limit ${OPEN_PR_LIMIT}`,
@@ -361,6 +394,7 @@ async function fetchOpenPRMetadata(projectPath: string): Promise<OpenPRList | nu
       });
     }
     const complete = parsed.length < OPEN_PR_LIMIT;
+    debugLog(`[CodeReview] Open-PR listing: ${parsed.length} PR(s)`);
     if (!complete) {
       debugLog(`[CodeReview] Open-PR listing hit the ${OPEN_PR_LIMIT} cap — skipping the open-only filter so PRs past the cap aren't dropped`);
     }
@@ -929,6 +963,62 @@ async function fetchReviewTasks(
   return unique;
 }
 
+/** Build the renderer-facing PR list for one task from resolved PR numbers. */
+function toReviewPRs(prs: PRInfo[], prMeta: OpenPRList | null): CodeReviewPR[] {
+  return prs.map((pr) => {
+    const meta = prMeta?.byNumber.get(pr.prNumber);
+    return {
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl ?? meta?.url ?? undefined,
+      prTitle: meta?.title,
+      prBranch: meta?.branch,
+      prBaseBranch: meta?.baseBranch,
+      prAuthor: meta?.author,
+      status: 'pending' as const,
+      findings: [],
+    };
+  });
+}
+
+/**
+ * Phase 2 of the Code Review load: match each task to its PRs and push the
+ * result to the renderer as it lands, instead of holding the task list back
+ * until every task is resolved.
+ *
+ * Waits once for the shared `gh` listing, then resolves all tasks together —
+ * `findPRsForTask` only reaches ClickUp for tasks the listing could not match,
+ * and those reads go through the provider's rate gate concurrently.
+ *
+ * Never throws: it runs detached from the IPC call, so a failure here must not
+ * become an unhandled rejection. A task that fails to resolve still gets an
+ * event, so the UI drops its "resolving" state instead of spinning forever.
+ */
+async function resolvePRsForTasks(
+  tasks: Array<{ id: string; customId?: string; description?: string; name?: string }>,
+  prMetaPromise: Promise<OpenPRList | null>,
+  getWindow: () => BrowserWindow | null,
+): Promise<void> {
+  if (tasks.length === 0) return;
+  try {
+    const prMeta = await prMetaPromise.catch(() => null);
+    await Promise.all(
+      tasks.map(async (task) => {
+        let prs: CodeReviewPR[] = [];
+        try {
+          prs = toReviewPRs(await findPRsForTask(task, prMeta), prMeta);
+        } catch (err) {
+          debugError(`[CodeReview] Failed to resolve PRs for task ${task.id}:`, err);
+        }
+        sendReviewEvent(getWindow, { type: 'prs', taskId: task.id, prs });
+      }),
+    );
+  } catch (err) {
+    debugError('[CodeReview] PR resolution pass failed:', err);
+    // Clear every task's resolving state so the UI does not spin forever.
+    for (const task of tasks) sendReviewEvent(getWindow, { type: 'prs', taskId: task.id, prs: [] });
+  }
+}
+
 // ─── Auto-review: run a full cycle ───────────────────────────
 async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promise<void> {
   if (schedulerRunning) {
@@ -1221,13 +1311,16 @@ export function registerCodeReviewHandlers(
         const effectiveProjectPath = projectPath || settings.codeReviewProjectPath;
 
         // Start the open-PR listing NOW rather than after the tasks land. It's
-        // an independent ~2s shell round-trip to GitHub, and running it after
-        // the ClickUp fetch simply added its latency to the total.
+        // an independent multi-second shell round-trip to GitHub, and running
+        // it after the ClickUp fetch simply added its latency to the total.
         // fetchOpenPRMetadata resolves to null on failure, so this never
         // rejects unhandled while the task fetch is in flight.
         const prMetaPromise = effectiveProjectPath
           ? fetchOpenPRMetadata(effectiveProjectPath)
           : Promise.resolve(null);
+        // resolvePRsForTasks is the only consumer and it returns early when
+        // there are no tasks, so keep a handler attached from the start.
+        void prMetaPromise.catch(() => null);
 
         const allTasks = await fetchReviewTasks(settings, statuses, targetListIds);
 
@@ -1246,40 +1339,33 @@ export function registerCodeReviewHandlers(
           return true;
         });
 
-        // Resolve PR info for each task (checks description, branch matching,
-        // then comments as a fallback). Each task carries a prs array.
-        // The gh listing was kicked off above and has usually landed by now;
-        // findPRsForTask matches against it in memory.
-        const prMeta = await prMetaPromise;
+        // Two-phase PR resolution. Resolving a task's PRs needs the `gh`
+        // listing — a shell round-trip that pages GitHub 100 PRs at a time —
+        // and, for tasks it can't match by branch, one ClickUp comment read
+        // each. Together that used to be the larger half of the load, and the
+        // whole task list sat behind a spinner waiting for it even though
+        // ClickUp had already answered.
+        //
+        // Phase 1 (here): return every task the moment ClickUp answers, with
+        // an empty PR list marked `prsResolving` so the UI shows "finding PRs"
+        // rather than the "no PR found" warning. Nothing partial is shown —
+        // a PR listed now that phase 2 then filtered out as closed would just
+        // flicker.
+        //
+        // Phase 2 (below, after this returns): the real resolution, pushed to
+        // the renderer per task as `prs` events.
+        const items: CodeReviewItem[] = filteredTasks.map((task) => ({
+          taskId: task.id,
+          taskName: task.name,
+          taskUrl: task.url,
+          customId: task.customId,
+          status: 'pending' as const,
+          findings: [],
+          prs: [],
+          prsResolving: true,
+        }));
 
-        const items: CodeReviewItem[] = await Promise.all(
-          filteredTasks.map(async (task) => {
-            const foundPRs = await findPRsForTask(task, prMeta);
-            return {
-              taskId: task.id,
-              taskName: task.name,
-              taskUrl: task.url,
-              customId: task.customId,
-              prNumber: foundPRs.length === 1 ? foundPRs[0].prNumber : undefined,
-              prUrl: foundPRs.length === 1 ? (foundPRs[0].prUrl ?? undefined) : undefined,
-              status: 'pending' as const,
-              findings: [],
-              prs: foundPRs.map((pr) => {
-                const meta = prMeta?.byNumber.get(pr.prNumber);
-                return {
-                  prNumber: pr.prNumber,
-                  prUrl: pr.prUrl ?? meta?.url ?? undefined,
-                  prTitle: meta?.title,
-                  prBranch: meta?.branch,
-                  prBaseBranch: meta?.baseBranch,
-                  prAuthor: meta?.author,
-                  status: 'pending' as const,
-                  findings: [],
-                };
-              }),
-            };
-          }),
-        );
+        void resolvePRsForTasks(filteredTasks, prMetaPromise, getWindow);
 
         return { success: true, data: items };
       } catch (error) {

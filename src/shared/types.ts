@@ -879,15 +879,22 @@ export interface CodeReviewItem {
   reviewedAt?: string;
   error?: string;
   prs: CodeReviewPR[];
+  /** True while the task's PRs are still being resolved in the background.
+   *  The task list is returned as soon as ClickUp answers; matching each task
+   *  to its PRs needs a `gh` listing (~2s) and sometimes a comment read, so
+   *  that runs after the first paint and arrives via a `prs` event. */
+  prsResolving?: boolean;
 }
 
 export interface CodeReviewEvent {
-  type: 'progress' | 'finding' | 'done' | 'error';
+  type: 'progress' | 'finding' | 'done' | 'error' | 'prs';
   taskId: string;
   message?: string;
   finding?: CodeReviewFinding;
   status?: CodeReviewStatus;
   findings?: CodeReviewFinding[];
+  /** `prs` events only — resolved PRs for `taskId`. */
+  prs?: CodeReviewPR[];
 }
 
 // ─── Team Chat ────────────────────────────────────────────────

@@ -10,6 +10,12 @@ const CACHE_TTL = 30000;
 // Workspace shape (lists, statuses, members) changes rarely and is re-read on
 // every board render — cache it far longer than task data.
 const STATIC_CACHE_TTL = 5 * 60_000;
+// The space/folder/list tree is the slowest static read (one request for spaces
+// then two per space, ~700ms in two round-trips) and it is what every list
+// picker waits on before it can even ask for tasks. Past STATIC_CACHE_TTL the
+// cached tree is still served immediately and refreshed behind the caller; only
+// past this is it too old to hand out at all.
+const LISTS_STALE_TTL = 60 * 60_000;
 const MAX_SEARCH_PAGES = 10;
 // Safety cap for the multi-list review fetch (3000 tasks across all lists).
 const MAX_REVIEW_PAGES = 30;
@@ -37,6 +43,9 @@ type SnapshotStore = {
 /** Keyed by the sorted list-id set the snapshot covers. */
 const snapshotStores = new Map<string, SnapshotStore>();
 
+/** At most one list-tree walk in flight per workspace; callers share it. */
+const listsInflight = new Map<string, Promise<TaskManagerList[]>>();
+
 // ─── Rate limiting ──────────────────────────────────────────────────────────
 // ClickUp enforces a per-token limit of 100 requests/minute on Free/Unlimited/
 // Business plans (1000 on Business Plus, 10000 on Enterprise). Several pollers
@@ -52,7 +61,14 @@ const REQUEST_BUDGET = 90; // headroom under the 100/min floor
 // whole window because polling drained the bucket first.
 const BACKGROUND_BUDGET = 60;
 const BUDGET_WINDOW_MS = 60_000;
-const MAX_CONCURRENT = 4;
+// ClickUp caps *requests per minute*, not requests in flight, so the token
+// bucket above is what keeps us under the limit — this gate only exists to keep
+// a fan-out from opening an unbounded number of sockets. It was set to 4, which
+// turned every fan-out into ceil(n / 4) round-trips of pure waiting: the twelve
+// per-task comment reads behind a Code Review load took three waves instead of
+// one. 8 still bounds the socket count while letting a normal fan-out finish in
+// a single round-trip.
+const MAX_CONCURRENT = 8;
 const MAX_RETRIES = 3;
 const MAX_BACKOFF_MS = 60_000;
 
@@ -216,6 +232,15 @@ function cacheGet(key: string, ttl: number = CACHE_TTL): any | undefined {
   return hit.data;
 }
 
+/** Like cacheGet but leaves the entry in place when it is past `ttl`, so a
+ *  caller can check a short freshness window and still fall back to a longer
+ *  staleness window on the same entry. */
+function cachePeek(key: string, ttl: number): any | undefined {
+  const hit = taskCache.get(key);
+  if (!hit) return undefined;
+  return Date.now() - hit.timestamp < ttl ? hit.data : undefined;
+}
+
 function cacheSet(key: string, data: any): void {
   if (taskCache.size >= MAX_CACHE_ENTRIES) {
     const now = Date.now();
@@ -342,43 +367,68 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (!teamId) throw new Error('Workspace ID not configured');
 
       const cacheKey = `lists-${teamId}`;
-      const cached = cacheGet(cacheKey, STATIC_CACHE_TTL);
-      if (cached) return { success: true, data: cached };
+      const fresh = cachePeek(cacheKey, STATIC_CACHE_TTL);
+      if (fresh) return { success: true, data: fresh };
 
-      const spacesRes = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/space?archived=false`);
+      let refresh = listsInflight.get(cacheKey);
+      if (!refresh) {
+        refresh = this.loadLists(settings, teamId, cacheKey)
+          .finally(() => listsInflight.delete(cacheKey));
+        listsInflight.set(cacheKey, refresh);
+      }
 
-      // Folderless lists and folders for every space in parallel — walking
-      // them one request at a time made the first open of any list picker
-      // take (2 × spaces) round-trips back to back.
-      const spaces: any[] = spacesRes.spaces || [];
-      const perSpace = await Promise.all(
-        spaces.map(async (space: any) => {
-          const [folderlessRes, foldersRes] = await Promise.all([
-            clickUpFetch(settings.clickupApiKey, `/space/${space.id}/list?archived=false`),
-            clickUpFetch(settings.clickupApiKey, `/space/${space.id}/folder?archived=false`),
-          ]);
-          const spaceLists: TaskManagerList[] = [];
-          for (const list of folderlessRes.lists || []) {
-            spaceLists.push({ id: list.id, name: list.name, space: space.name });
-          }
-          for (const folder of foldersRes.folders || []) {
-            for (const list of folder.lists || []) {
-              spaceLists.push({ id: list.id, name: list.name, space: space.name, folder: folder.name });
-            }
-          }
-          return spaceLists;
-        }),
-      );
-      const lists: TaskManagerList[] = perSpace.flat();
+      // Merely stale: hand back what we have and let the refresh land for the
+      // next caller. A list picker that would have blocked ~700ms on the walk
+      // now paints immediately and picks up new lists on its next open.
+      const stale = cachePeek(cacheKey, LISTS_STALE_TTL);
+      if (stale) {
+        void refresh.catch(() => {});
+        return { success: true, data: stale };
+      }
 
-      cacheSet(cacheKey, lists);
-      return { success: true, data: lists };
+      return { success: true, data: await refresh };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch lists',
       };
     }
+  }
+
+  /** Walk the workspace's spaces, folders and lists, and cache the result. */
+  private async loadLists(
+    settings: AppSettings,
+    teamId: string,
+    cacheKey: string,
+  ): Promise<TaskManagerList[]> {
+    const spacesRes = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}/space?archived=false`);
+
+    // Folderless lists and folders for every space in parallel — walking
+    // them one request at a time made the first open of any list picker
+    // take (2 × spaces) round-trips back to back.
+    const spaces: any[] = spacesRes.spaces || [];
+    const perSpace = await Promise.all(
+      spaces.map(async (space: any) => {
+        const [folderlessRes, foldersRes] = await Promise.all([
+          clickUpFetch(settings.clickupApiKey, `/space/${space.id}/list?archived=false`),
+          clickUpFetch(settings.clickupApiKey, `/space/${space.id}/folder?archived=false`),
+        ]);
+        const spaceLists: TaskManagerList[] = [];
+        for (const list of folderlessRes.lists || []) {
+          spaceLists.push({ id: list.id, name: list.name, space: space.name });
+        }
+        for (const folder of foldersRes.folders || []) {
+          for (const list of folder.lists || []) {
+            spaceLists.push({ id: list.id, name: list.name, space: space.name, folder: folder.name });
+          }
+        }
+        return spaceLists;
+      }),
+    );
+    const lists: TaskManagerList[] = perSpace.flat();
+
+    cacheSet(cacheKey, lists);
+    return lists;
   }
 
   async getTasks(settings: AppSettings, listId?: string, page: number = 0): Promise<ProviderResult<TaskManagerTask[]>> {
@@ -544,15 +594,35 @@ export class ClickUpProvider implements ITaskManagerProvider {
       for (const s of statuses) params.append('statuses[]', s);
       for (const id of ids) params.append('list_ids[]', id);
 
+      // Pages in parallel chunks. Strictly serial paging cost one full
+      // round-trip per page before the next could start — with 165 tasks in
+      // review statuses that was two ~750ms requests back to back for a set
+      // that fits in one. A page under 100 tasks is the last one, so the chunk
+      // stops there and no further chunk is issued.
       const all: any[] = [];
-      for (let page = 0; page < MAX_REVIEW_PAGES; page++) {
-        const data = await clickUpFetch(
-          settings.clickupApiKey,
-          `/team/${teamId}/task?${params.toString()}&page=${page}`,
+      const PAGE_CHUNK = 4;
+      let lastPageSeen = false;
+      for (let start = 0; start < MAX_REVIEW_PAGES && !lastPageSeen; start += PAGE_CHUNK) {
+        const pageNums = Array.from(
+          { length: Math.min(PAGE_CHUNK, MAX_REVIEW_PAGES - start) },
+          (_, i) => start + i,
         );
-        const tasks: any[] = data.tasks || [];
-        all.push(...tasks);
-        if (tasks.length < 100) break;
+        const pages = await Promise.all(
+          pageNums.map((page) =>
+            clickUpFetch(
+              settings.clickupApiKey,
+              `/team/${teamId}/task?${params.toString()}&page=${page}`,
+            ),
+          ),
+        );
+        for (const data of pages) {
+          const tasks: any[] = data.tasks || [];
+          all.push(...tasks);
+          if (tasks.length < 100) {
+            lastPageSeen = true;
+            break;
+          }
+        }
       }
 
       cacheSet(cacheKey, all);
@@ -720,6 +790,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
         method: 'POST',
         body: JSON.stringify({ comment_text: comment }),
       });
+      taskCache.delete(`comments-${taskId}`);
       return { success: true, data };
     } catch (error) {
       return {
@@ -802,10 +873,21 @@ export class ClickUpProvider implements ITaskManagerProvider {
     }
   }
 
+  /** Cached for CACHE_TTL. A task's thread is read up to three times in one
+   *  pass over it — the approval-comment check, the PR-URL scan and the review
+   *  context all want it — and those reads are sequential, so request
+   *  coalescing never caught them. Writes go through `postComment`, which
+   *  invalidates the entry. */
   async getComments(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>> {
     try {
+      const cacheKey = `comments-${taskId}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) return { success: true, data: cached };
+
       const data = await clickUpFetch(settings.clickupApiKey, `/task/${taskId}/comment`);
-      return { success: true, data: data.comments || [] };
+      const comments = data.comments || [];
+      cacheSet(cacheKey, comments);
+      return { success: true, data: comments };
     } catch (error) {
       return {
         success: false,

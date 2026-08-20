@@ -207,6 +207,29 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           ),
         }));
         break;
+      case 'prs':
+        // Phase 2 of the load: the task list arrives first, its PRs follow as
+        // each task is matched. Only applies while the task is still pending —
+        // once a review is under way it owns its own PR statuses, and a late
+        // event must not reset them.
+        if (!item || item.status !== 'pending') break;
+        set((state) => ({
+          items: state.items.map((i) => {
+            if (i.taskId !== taskId) return i;
+            const prs = event.prs ?? [];
+            const only = prs.length === 1 ? prs[0] : undefined;
+            return {
+              ...i,
+              prs,
+              prsResolving: false,
+              // Deprecated single-PR fields, kept in step for any consumer
+              // still reading them.
+              prNumber: only?.prNumber,
+              prUrl: only?.prUrl,
+            };
+          }),
+        }));
+        break;
     }
   },
 
