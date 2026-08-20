@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { statSync } from 'fs';
 import type {
   AgentProviderId,
   CommentAssistKind,
@@ -158,17 +159,63 @@ function extractJson(text: string): any | null {
 
 type HeadlessAgent = NonNullable<ReturnType<typeof agentRegistry.get>>;
 
-/** Prefer the agent the caller asked for, then Claude, then anything installed
- *  that can run headlessly. */
+/** Keeps the run cheap and predictable, matching the auto-code default rather
+ *  than the CLI's interactive default (Opus). */
+const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-6';
+
+/**
+ * Argv for a one-shot, text-only run.
+ *
+ * Deliberately NOT agent.buildHeadlessArgs(): that builder exists for the
+ * auto-code loop, so it grants the agent the filesystem (`--add-dir <cwd>`,
+ * `--dangerously-skip-permissions`, `--yolo`) — which drafting a comment has no
+ * use for. It also puts a local path into argv, and argv is concatenated into a
+ * shell command line below (see runHeadless), so a project folder containing
+ * `&` or `"` would break out of it. Every element returned here is a constant
+ * except `model`, which the caller validates against a strict pattern.
+ *
+ * Returns null for agents this run cannot drive non-interactively.
+ */
+function buildAssistArgs(agentId: AgentProviderId, model?: string): string[] | null {
+  switch (agentId) {
+    case 'claude':
+      // -p = single-shot print mode; the prompt arrives on stdin.
+      return ['--output-format', 'json', '--model', model || DEFAULT_CLAUDE_MODEL, '-p'];
+    case 'gemini': {
+      // Gemini CLI goes non-interactive on its own when stdin is piped.
+      const args: string[] = [];
+      if (model) args.push('-m', model);
+      return args;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Prefer the agent the caller asked for, then Claude, then any installed agent
+ *  this module knows how to drive for a text-only run. */
 function pickAgent(preferred?: AgentProviderId): HeadlessAgent | null {
   const usable = (a: HeadlessAgent | null | undefined): a is HeadlessAgent =>
-    !!a && !!a.capabilities.headless && a.isAvailable() && !!a.buildHeadlessArgs;
+    !!a && !!buildAssistArgs(a.id) && a.isAvailable();
 
   const wanted = preferred ? agentRegistry.get(preferred) : null;
   if (usable(wanted)) return wanted;
   const claude = agentRegistry.get('claude');
   if (usable(claude)) return claude;
   return agentRegistry.getAll().find((a) => usable(a)) || null;
+}
+
+/** A directory the child can actually start in. The path never reaches the
+ *  shell (spawn passes `cwd` to the OS, not to the command line), but it must
+ *  exist or spawn fails with ENOENT — projects get moved and deleted. */
+function resolveCwd(preferred?: string): string {
+  for (const candidate of [preferred, process.cwd()]) {
+    if (!candidate) continue;
+    try {
+      if (statSync(candidate).isDirectory()) return candidate;
+    } catch { /* gone — try the next */ }
+  }
+  return process.cwd();
 }
 
 function runHeadless(
@@ -182,9 +229,13 @@ function runHeadless(
     // Claude refuses to nest inside another Claude session; harmless elsewhere.
     delete env.CLAUDECODE;
 
-    // shell:true so Windows resolves the PATH-installed CLI shim. The prompt
-    // goes via stdin (never argv) and the only interpolated args are the
-    // validated model and the local cwd.
+    // shell:true is required on Windows, where the agent CLIs are .cmd shims
+    // that spawn cannot execute directly. That makes argv a shell command line,
+    // so nothing user-influenced may appear in it: `agent.command` comes from
+    // the built-in registry, `args` is constants plus a strictly-validated
+    // model (see buildAssistArgs), the prompt goes in over stdin, and `cwd` is
+    // handed to the OS as the child's working directory rather than being
+    // concatenated into the command line.
     const child = spawn(agent.command, args, {
       env,
       cwd,
@@ -241,25 +292,27 @@ export async function runCommentAssist(
   req: CommentAssistRequest,
 ): Promise<{ success: true; data: CommentAssistResult } | { success: false; error: string }> {
   const agent = pickAgent(req.provider);
-  if (!agent?.buildHeadlessArgs) {
+  if (!agent) {
     return {
       success: false,
       error: 'No headless-capable agent CLI is installed — install Claude Code to draft replies.',
     };
   }
 
-  // SECURITY: `model` reaches argv under shell:true. Must start alphanumeric
-  // (blocks leading-`-` flag smuggling) and hold only model-id characters.
+  // SECURITY: `model` is the only caller-supplied value that reaches argv, and
+  // argv becomes a shell command line (shell:true — see runHeadless). It must
+  // start alphanumeric (blocks leading-`-` flag smuggling) and hold only
+  // model-id characters, which rules out shell metacharacters entirely.
   const model = req.model;
   if (model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model)) {
     return { success: false, error: `Invalid model "${model}" — refusing to run` };
   }
 
-  const cwd = req.cwd || process.cwd();
-  const args = agent.buildHeadlessArgs({ model, cwd, jsonOutput: true });
+  const args = buildAssistArgs(agent.id, model);
   if (!args) {
-    return { success: false, error: `${agent.displayName} does not support headless runs` };
+    return { success: false, error: `${agent.displayName} cannot draft replies non-interactively` };
   }
+  const cwd = resolveCwd(req.cwd);
 
   try {
     const stdout = await runHeadless(agent, args, buildPrompt(req), cwd);
