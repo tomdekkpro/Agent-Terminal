@@ -694,11 +694,21 @@ export function getRateLimitedUntil(): number { return rateLimitedUntil; }
  * On 429 the rate-limit backoff is recorded and cached data is returned.
  */
 export async function fetchUsageData(): Promise<UsageSnapshot> {
-  // If we're still in a rate-limit backoff window, return cached data immediately
+  // If we're still in a rate-limit backoff window, do not call the API at all.
+  //
+  // This used to also require `lastSuccessfulUsage`, so a cold start inside a
+  // 429 window skipped its own backoff entirely: with no cached snapshot to
+  // return, every poll went back to the API, got another 429, and pushed the
+  // window out again — which is why a startup log fills with
+  // "Rate limited and no cached data available".
   const now = Date.now();
-  if (rateLimitedUntil > now && lastSuccessfulUsage) {
-    debugLog(`[UsageService] Still rate-limited for ${Math.round((rateLimitedUntil - now) / 1000)}s — returning cached data`);
-    return { ...lastSuccessfulUsage, fetchedAt: new Date() };
+  if (rateLimitedUntil > now) {
+    const waitS = Math.round((rateLimitedUntil - now) / 1000);
+    if (lastSuccessfulUsage) {
+      debugLog(`[UsageService] Still rate-limited for ${waitS}s — returning cached data`);
+      return { ...lastSuccessfulUsage, fetchedAt: new Date() };
+    }
+    throw new Error(`Usage API rate limited — retrying in ${waitS}s`);
   }
 
   // Method 1: OAuth API (fast, reliable)

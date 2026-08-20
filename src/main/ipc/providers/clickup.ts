@@ -47,6 +47,12 @@ const snapshotStores = new Map<string, SnapshotStore>();
 /** At most one list-tree walk in flight per workspace; callers share it. */
 const listsInflight = new Map<string, Promise<TaskManagerList[]>>();
 
+/** At most one snapshot sync in flight per list set. The result cache only
+ *  helps callers that arrive after a sync finishes; the terminal restore and
+ *  the terminal view's first refresh start together, so both used to miss the
+ *  cache and each pay a full page-through of the same 15 requests. */
+const snapshotInflight = new Map<string, Promise<Map<string, TaskManagerTask>>>();
+
 // ─── Rate limiting ──────────────────────────────────────────────────────────
 // ClickUp enforces a per-token limit of 100 requests/minute on Free/Unlimited/
 // Business plans (1000 on Business Plus, 10000 on Enterprise). Several pollers
@@ -856,9 +862,33 @@ export class ClickUpProvider implements ITaskManagerProvider {
       if (listIds.length === 0) return { success: true, data: {} };
 
       const storeKey = [...listIds].sort().join(',');
-      const cacheKey = `snapshots-${storeKey}`;
-      const cached = cacheGet(cacheKey);
-      if (cached) return { success: true, data: cached };
+      const wanted = new Set(refs.map((r) => r.taskId));
+
+      /** Pull this caller's ids out of the shared store. */
+      const pick = (byId: Map<string, TaskManagerTask>): Record<string, TaskManagerTask> => {
+        const out: Record<string, TaskManagerTask> = {};
+        for (const id of wanted) {
+          const hit = byId.get(id);
+          if (hit) out[id] = hit;
+        }
+        return out;
+      };
+
+      // A recent sync serves everyone from the store. This replaces a cache
+      // keyed on the list set that held a result already filtered to whichever
+      // caller populated it — a second caller wanting a different set of tasks
+      // got the first caller's answer, missing its own.
+      const existing = snapshotStores.get(storeKey);
+      if (existing && Date.now() - existing.lastSyncMs < CACHE_TTL) {
+        return { success: true, data: pick(existing.byId) };
+      }
+
+      // One sync per list set at a time. The store check above only helps
+      // callers arriving after a sync completes; the terminal restore and the
+      // terminal view's first refresh start together, so without this both
+      // paged the same 15 requests.
+      const inflight = snapshotInflight.get(storeKey);
+      if (inflight) return { success: true, data: pick(await inflight) };
 
       const params = new URLSearchParams();
       params.set('include_closed', 'true');
@@ -868,7 +898,6 @@ export class ClickUpProvider implements ITaskManagerProvider {
       params.set('order_by', 'updated');
       for (const id of listIds) params.append('list_ids[]', id);
 
-      const wanted = new Set(refs.map((r) => r.taskId));
       const syncStart = Date.now();
       const store = snapshotStores.get(storeKey);
       const fullSync = !store || syncStart - store.fullSyncMs >= SNAPSHOT_FULL_RESYNC_MS;
@@ -883,42 +912,40 @@ export class ClickUpProvider implements ITaskManagerProvider {
       // unchanged tasks keep serving their last-known snapshot with zero
       // additional requests.
       const byId = fullSync ? new Map<string, TaskManagerTask>() : store.byId;
-      let pages = 0;
 
-      for (let page = 0; page < MAX_SNAPSHOT_PAGES; page++) {
-        const data = await clickUpFetch(
-          settings.clickupApiKey,
-          `/team/${teamId}/task?${params.toString()}&page=${page}`,
-          {},
-          true, // background — never starve interactive requests
-        );
-        const tasks: any[] = data.tasks || [];
-        pages++;
-        for (const raw of tasks) {
-          byId.set(raw.id, normalizeClickUpTask(raw));
+      const sync = (async () => {
+        let pages = 0;
+        for (let page = 0; page < MAX_SNAPSHOT_PAGES; page++) {
+          const data = await clickUpFetch(
+            settings.clickupApiKey,
+            `/team/${teamId}/task?${params.toString()}&page=${page}`,
+            {},
+            true, // background — never starve interactive requests
+          );
+          const tasks: any[] = data.tasks || [];
+          pages++;
+          for (const raw of tasks) {
+            byId.set(raw.id, normalizeClickUpTask(raw));
+          }
+          // Last page reached, or (on a full sync) every tracked task seen.
+          if (tasks.length < 100) break;
+          if (fullSync && [...wanted].every((id) => byId.has(id))) break;
         }
-        // Last page reached, or (on a full sync) every tracked task seen.
-        if (tasks.length < 100) break;
-        if (fullSync && [...wanted].every((id) => byId.has(id))) break;
-      }
 
-      snapshotStores.set(storeKey, {
-        byId,
-        lastSyncMs: syncStart,
-        fullSyncMs: fullSync ? syncStart : store.fullSyncMs,
-      });
+        snapshotStores.set(storeKey, {
+          byId,
+          lastSyncMs: syncStart,
+          fullSyncMs: fullSync ? syncStart : store.fullSyncMs,
+        });
 
-      const result: Record<string, TaskManagerTask> = {};
-      for (const id of wanted) {
-        const hit = byId.get(id);
-        if (hit) result[id] = hit;
-      }
+        debugLog(
+          `[ClickUp] Snapshot ${fullSync ? 'full' : 'incremental'} sync: ${[...wanted].filter((id) => byId.has(id)).length}/${wanted.size} task(s) in ${pages} request(s) across ${listIds.length} list(s)`,
+        );
+        return byId;
+      })().finally(() => snapshotInflight.delete(storeKey));
 
-      cacheSet(cacheKey, result);
-      debugLog(
-        `[ClickUp] Snapshot ${fullSync ? 'full' : 'incremental'} sync: ${Object.keys(result).length}/${wanted.size} task(s) in ${pages} request(s) across ${listIds.length} list(s)`,
-      );
-      return { success: true, data: result };
+      snapshotInflight.set(storeKey, sync);
+      return { success: true, data: pick(await sync) };
     } catch (error) {
       // Non-fatal: callers fall back to per-task reads.
       debugError('[ClickUp] Snapshot batch failed:', error);
