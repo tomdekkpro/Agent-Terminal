@@ -199,4 +199,5 @@ export const IPC_CHANNELS = {
   // App
   OPEN_EXTERNAL: 'app:open-external',
   OPEN_PATH: 'app:open-path',
+  API_LOG_PATH: 'app:api-log-path',
 } as const;

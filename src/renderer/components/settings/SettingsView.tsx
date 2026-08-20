@@ -1186,6 +1186,27 @@ export function SettingsView() {
                 <p className="text-[11px] text-[var(--text-muted)] mt-1">How often the Kanban board pulls fresh ClickUp status for all imported tasks. Runs independently of the auto-code loop.</p>
               </div>
 
+              {/* API request log — every outbound ClickUp call, with the failing
+                  endpoint and ClickUp's own error text for anything that fails. */}
+              <div className="flex items-center justify-between p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border)]">
+                <div className="min-w-0 pr-3">
+                  <label className="text-sm font-medium text-[var(--text-primary)]">API Request Log</label>
+                  <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                    Every ClickUp request with its status, duration and remaining rate-limit budget. Failed requests include the exact endpoint and ClickUp's error message, so a bad query can be identified without reproducing it.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const path = await window.electronAPI.getApiLogPath?.();
+                    if (path) await window.electronAPI.openPath(path);
+                  }}
+                  className="shrink-0 px-3 py-2 rounded-lg text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] hover:border-[var(--accent)] transition-colors"
+                >
+                  Open log
+                </button>
+              </div>
+
               {/* Auto-merge */}
               <div className="flex items-center justify-between p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border)]">
                 <div>

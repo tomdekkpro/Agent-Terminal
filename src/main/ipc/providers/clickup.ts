@@ -1,6 +1,7 @@
 import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
 import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './types';
 import { debugLog, debugError } from '../../../shared/utils';
+import { logApiRequest } from '../../logging/api-log';
 
 const CLICKUP_API_BASE = 'https://api.clickup.com/api/v2';
 
@@ -213,12 +214,15 @@ async function sendRequest(
   options: RequestInit,
   background: boolean,
 ): Promise<any> {
+  const method = (options.method || 'GET').toUpperCase();
+
   for (let attempt = 0; ; attempt++) {
     await acquireSlot(background);
 
     let response: Response;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const startedAt = Date.now();
     try {
       response = await fetch(`${CLICKUP_API_BASE}${endpoint}`, {
         ...options,
@@ -229,10 +233,39 @@ async function sendRequest(
           ...options.headers,
         },
       });
+    } catch (err) {
+      // Network failure or the 30s abort — there is no response to inspect, so
+      // this is the only place the endpoint can be attached to the error.
+      const reason = err instanceof Error ? err.message : String(err);
+      logApiRequest({
+        provider: 'ClickUp',
+        method,
+        endpoint,
+        durationMs: Date.now() - startedAt,
+        attempt,
+        background,
+        error: reason,
+      });
+      throw new Error(`ClickUp request failed: ${method} ${endpoint} — ${reason}`);
     } finally {
       clearTimeout(timeoutId);
       releaseSlot();
     }
+
+    // Exactly one log line per attempt: each outcome below records its own, so
+    // a failure is never reported twice, once with and once without its reason.
+    const logLine = (error?: string) =>
+      logApiRequest({
+        provider: 'ClickUp',
+        method,
+        endpoint,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        attempt,
+        background,
+        rateRemaining: response.headers.get('x-ratelimit-remaining'),
+        error,
+      });
 
     if (response.status === 429) {
       const delay = resolveRetryDelay(response, attempt);
@@ -242,19 +275,43 @@ async function sendRequest(
       // a click is a three-minute freeze, which is worse than a clear error.
       const maxRetries = background ? MAX_RETRIES : INTERACTIVE_MAX_RETRIES;
       if (attempt >= maxRetries) {
-        debugError(`[ClickUp] Rate limited on ${endpoint} — giving up after ${maxRetries} retr${maxRetries === 1 ? 'y' : 'ies'}`);
+        debugError(`[ClickUp] Rate limited on ${method} ${endpoint} — giving up after ${maxRetries} retr${maxRetries === 1 ? 'y' : 'ies'}`);
+        logLine(`rate limited, gave up after ${maxRetries} retr${maxRetries === 1 ? 'y' : 'ies'}`);
         throw new RateLimitedError(delay);
       }
-      debugLog(`[ClickUp] 429 on ${endpoint} — retrying in ${Math.ceil(delay / 1000)}s (attempt ${attempt + 1}/${maxRetries})`);
+      logLine(`rate limited, retrying in ${Math.ceil(delay / 1000)}s`);
+      debugLog(`[ClickUp] 429 on ${method} ${endpoint} — retrying in ${Math.ceil(delay / 1000)}s (attempt ${attempt + 1}/${maxRetries})`);
       continue;
     }
 
     syncBudgetFromHeaders(response);
 
     if (!response.ok) {
-      throw new Error(`ClickUp API error: ${response.status} ${response.statusText}`);
+      // ClickUp returns a JSON body like {"err":"Task not found","ECODE":"ITEM_013"}
+      // which names the actual problem. Without it — and without the endpoint —
+      // a failure was just "400 Bad Request" with no way to tell which query
+      // produced it.
+      let detail = '';
+      try {
+        const body = await response.text();
+        if (body) {
+          try {
+            const parsed = JSON.parse(body);
+            detail = parsed?.err
+              ? `${parsed.err}${parsed.ECODE ? ` [${parsed.ECODE}]` : ''}`
+              : body.slice(0, 300);
+          } catch {
+            detail = body.slice(0, 300);
+          }
+        }
+      } catch { /* body already consumed or unreadable */ }
+
+      const message = `ClickUp API error ${response.status} on ${method} ${endpoint}${detail ? ` — ${detail}` : ''}`;
+      logLine(detail || response.statusText || 'request failed');
+      throw new Error(message);
     }
 
+    logLine();
     return response.json();
   }
 }
