@@ -12,7 +12,18 @@ import type { ITaskManagerProvider, ProviderResult, WorkspaceMember } from './ty
 import { debugLog, debugError } from '../../../shared/utils';
 import { logApiRequest } from '../../logging/api-log';
 
-const CLICKUP_API_BASE = 'https://api.clickup.com/api/v2';
+const CLICKUP_API_ROOT = 'https://api.clickup.com/api';
+const CLICKUP_API_BASE = `${CLICKUP_API_ROOT}/v2`;
+
+/** Endpoints are written against v2 unless they name their version, so the
+ *  Chat client can pass `/v3/workspaces/...` through the same rate limiter —
+ *  ClickUp's budget is per token, not per API version, and two independent
+ *  limiters would each think they had the whole 100/min to spend. */
+function resolveUrl(endpoint: string): string {
+  return endpoint.startsWith('/v3/')
+    ? `${CLICKUP_API_ROOT}${endpoint}`
+    : `${CLICKUP_API_BASE}${endpoint}`;
+}
 
 // 30-second cache
 const taskCache = new Map<string, { data: any; timestamp: number }>();
@@ -94,6 +105,8 @@ const INTERACTIVE_MAX_RETRIES = 1;
 // up with a clear message. Blocking beyond this reads as a frozen UI.
 const INTERACTIVE_MAX_WAIT_MS = 15_000;
 const MAX_BACKOFF_MS = 60_000;
+/** Default per-request deadline. Uploads pass their own, much larger. */
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 let windowStart = 0;
 let windowCount = 0;
@@ -183,14 +196,22 @@ function resolveRetryDelay(response: Response, attempt: number): number {
 
 /** Keep the local budget in step with what the API reports it has left. */
 function syncBudgetFromHeaders(response: Response): void {
-  const remaining = Number(response.headers.get('x-ratelimit-remaining'));
+  // A missing header means "no information", not "no budget left". Reading it
+  // straight into Number() would say 0, because Number(null) === 0 — and the
+  // v3 Chat endpoints send no rate-limit headers at all, so every Chat request
+  // used to pause ALL background traffic (Chat's own polling, plus the Kanban
+  // snapshot and dashboard pollers) for five seconds.
+  const rawRemaining = response.headers.get('x-ratelimit-remaining');
+  if (rawRemaining === null) return;
+  const remaining = Number(rawRemaining);
   if (!Number.isFinite(remaining)) return;
   if (remaining > 2) return;
   // Nearly out. Hold back background traffic only — this is a warning, not a
   // refusal, so the requests still left in the window belong to whatever the
   // user is waiting on rather than to a poller. Draining can also be caused by
   // something else using the same token, which we cannot see or control.
-  const reset = Number(response.headers.get('x-ratelimit-reset'));
+  const rawReset = response.headers.get('x-ratelimit-reset');
+  const reset = rawReset === null ? NaN : Number(rawReset);
   const until = Number.isFinite(reset) && reset > 0 ? reset * 1000 + 500 : Date.now() + 5000;
   if (until > backgroundPausedUntil) {
     backgroundPausedUntil = Math.min(until, Date.now() + MAX_BACKOFF_MS);
@@ -201,22 +222,25 @@ function syncBudgetFromHeaders(response: Response): void {
 /** Concurrent GETs for the same endpoint share one request instead of racing. */
 const inflightGets = new Map<string, Promise<any>>();
 
-async function clickUpFetch(
+export async function clickUpFetch(
   apiKey: string,
   endpoint: string,
   options: RequestInit = {},
   background = false,
+  /** Overrides the default per-request deadline. File uploads need far longer
+   *  than a JSON read, and a 30s cap would fail every sizeable attachment. */
+  timeoutMs = DEFAULT_TIMEOUT_MS,
 ) {
   if (!apiKey) throw new Error('ClickUp API key not configured');
 
   const method = (options.method || 'GET').toUpperCase();
-  if (method !== 'GET') return sendRequest(apiKey, endpoint, options, background);
+  if (method !== 'GET') return sendRequest(apiKey, endpoint, options, background, timeoutMs);
 
   const key = `${apiKey}:${endpoint}`;
   const existing = inflightGets.get(key);
   if (existing) return existing;
 
-  const promise = sendRequest(apiKey, endpoint, options, background).finally(() => {
+  const promise = sendRequest(apiKey, endpoint, options, background, timeoutMs).finally(() => {
     inflightGets.delete(key);
   });
   inflightGets.set(key, promise);
@@ -228,6 +252,7 @@ async function sendRequest(
   endpoint: string,
   options: RequestInit,
   background: boolean,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<any> {
   const method = (options.method || 'GET').toUpperCase();
 
@@ -236,15 +261,27 @@ async function sendRequest(
 
     let response: Response;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    // A caller-supplied signal (an upload the user can cancel) has to be
+    // linked in rather than passed through: the fetch below uses this
+    // controller's signal for the deadline, which would otherwise discard it.
+    const external = options.signal;
+    const relayAbort = () => controller.abort();
+    if (external) {
+      if (external.aborted) controller.abort();
+      else external.addEventListener('abort', relayAbort, { once: true });
+    }
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const startedAt = Date.now();
     try {
-      response = await fetch(`${CLICKUP_API_BASE}${endpoint}`, {
+      response = await fetch(resolveUrl(endpoint), {
         ...options,
         signal: controller.signal,
         headers: {
           Authorization: apiKey,
-          'Content-Type': 'application/json',
+          // A multipart upload must let fetch generate its own Content-Type:
+          // the boundary is part of it, and hard-coding JSON here would make
+          // every attachment upload fail as a malformed body.
+          ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
           ...options.headers,
         },
       });
@@ -264,6 +301,7 @@ async function sendRequest(
       throw new Error(`ClickUp request failed: ${method} ${endpoint} — ${reason}`);
     } finally {
       clearTimeout(timeoutId);
+      external?.removeEventListener('abort', relayAbort);
       releaseSlot();
     }
 
@@ -1507,6 +1545,9 @@ export class ClickUpProvider implements ITaskManagerProvider {
       const data = await clickUpFetch(settings.clickupApiKey, `/team/${teamId}`);
       const members: WorkspaceMember[] = (data.team?.members || []).map((m: any) => {
         const user = m.user || {};
+        // `last_active` is a stringified ms epoch and is absent for some
+        // accounts (never-logged-in invitees).
+        const lastActive = Number(user.last_active);
         return {
           id: String(user.id),
           username: user.username || user.email || 'Unknown',
@@ -1514,6 +1555,7 @@ export class ClickUpProvider implements ITaskManagerProvider {
           initials: user.initials,
           color: user.color,
           profilePicture: user.profilePicture,
+          lastActiveMs: Number.isFinite(lastActive) && lastActive > 0 ? lastActive : undefined,
         };
       });
 

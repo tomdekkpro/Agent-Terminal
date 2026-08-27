@@ -4,6 +4,7 @@ import { TerminalManager } from './terminal/terminal-manager';
 import { saveOutputBuffers } from './terminal/terminal-state-store';
 import { registerTerminalHandlers } from './ipc/terminal-handlers';
 import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
+import { registerChatHandlers } from './ipc/chat-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
 import { sessionUsageTracker } from './usage/session-usage-tracker';
@@ -128,6 +129,7 @@ app.whenReady().then(() => {
 
   registerTerminalHandlers(ipcMain, terminalManager, getWindow);
   registerTaskManagerHandlers(ipcMain);
+  registerChatHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerUsageHandlers(ipcMain, getWindow);
   registerProjectHandlers(ipcMain, getWindow);

@@ -196,6 +196,163 @@ export interface CommentAssistResult {
   raw?: string;
 }
 
+// ─── ClickUp Chat (v3) ────────────────────────────────────────
+
+/** A person in Chat — the workspace member behind a message or a DM. */
+export interface ChatUser {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
+  /** ms epoch this person was last active in ClickUp. Not a live presence
+   *  channel — ClickUp has none — but it does track real app usage, and
+   *  notably is NOT bumped by API traffic, so it reflects a human being
+   *  there rather than an integration polling. */
+  lastActiveMs?: number;
+}
+
+/** How recently someone was active, bucketed for display. */
+export type ChatPresence = 'online' | 'away' | 'offline';
+
+/** Within this, someone is treated as at their desk. */
+export const PRESENCE_ONLINE_MS = 5 * 60_000;
+/** Within this, recently around — probably still reachable. */
+export const PRESENCE_AWAY_MS = 30 * 60_000;
+
+export function presenceOf(lastActiveMs?: number): ChatPresence {
+  if (!lastActiveMs) return 'offline';
+  const idle = Date.now() - lastActiveMs;
+  if (idle <= PRESENCE_ONLINE_MS) return 'online';
+  if (idle <= PRESENCE_AWAY_MS) return 'away';
+  return 'offline';
+}
+
+/** "Active 12m ago" — the honest label behind the dot. */
+export function presenceLabel(lastActiveMs?: number): string {
+  if (!lastActiveMs) return 'No recent activity';
+  const idle = Date.now() - lastActiveMs;
+  if (idle <= PRESENCE_ONLINE_MS) return 'Active now';
+  const mins = Math.floor(idle / 60_000);
+  if (mins < 60) return `Active ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Active ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return days < 30 ? `Active ${days}d ago` : 'Not active recently';
+}
+
+/** CHANNEL = a named room; DM = one-to-one; GROUP_DM = a small unnamed group. */
+export type ChatChannelKind = 'CHANNEL' | 'DM' | 'GROUP_DM';
+
+/** A Chat room, normalized. DMs carry no name of their own, so `members`
+ *  is resolved lazily and `name` is derived from the people in it. */
+export interface ChatChannel {
+  id: string;
+  /** Display name. For DMs this is built from `members` once they resolve. */
+  name: string;
+  kind: ChatChannelKind;
+  visibility?: 'PUBLIC' | 'PRIVATE';
+  topic?: string;
+  description?: string;
+  archived?: boolean;
+  /** True when this account follows the Channel — the "my channels" filter. */
+  isFollower?: boolean;
+  /** ms epoch of the newest message, for sorting the sidebar by recency. */
+  latestCommentAtMs?: number;
+  createdAtMs?: number;
+  /** Resolved participants. Empty until the DM name resolver has run. */
+  members?: ChatUser[];
+  /** Deep link into the ClickUp web app. */
+  url?: string;
+}
+
+/** One message in a Channel. ClickUp returns Markdown when asked for it. */
+export interface ChatMessage {
+  id: string;
+  channelId: string;
+  /** Markdown body as ClickUp stores it. */
+  content: string;
+  user: ChatUser;
+  createdAtMs: number;
+  updatedAtMs?: number;
+  type?: 'message' | 'post';
+  /** Post title, for `type: 'post'` announcements. */
+  postTitle?: string;
+  resolved?: boolean;
+  replyCount: number;
+  reactions?: Array<{ reaction: string; count: number; mine?: boolean }>;
+  /** Set on replies — the message they hang off. */
+  parentMessageId?: string;
+}
+
+/** A page of messages, newest-last, with a cursor for the older page. */
+export interface ChatMessagePage {
+  messages: ChatMessage[];
+  /** Pass back as `cursor` to fetch the next older page. */
+  cursor?: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * A file staged in the composer, before it is sent.
+ *
+ * ClickUp's Chat API has no attachment endpoint of its own (verified: the v3
+ * attachments API rejects `chat_messages` as an entity type), so a file is
+ * uploaded to a designated task and its public URL embedded in the message as
+ * Markdown — which is exactly what ClickUp Chat itself stores for a pasted
+ * image, so it renders inline for everyone.
+ */
+export interface ChatPendingAttachment {
+  /** Client-side id, so a staged file can be removed before sending. */
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** Base64 payload, no `data:` prefix. */
+  data: string;
+  /** True when it should embed as an image rather than a link. */
+  isImage: boolean;
+}
+
+/** A file that made it to ClickUp and now has a URL to reference. */
+export interface ChatUploadedFile {
+  name: string;
+  url: string;
+  isImage: boolean;
+}
+
+/** What the Chat page can ask the local agent CLI to do with a thread or a
+ *  hand-picked excerpt. */
+export type ChatAssistKind =
+  | 'suggest'       // draft 3 replies to the conversation
+  | 'summarize'     // digest the conversation (or the selection)
+  | 'translate'     // render the selection/draft in another language
+  | 'explain'       // "what is this?" for a selected excerpt
+  | 'action-items'  // pull out decisions, todos and who owes what
+  | 'rewrite';      // polish the user's draft in a given tone
+
+/** Languages the Chat page offers one-click translation into. */
+export type ChatLanguage = 'vi' | 'en' | 'no';
+
+export interface ChatSuggestion {
+  /** Short label for the angle taken, e.g. "Ask for the log". */
+  title: string;
+  text: string;
+}
+
+export interface ChatAssistResult {
+  kind: ChatAssistKind;
+  /** kind === 'suggest' */
+  suggestions?: ChatSuggestion[];
+  /** Markdown answer for summarize / explain / action-items. */
+  summary?: string;
+  /** Single rewritten body for translate / rewrite — drops straight into the composer. */
+  text?: string;
+  /** Model output that could not be parsed as JSON — shown as-is. */
+  raw?: string;
+}
+
 /** Data sources a Dashboard Notice's AI run is allowed to use. */
 export type NoticeSource = 'clickup' | 'github' | 'web';
 
@@ -308,6 +465,17 @@ export interface AppSettings {
   jiraApiToken: string;
   jiraDomain: string;
   jiraProjectKey: string;
+  // Chat (ClickUp Chat page)
+  /** Language the one-click "Translate" button targets. */
+  chatTranslateLanguage: ChatLanguage;
+  /** How often an open Channel re-reads its messages, in seconds. 0 disables. */
+  chatPollSeconds: number;
+  /** Show every Channel in the Workspace, not only the ones this account follows. */
+  chatShowAllChannels: boolean;
+  /** Task that hosts files shared in Chat. ClickUp has no chat-attachment API,
+   *  so uploads are attached here and linked from the message. Empty disables
+   *  attachments rather than picking a task on the user's behalf. */
+  chatUploadTaskId: string;
   // Agent
   defaultModel: string;
   workingDirectory: string;
@@ -1124,6 +1292,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   jiraApiToken: '',
   jiraDomain: '',
   jiraProjectKey: '',
+  chatTranslateLanguage: 'vi',
+  chatPollSeconds: 20,
+  chatShowAllChannels: false,
+  chatUploadTaskId: '',
   teamServerUrl: '',
   teamAutoConnect: false,
   teamAutoStartServer: false,

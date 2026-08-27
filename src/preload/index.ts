@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC_CHANNELS } from '../shared/constants';
 import type {
   AgentProviderId,
+  ChatAssistKind,
+  ChatLanguage,
+  ChatMessage,
   CommentAssistKind,
   TaskCommentCursor,
   TaskSearchFilters,
@@ -364,6 +367,53 @@ const electronAPI = {
   // Claude Sessions Browser
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSIONS_LIST, cwd),
   claudeSessionExists: (cwd: string, sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_SESSION_EXISTS, cwd, sessionId),
+
+  // ClickUp Chat
+  chatGetChannels: (opts?: { followingOnly?: boolean; background?: boolean; force?: boolean }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_CHANNELS, opts),
+  chatGetMessages: (
+    channelId: string,
+    opts?: { cursor?: string | null; limit?: number; background?: boolean },
+  ) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_MESSAGES, channelId, opts),
+  chatSendMessage: (channelId: string, content: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND_MESSAGE, channelId, content),
+  chatGetReplies: (messageId: string, opts?: { cursor?: string | null; background?: boolean }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_REPLIES, messageId, opts),
+  chatSendReply: (messageId: string, content: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND_REPLY, messageId, content),
+  chatGetChannelMembers: (channelId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_CHANNEL_MEMBERS, channelId),
+  chatCreateDm: (userIds: string[]) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_CREATE_DM, userIds),
+  chatGetReactions: (messageIds: string[], opts?: { background?: boolean; force?: boolean }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_REACTIONS, messageIds, opts),
+  chatReact: (messageId: string, reaction: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_REACT, messageId, reaction),
+  chatUnreact: (messageId: string, reaction: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_UNREACT, messageId, reaction),
+  chatMe: () => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ME),
+  chatGetPresence: () => ipcRenderer.invoke(IPC_CHANNELS.CHAT_GET_PRESENCE),
+  chatUploadFile: (file: { name: string; mime: string; data: string }, uploadId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_UPLOAD_FILE, file, uploadId),
+  chatCancelUpload: (uploadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CHAT_CANCEL_UPLOAD, uploadId),
+  chatAssist: (req: {
+    kind: ChatAssistKind;
+    channel: { name: string; kind: string; topic?: string };
+    messages: ChatMessage[];
+    selection?: string;
+    draft?: string;
+    language?: ChatLanguage;
+    tone?: 'polite' | 'shorter' | 'direct' | 'formal';
+    projectPath?: string;
+    provider?: AgentProviderId;
+    model?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ASSIST, req),
+  chatCreateTaskFromMessage: (req: {
+    name: string;
+    description?: string;
+    listId?: string;
+    assigneeIds?: string[];
+  }) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_CREATE_TASK_FROM_MESSAGE, req),
 
   // File utilities
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

@@ -1,5 +1,6 @@
 import { Terminal, Kanban, ShieldCheck, Sparkles, GitPullRequestDraft, Settings, LayoutDashboard } from 'lucide-react';
 import type { ViewType } from '../../App';
+import { useChatStore } from '../../stores/chat-store';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
 
@@ -47,6 +48,13 @@ function AppLogo({ className }: { className?: string }) {
 }
 
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
+  // Unread ClickUp Chat messages, kept current by the poller in App even while
+  // the Chat page is closed — otherwise a DM sits unseen until you happen to
+  // click through to it.
+  const chatUnread = useChatStore((s) =>
+    Object.values(s.unread).reduce((total, entry) => total + entry.count, 0),
+  );
+
   return (
     <div className="w-16 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col items-center py-4 gap-2">
       {/* App icon */}
@@ -69,6 +77,14 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           )}
         >
           <Icon className="w-5 h-5" />
+          {id === 'insights' && chatUnread > 0 && (
+            <span
+              title={`${chatUnread} unread message${chatUnread === 1 ? '' : 's'}`}
+              className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[var(--accent)] text-white text-[9px] font-semibold flex items-center justify-center tabular-nums ring-2 ring-[var(--bg-secondary)]"
+            >
+              {chatUnread > 99 ? '99+' : chatUnread}
+            </span>
+          )}
         </button>
       ))}
 

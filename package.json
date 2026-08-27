@@ -1,6 +1,6 @@
 {
   "name": "agent-terminal",
-  "version": "1.37.2",
+  "version": "1.38.0",
   "description": "Agent Terminal - AI-powered terminal with ClickUp integration",
   "author": {
     "name": "tomdekkpro",
@@ -143,6 +143,7 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
     "uuid": "^13.0.0",

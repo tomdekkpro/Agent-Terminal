@@ -94,4 +94,6 @@ export interface WorkspaceMember {
   initials?: string;
   color?: string;
   profilePicture?: string;
+  /** ms epoch of the member's last activity in ClickUp, when it reports one. */
+  lastActiveMs?: number;
 }

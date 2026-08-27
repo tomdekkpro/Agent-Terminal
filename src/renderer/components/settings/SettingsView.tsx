@@ -6,6 +6,7 @@ import { useProjectStore } from '../../stores/project-store';
 import type { AppSettings, AgentProviderMeta, QCCredential } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
+import { TaskPickerModal } from '../terminal/TerminalView';
 
 type SettingsSection = 'general' | 'terminal' | 'tasks' | 'testing' | 'auto-code' | 'agent' | 'team' | 'appearance';
 
@@ -26,6 +27,7 @@ export function SettingsView() {
   const [localSettings, setLocalSettings] = useState<AppSettings>(settings);
   const [hasChanges, setHasChanges] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pickingUploadTask, setPickingUploadTask] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'checking' | 'connected' | 'error'>('idle');
   const [connectionMessage, setConnectionMessage] = useState('');
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'up-to-date' | 'error'>('idle');
@@ -502,6 +504,87 @@ export function SettingsView() {
                       <p className="text-[10px] text-[var(--text-muted)] mt-1">
                         Comma-separated List IDs. If your token doesn't have permission to auto-discover lists, enter them manually here.
                       </p>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border)] space-y-3">
+                      <h4 className="text-xs font-semibold text-[var(--text-primary)]">Chat page</h4>
+
+                      <div>
+                        <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Translate button target</label>
+                        <select
+                          value={localSettings.chatTranslateLanguage}
+                          onChange={(e) => handleChange('chatTranslateLanguage', e.target.value)}
+                          className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                        >
+                          <option value="vi">Vietnamese</option>
+                          <option value="en">English</option>
+                          <option value="no">Norwegian</option>
+                        </select>
+                        <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                          The language one-click Translate writes in. Changing it on the Chat page updates this too.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Refresh the open conversation every</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={0}
+                            max={300}
+                            value={localSettings.chatPollSeconds}
+                            onChange={(e) => handleChange('chatPollSeconds', Math.max(0, Number(e.target.value) || 0))}
+                            className="w-24 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                          />
+                          <span className="text-xs text-[var(--text-muted)]">seconds (0 = never)</span>
+                        </div>
+                        <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                          Polls run on the background API lane, so they never delay a click. Raise this if you share the token with other tools.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Task that hosts files shared in Chat</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={localSettings.chatUploadTaskId}
+                            onChange={(e) => handleChange('chatUploadTaskId', e.target.value.trim())}
+                            placeholder="Leave empty to disable attachments"
+                            className="flex-1 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+                          />
+                          <button
+                            onClick={() => setPickingUploadTask(true)}
+                            className="px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-sm text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)]/50 whitespace-nowrap"
+                          >
+                            Choose…
+                          </button>
+                          {localSettings.chatUploadTaskId && (
+                            <button
+                              onClick={() => handleChange('chatUploadTaskId', '')}
+                              title="Clear"
+                              className="px-2 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:text-[var(--error)]"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                          ClickUp has no attachment API for Chat, so pasted and dropped files are
+                          uploaded to this task and linked from the message. They will be visible in
+                          that task's attachments — use a scratch task, not a real ticket.
+                        </p>
+                      </div>
+
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={localSettings.chatShowAllChannels}
+                          onChange={(e) => handleChange('chatShowAllChannels', e.target.checked)}
+                          className="accent-[var(--accent)]"
+                        />
+                        <span className="text-sm text-[var(--text-secondary)]">Start on all channels, not just the ones I follow</span>
+                      </label>
                     </div>
 
                     <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border)]">
@@ -1277,6 +1360,20 @@ export function SettingsView() {
           )}
         </div>
       </div>
+
+      {/* Picking the Chat upload task by hand meant hunting for a task id.
+          Reuses the terminal's picker so it behaves like every other place
+          a task is chosen. */}
+      {pickingUploadTask && (
+        <TaskPickerModal
+          mode="link"
+          onSelect={(task) => {
+            handleChange('chatUploadTaskId', task.id);
+            setPickingUploadTask(false);
+          }}
+          onCancel={() => setPickingUploadTask(false)}
+        />
+      )}
     </div>
   );
 }
