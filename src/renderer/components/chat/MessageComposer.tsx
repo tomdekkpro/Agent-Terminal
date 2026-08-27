@@ -10,8 +10,31 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-import type { ChatLanguage, ChatPendingAttachment } from '../../../shared/types';
+import type { ChatLanguage, ChatPendingAttachment, ChatUser } from '../../../shared/types';
+import type { PendingMention } from '../../stores/chat-store';
 import { cn } from '../../../shared/utils';
+import { Avatar } from './Avatar';
+
+/** Longest thing treated as a half-typed name before the menu gives up. */
+const MENTION_QUERY_MAX = 32;
+const MENTION_RESULTS = 6;
+
+/**
+ * Find the @name being typed immediately before the caret.
+ *
+ * The `@` only counts at the start of the text or after whitespace, so an
+ * email address never opens the menu. The query may contain spaces, because
+ * half of this team has a two-word display name.
+ */
+function mentionQueryAt(text: string, caret: number): { start: number; query: string } | null {
+  const upto = text.slice(0, caret);
+  const at = upto.lastIndexOf('@');
+  if (at === -1) return null;
+  if (at > 0 && !/\s/.test(upto[at - 1])) return null;
+  const query = upto.slice(at + 1);
+  if (query.length > MENTION_QUERY_MAX || /[\n@]/.test(query)) return null;
+  return { start: at, query };
+}
 
 /** Matches the main process's cap — rejecting here means a 20MB payload never
  *  crosses IPC just to be turned away on the other side. */
@@ -165,6 +188,10 @@ interface MessageComposerProps {
    *  send time that there is nowhere to put it. */
   attachmentsEnabled: boolean;
   attachmentsHint?: string;
+  /** Who can be @mentioned here — channel members first, then the workspace. */
+  mentionCandidates: ChatUser[];
+  /** Called when a name is picked, so the sender can map it back to a user id. */
+  onMention: (mention: PendingMention) => void;
 }
 
 export function MessageComposer({
@@ -188,6 +215,8 @@ export function MessageComposer({
   onCancelUpload,
   attachmentsEnabled,
   attachmentsHint,
+  mentionCandidates,
+  onMention,
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -198,6 +227,49 @@ export function MessageComposer({
   /** Nested drag enter/leave events fire constantly over child elements, so
    *  the highlight is driven by a depth count rather than the last event. */
   const dragDepth = useRef(0);
+
+  // @mention autocomplete
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+
+  const mentionMatches = mention
+    ? mentionCandidates
+        .filter((u) => {
+          const q = mention.query.trim().toLowerCase();
+          if (!q) return true;
+          return u.username.toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
+        })
+        .slice(0, MENTION_RESULTS)
+    : [];
+
+  /** Replace the half-typed @query with the chosen name and register the id. */
+  const pickMention = useCallback(
+    (user: ChatUser) => {
+      if (!mention) return;
+      const display = `@${user.username}`;
+      const before = value.slice(0, mention.start);
+      const after = value.slice(mention.start + 1 + mention.query.length);
+      const next = `${before}${display} ${after}`;
+      onChange(next);
+      onMention({ display, userId: user.id });
+      setMention(null);
+      // Put the caret just past the inserted name.
+      const caret = before.length + display.length + 1;
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    },
+    [mention, value, onChange, onMention],
+  );
+
+  const syncMention = useCallback((el: HTMLTextAreaElement) => {
+    const found = mentionQueryAt(el.value, el.selectionStart ?? el.value.length);
+    setMention(found);
+    setMentionIndex(0);
+  }, []);
 
   const stage = useCallback(
     async (files: FileList | File[] | null) => {
@@ -382,6 +454,39 @@ export function MessageComposer({
         </div>
       </div>
 
+      {/* @mention autocomplete — anchored above the input so it never covers
+          the text being typed. */}
+      {mention && mentionMatches.length > 0 && (
+        <div className="absolute bottom-full left-3 right-3 mb-1 z-30 py-1 rounded-xl bg-[var(--bg-card)] border border-[var(--border-strong)] shadow-[var(--shadow-float)] overflow-hidden">
+          {mentionMatches.map((user, i) => (
+            <button
+              key={user.id}
+              // mousedown, not click: the textarea's blur would close the menu
+              // before a click ever landed.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pickMention(user);
+              }}
+              onMouseEnter={() => setMentionIndex(i)}
+              className={cn(
+                'w-full flex items-center gap-2 px-2.5 py-1.5 text-left',
+                i === mentionIndex ? 'bg-[var(--accent)]/15' : 'hover:bg-[var(--bg-tertiary)]',
+              )}
+            >
+              <Avatar user={user} size="xs" presence />
+              <span className="flex-1 min-w-0 truncate text-[12px] text-[var(--text-primary)]">
+                {user.username}
+              </span>
+              {user.email && (
+                <span className="shrink-0 text-[10px] text-[var(--text-muted)] truncate max-w-[140px]">
+                  {user.email}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Input */}
       <div className="flex items-end gap-2 p-3 pt-2">
         <input
@@ -417,11 +522,45 @@ export function MessageComposer({
         <textarea
           ref={textareaRef}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            onChange(e.target.value);
+            syncMention(e.target);
+          }}
+          onClick={(e) => syncMention(e.currentTarget)}
+          onBlur={() => setMention(null)}
           onKeyDown={(e) => {
+            // While the mention menu is open it owns the arrows, Enter and Tab —
+            // otherwise Enter would send the message mid-name.
+            if (mention && mentionMatches.length > 0) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setMentionIndex((i) => (i + 1) % mentionMatches.length);
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setMentionIndex((i) => (i - 1 + mentionMatches.length) % mentionMatches.length);
+                return;
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                pickMention(mentionMatches[mentionIndex]);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               if (canSend) onSend();
+            }
+            // The caret moves before React sees the new value on arrow keys.
+            if (e.key.startsWith('Arrow')) {
+              const el = e.currentTarget;
+              requestAnimationFrame(() => syncMention(el));
             }
           }}
           onPaste={(e) => {

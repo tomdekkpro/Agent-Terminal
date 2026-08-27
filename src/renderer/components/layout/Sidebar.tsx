@@ -52,7 +52,10 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   // the Chat page is closed — otherwise a DM sits unseen until you happen to
   // click through to it.
   const chatUnread = useChatStore((s) =>
-    Object.values(s.unread).reduce((total, entry) => total + entry.count, 0),
+    Object.entries(s.unread).reduce(
+      (total, [id, entry]) => (s.muted[id] ? total : total + entry.count),
+      0,
+    ),
   );
 
   return (

@@ -101,6 +101,68 @@ const uploadIds = new Map<string, string>();
  * conversation and compares that against the Channel's newest message.
  */
 const SEEN_STORAGE_KEY = 'chat-last-seen';
+/** Muted conversations. Local, because ClickUp exposes no mute API — and a
+ *  mute is a personal preference about noise, not shared workspace state. */
+const MUTED_STORAGE_KEY = 'chat-muted';
+
+function loadMuted(): Record<string, true> {
+  try {
+    const raw = localStorage.getItem(MUTED_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistMuted(muted: Record<string, true>): void {
+  try {
+    localStorage.setItem(MUTED_STORAGE_KEY, JSON.stringify(muted));
+  } catch {
+    // Preference only — losing it is not worth failing over.
+  }
+}
+
+/**
+ * A person picked from the composer's @ autocomplete.
+ *
+ * The composer is a plain textarea, so the draft holds the readable `@Name`
+ * and the id is remembered here. On send, each remembered name is rewritten to
+ * ClickUp's wire form — `[@Name](#user_mention#<id>)` — which is exactly what
+ * its own client emits and what it resolves back into a real mention.
+ */
+export interface PendingMention {
+  /** Literally what sits in the draft, including the leading @. */
+  display: string;
+  userId: string;
+}
+
+/** Escape a display name so it can go into a RegExp alternation verbatim. */
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Rewrite remembered @names into ClickUp's mention markup.
+ *
+ * One pass, not one pass per name. Replacing them one at a time corrupts
+ * overlapping names: with "@Tom" and "@Tom Hansen" both registered, rewriting
+ * "@Tom Hansen" first produces `[@Tom Hansen](...)`, and the next pass then
+ * matches the "@Tom" *inside* that markup. A single global replace never
+ * rescans what it just emitted, and ordering the alternation longest-first
+ * makes the regex prefer the fuller name at each position.
+ */
+export function applyMentions(text: string, mentions: PendingMention[]): string {
+  if (mentions.length === 0) return text;
+
+  const byDisplay = new Map<string, string>();
+  for (const mention of mentions) {
+    if (!byDisplay.has(mention.display)) byDisplay.set(mention.display, mention.userId);
+  }
+
+  const displays = [...byDisplay.keys()].sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(displays.map(escapeForRegExp).join('|'), 'g');
+  return text.replace(pattern, (match) => `[${match}](#user_mention#${byDisplay.get(match)})`);
+}
 
 function loadSeen(): Record<string, number> {
   try {
@@ -207,6 +269,10 @@ interface ChatState {
   conversations: Record<string, ConversationState>;
   /** Composer text per channel, so switching away doesn't lose a draft. */
   drafts: Record<string, string>;
+  /** People picked from the composer's @ autocomplete, per channel. */
+  mentions: Record<string, PendingMention[]>;
+  /** Conversations excluded from unread counts and badges. Persisted. */
+  muted: Record<string, true>;
   /** Files staged in the composer, per channel — pasted, dropped or picked,
    *  not yet uploaded. */
   attachments: Record<string, ChatPendingAttachment[]>;
@@ -277,6 +343,10 @@ interface ChatState {
   toggleReaction: (messageId: string, reaction: string) => Promise<void>;
 
   setDraft: (channelId: string, text: string) => void;
+  /** Remember that this @name in the draft refers to this person. */
+  addMention: (channelId: string, mention: PendingMention) => void;
+  /** Silence a conversation, or bring it back. */
+  toggleMute: (channelId: string) => void;
   /** Stage files on a channel's composer. Duplicates are allowed — the same
    *  screenshot twice is a legitimate thing to want. */
   addAttachments: (channelId: string, files: ChatPendingAttachment[]) => void;
@@ -379,6 +449,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     dockOpen: loadDockOpen(),
     conversations: {},
     drafts: {},
+    mentions: {},
+    muted: loadMuted(),
     attachments: {},
     uploading: {},
 
@@ -601,7 +673,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           .join('\n');
       }
 
-      const content = [body, attachmentMarkdown].filter(Boolean).join('\n\n');
+      // @names picked from the autocomplete become real mentions on the wire.
+      const mentioned = applyMentions(body, get().mentions[channelId] || []);
+      const content = [mentioned, attachmentMarkdown].filter(Boolean).join('\n\n');
 
       // Optimistic: the message appears the instant Enter is pressed, and is
       // replaced (or removed on failure) once ClickUp answers.
@@ -619,6 +693,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       set((state) => ({
         drafts: { ...state.drafts, [channelId]: '' },
         attachments: { ...state.attachments, [channelId]: [] },
+        mentions: { ...state.mentions, [channelId]: [] },
       }));
 
       const result = await window.electronAPI.chatSendMessage(channelId, content);
@@ -683,7 +758,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     refreshUnread: async () => {
-      const { channels, lastSeenAt, activeChannelId, viewing, me, unreadBuiltFor } = get();
+      const { channels, lastSeenAt, activeChannelId, viewing, me, unreadBuiltFor, muted } = get();
       // Only skip the open conversation while some surface is actually showing it.
       const reading = viewing.page || viewing.dock ? activeChannelId : null;
 
@@ -692,7 +767,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       // quiet poll this list is empty and the whole pass costs nothing.
       const candidates = channels
         .filter((c) => {
-          if (c.id === reading || c.archived) return false;
+          // Muted conversations are skipped entirely — not counted, and not
+          // even read, so silencing one also stops it costing requests.
+          if (c.id === reading || c.archived || muted[c.id]) return false;
           const newest = c.latestCommentAtMs || 0;
           if (!newest) return false;
           const seen = lastSeenAt[c.id];
@@ -875,6 +952,27 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     setDraft: (channelId, text) =>
       set((state) => ({ drafts: { ...state.drafts, [channelId]: text } })),
+
+    addMention: (channelId, mention) =>
+      set((state) => {
+        const current = state.mentions[channelId] || [];
+        if (current.some((m) => m.display === mention.display && m.userId === mention.userId)) {
+          return {};
+        }
+        return { mentions: { ...state.mentions, [channelId]: [...current, mention] } };
+      }),
+
+    toggleMute: (channelId) =>
+      set((state) => {
+        const muted = { ...state.muted };
+        if (muted[channelId]) delete muted[channelId];
+        else muted[channelId] = true;
+        persistMuted(muted);
+        // A newly muted conversation should stop contributing to badges at once.
+        const unread = { ...state.unread };
+        if (muted[channelId]) delete unread[channelId];
+        return { muted, unread };
+      }),
 
     addAttachments: (channelId, files) =>
       set((state) => ({

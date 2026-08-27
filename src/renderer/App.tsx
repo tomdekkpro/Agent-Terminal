@@ -56,8 +56,13 @@ export default function App() {
   const chatOnScreen = useChatStore((s) => s.viewing.page || s.viewing.dock);
   const dockOpen = useChatStore((s) => s.dockOpen);
   const setDockOpen = useChatStore((s) => s.setDockOpen);
+  // Muted conversations are excluded everywhere a badge is shown, which is the
+  // whole point of muting one.
   const chatUnread = useChatStore((s) =>
-    Object.values(s.unread).reduce((total, entry) => total + entry.count, 0),
+    Object.entries(s.unread).reduce(
+      (total, [id, entry]) => (s.muted[id] ? total : total + entry.count),
+      0,
+    ),
   );
 
   useEffect(() => {

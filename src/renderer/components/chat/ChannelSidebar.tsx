@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
+  Bell,
+  BellOff,
   Check,
   CheckCheck,
   ChevronDown,
@@ -75,17 +77,21 @@ function ChannelRow({
   channel,
   active,
   unread,
+  muted,
   onSelect,
   onMarkRead,
+  onToggleMute,
 }: {
   channel: ChatChannel;
   active: boolean;
   unread?: ChannelUnread;
+  muted: boolean;
   onSelect: () => void;
   onMarkRead: () => void;
+  onToggleMute: () => void;
 }) {
   const label = channel.name || (channel.kind === 'CHANNEL' ? 'Channel' : 'Direct message');
-  const count = unread?.count || 0;
+  const count = muted ? 0 : unread?.count || 0;
   const isUnread = count > 0 && !active;
   // In a DM the sender is the conversation, so naming them again is noise.
   const showSender = isUnread && channel.kind !== 'DM' && !!unread?.sender;
@@ -123,10 +129,13 @@ function ChannelRow({
                   : isUnread
                     ? 'font-semibold text-[var(--text-primary)]'
                     : 'text-[var(--text-secondary)]',
+                // A muted room stays readable but visibly steps back.
+                muted && !active && 'opacity-55',
               )}
             >
               {label}
             </span>
+            {muted && <BellOff className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />}
             <span
               className={cn(
                 'text-[10px] shrink-0 tabular-nums',
@@ -157,16 +166,25 @@ function ChannelRow({
         </div>
       </button>
 
-      {/* Clear a noisy channel without having to open and read it */}
-      {isUnread && (
+      {/* Hover actions: silence a noisy room, or clear it without reading it */}
+      <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
-          onClick={onMarkRead}
-          title="Mark as read"
-          className="absolute right-1.5 top-1.5 p-1 rounded-md bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] opacity-0 group-hover:opacity-100 hover:text-[var(--accent)] transition-opacity"
+          onClick={onToggleMute}
+          title={muted ? 'Unmute — count this again' : 'Mute — stop counting this in badges'}
+          className="p-1 rounded-md bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent)]"
         >
-          <Check className="w-3 h-3" />
+          {muted ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
         </button>
-      )}
+        {isUnread && (
+          <button
+            onClick={onMarkRead}
+            title="Mark as read"
+            className="p-1 rounded-md bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent)]"
+          >
+            <Check className="w-3 h-3" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -233,6 +251,8 @@ export function ChannelSidebar({ onNewDm, onOpenAssistant, assistantActive }: Ch
   const startDm = useChatStore((s) => s.startDm);
   const markAllRead = useChatStore((s) => s.markAllRead);
   const markRead = useChatStore((s) => s.markRead);
+  const muted = useChatStore((s) => s.muted);
+  const toggleMute = useChatStore((s) => s.toggleMute);
 
   const [query, setQuery] = useState('');
 
@@ -264,12 +284,10 @@ export function ChannelSidebar({ onNewDm, onOpenAssistant, assistantActive }: Ch
 
   // ClickUp exposes no read state to a personal API token, so unread is derived
   // in the chat store from when the user last opened each conversation.
-  const totalUnread = Object.entries(unread).reduce(
-    (total, [id, entry]) => (id === activeChannelId ? total : total + entry.count),
-    0,
-  );
-  const newIn = (list: ChatChannel[]) =>
-    list.filter((c) => (unread[c.id]?.count || 0) > 0 && c.id !== activeChannelId).length;
+  const countsFor = (id: string) =>
+    id === activeChannelId || muted[id] ? 0 : unread[id]?.count || 0;
+  const totalUnread = Object.keys(unread).reduce((total, id) => total + countsFor(id), 0);
+  const newIn = (list: ChatChannel[]) => list.filter((c) => countsFor(c.id) > 0).length;
 
   return (
     <div className="w-72 shrink-0 border-r border-[var(--border)] bg-[var(--bg-secondary)]/60 flex flex-col">
@@ -367,7 +385,9 @@ export function ChannelSidebar({ onNewDm, onOpenAssistant, assistantActive }: Ch
               active={channel.id === activeChannelId && !assistantActive}
               unread={unread[channel.id]}
               onSelect={() => selectChannel(channel.id)}
+              muted={!!muted[channel.id]}
               onMarkRead={() => markRead(channel.id)}
+              onToggleMute={() => toggleMute(channel.id)}
             />
           ))}
           {rooms.length === 0 && !loading && (
@@ -385,7 +405,9 @@ export function ChannelSidebar({ onNewDm, onOpenAssistant, assistantActive }: Ch
               active={channel.id === activeChannelId && !assistantActive}
               unread={unread[channel.id]}
               onSelect={() => selectChannel(channel.id)}
+              muted={!!muted[channel.id]}
               onMarkRead={() => markRead(channel.id)}
+              onToggleMute={() => toggleMute(channel.id)}
             />
           ))}
           {dms.length === 0 && !loading && (

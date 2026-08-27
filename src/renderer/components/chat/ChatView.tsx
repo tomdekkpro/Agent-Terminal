@@ -97,7 +97,7 @@ export function ChatView() {
     bootstrap, loadMessages, loadOlder, send, loadReactions,
     openThread, closeThread, sendThreadReply,
     startDm, toggleReaction, setDraft, setSelection,
-    attachments, uploading, addAttachments, removeAttachment, cancelUpload,
+    attachments, uploading, addAttachments, removeAttachment, cancelUpload, addMention,
     runAssist, clearAssist, clearError,
   } = useChatStore();
 
@@ -218,6 +218,14 @@ export function ChatView() {
     }),
     [openThread, toggleReaction, loadReactions, runAssist, settings.chatTranslateLanguage, projectPath, appendToComposer, channel, activeTerminalId, sendToAgent],
   );
+
+  // Channel members first — the people actually in this conversation are who
+  // you mean 90% of the time — then the rest of the workspace.
+  const mentionCandidates = useMemo(() => {
+    const members = channel?.members || [];
+    const seen = new Set(members.map((m) => m.id));
+    return [...members, ...people.filter((p) => !seen.has(p.id))];
+  }, [channel, people]);
 
   const headerTitle = channel
     ? channel.name || (channel.kind === 'CHANNEL' ? 'Channel' : 'Direct message')
@@ -408,6 +416,8 @@ export function ChatView() {
               onCancelUpload={() => activeChannelId && cancelUpload(activeChannelId)}
               attachmentsEnabled={!!settings.chatUploadTaskId}
               attachmentsHint="ClickUp has no attachment API for Chat, so files are uploaded to a task and linked. Pick that task in Settings → Tasks → “Task that hosts files shared in Chat”."
+              mentionCandidates={mentionCandidates}
+              onMention={(m) => activeChannelId && addMention(activeChannelId, m)}
             />
           </div>
 

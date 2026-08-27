@@ -169,11 +169,11 @@ function ConversationPicker({
  */
 export function ChatDock({ onOpenFullPage }: { onOpenFullPage: () => void }) {
   const {
-    me, channels, unread, activeChannelId, conversations, drafts, assist, selection,
-    bootstrapError, openedSeenAt, toggleReaction, activeThreadId, threads, lightbox, closeLightbox,
+    me, people, channels, unread, activeChannelId, conversations, drafts, assist, selection,
+    bootstrapError, openedSeenAt, toggleReaction, activeThreadId, threads, lightbox, closeLightbox, muted,
     selectChannel, loadOlder, send, loadReactions, openThread, closeThread, sendThreadReply,
     setDraft, setSelection, runAssist, clearAssist, clearError, setDockOpen,
-    attachments, uploading, addAttachments, removeAttachment, cancelUpload,
+    attachments, uploading, addAttachments, removeAttachment, cancelUpload, addMention,
   } = useChatStore();
 
   const settings = useSettingsStore((s) => s.settings);
@@ -197,11 +197,14 @@ export function ChatDock({ onOpenFullPage }: { onOpenFullPage: () => void }) {
   const channel = channels.find((c) => c.id === activeChannelId) || null;
   const convo = activeChannelId ? conversations[activeChannelId] || EMPTY_CONVO : EMPTY_CONVO;
   const draft = activeChannelId ? drafts[activeChannelId] || '' : '';
-  const unreadOf = useCallback((id: string) => unread[id]?.count || 0, [unread]);
+  const unreadOf = useCallback(
+    (id: string) => (muted[id] ? 0 : unread[id]?.count || 0),
+    [unread, muted],
+  );
   const threadParent = activeThreadId
     ? convo.messages.find((m) => m.id === activeThreadId) || null
     : null;
-  const totalUnread = Object.values(unread).reduce((sum, entry) => sum + entry.count, 0);
+  const totalUnread = Object.keys(unread).reduce((sum, id) => sum + unreadOf(id), 0);
 
   // Nothing picked yet — drop into the conversation with the newest activity so
   // opening the dock always shows something rather than an empty shell.
@@ -273,6 +276,14 @@ export function ChatDock({ onOpenFullPage }: { onOpenFullPage: () => void }) {
     }),
     [openThread, toggleReaction, loadReactions, runAssist, settings.chatTranslateLanguage, projectPath, draft, setComposer, activeTerminalId, onOpenFullPage],
   );
+
+  // Channel members first — the people actually in this conversation are who
+  // you mean 90% of the time — then the rest of the workspace.
+  const mentionCandidates = useMemo(() => {
+    const members = channel?.members || [];
+    const seen = new Set(members.map((m) => m.id));
+    return [...members, ...people.filter((p) => !seen.has(p.id))];
+  }, [channel, people]);
 
   const label = channel ? channelLabel(channel) : 'Messages';
 
@@ -437,6 +448,8 @@ export function ChatDock({ onOpenFullPage }: { onOpenFullPage: () => void }) {
               onCancelUpload={() => activeChannelId && cancelUpload(activeChannelId)}
               attachmentsEnabled={!!settings.chatUploadTaskId}
               attachmentsHint="ClickUp has no attachment API for Chat, so files are uploaded to a task and linked. Pick that task in Settings → Tasks → “Task that hosts files shared in Chat”."
+              mentionCandidates={mentionCandidates}
+              onMention={(m) => activeChannelId && addMention(activeChannelId, m)}
             />
           </>
         )}
