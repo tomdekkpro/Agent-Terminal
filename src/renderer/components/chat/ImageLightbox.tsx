@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ExternalLink, Maximize2, Minus, Plus, RotateCcw, X } from 'lucide-react';
+import { ExternalLink, ImageOff, Maximize2, Minus, Plus, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { cn } from '../../../shared/utils';
+import { retryUrl, viewableAttachmentUrl } from './attachment-url';
 
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
@@ -28,6 +29,11 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // Bumped by the retry button to force a fresh request rather than a cached
+  // failure. Without an error state the viewer was a black rectangle with a
+  // filename on it, which reads as "nothing happened".
+  const [attempt, setAttempt] = useState(0);
   const [dragging, setDragging] = useState(false);
   const frameRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef({ x: 0, y: 0, offsetX: 0, offsetY: 0 });
@@ -35,6 +41,18 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
   const reset = useCallback(() => {
     setScale(1);
     setOffset({ x: 0, y: 0 });
+  }, []);
+
+  useEffect(() => {
+    setLoaded(false);
+    setFailed(false);
+    setAttempt(0);
+  }, [src]);
+
+  const retry = useCallback(() => {
+    setFailed(false);
+    setLoaded(false);
+    setAttempt((n) => n + 1);
   }, []);
 
   /** Zoom while keeping the point under `origin` (viewport coords) fixed. */
@@ -148,7 +166,7 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
           setOffset({ x: 0, y: 0 });
         })}
         {control('Reset  (0)', RotateCcw, reset)}
-        {control('Open in browser', ExternalLink, () => window.electronAPI.openExternal(src))}
+        {control('Open in browser', ExternalLink, () => window.electronAPI.openExternal(viewableAttachmentUrl(src)))}
         {control('Close  (Esc)', X, onClose)}
       </div>
 
@@ -168,21 +186,50 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
           scale > 1 ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-zoom-in',
         )}
       >
-        <img
-          src={src}
-          alt={alt || ''}
-          draggable={false}
-          onLoad={() => setLoaded(true)}
-          style={{
-            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-            // No easing while dragging, or the image lags behind the cursor.
-            transition: dragging ? 'none' : 'transform 120ms ease-out',
-          }}
-          className={cn(
-            'max-h-full max-w-full object-contain shadow-2xl',
-            loaded ? 'opacity-100' : 'opacity-0',
-          )}
-        />
+        {failed ? (
+          // Stops the frame's drag handler from swallowing the buttons.
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            className="flex flex-col items-center gap-3 text-center px-6"
+          >
+            <ImageOff className="w-8 h-8 text-white/40" />
+            <p className="text-[13px] text-white/70">{alt || 'This image'} could not be loaded.</p>
+            <p className="max-w-md text-[11px] text-white/40 break-all">{src}</p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={retry}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 text-[12px] text-white/80 hover:bg-white/20"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Try again
+              </button>
+              <button
+                onClick={() => window.electronAPI.openExternal(viewableAttachmentUrl(src))}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 text-[12px] text-white/80 hover:bg-white/20"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open in browser
+              </button>
+            </div>
+          </div>
+        ) : (
+          <img
+            src={retryUrl(src, attempt)}
+            alt={alt || ''}
+            draggable={false}
+            onLoad={() => setLoaded(true)}
+            onError={() => setFailed(true)}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              // No easing while dragging, or the image lags behind the cursor.
+              transition: dragging ? 'none' : 'transform 120ms ease-out',
+            }}
+            className={cn(
+              'max-h-full max-w-full object-contain shadow-2xl',
+              loaded ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+        )}
       </div>
 
       <p className="shrink-0 text-center text-[10px] text-white/35 pb-2">

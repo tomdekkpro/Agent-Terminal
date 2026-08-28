@@ -665,6 +665,42 @@ export function cancelUpload(uploadId: string): ProviderResult<true> {
   return { success: true, data: true };
 }
 
+/** ClickUp's attachment POST is not a reliable source for the file's URL: it
+ *  has been observed answering with the literal string "null" in `url`, and
+ *  with a different uuid than the one the attachment is actually filed under.
+ *  Anything that is not an absolute http(s) URL has to be treated as absent —
+ *  `"null"` is truthy, so a plain falsy check let it through and the message
+ *  went out as `![image.png](null)`. */
+function isUsableUrl(value: unknown): value is string {
+  return typeof value === 'string' && /^https?:\/\//i.test(value);
+}
+
+/** The task record is authoritative, so when the upload response has no usable
+ *  URL, read it back from the task. The response's `id` does match what the
+ *  attachment is stored as, so it is the key; the newest attachment is the
+ *  fallback for the case where even that is missing. */
+async function attachmentUrlFromTask(
+  apiKey: string,
+  taskId: string,
+  attachmentId: string,
+): Promise<string | undefined> {
+  try {
+    const task = await clickUpFetch(apiKey, `/task/${encodeURIComponent(taskId)}`);
+    const stored: any[] = Array.isArray(task?.attachments) ? task.attachments : [];
+    const byId = attachmentId
+      ? stored.find((a) => String(a?.id ?? '') === attachmentId)
+      : undefined;
+    const newest = [...stored].sort((a, b) => Number(b?.date ?? 0) - Number(a?.date ?? 0))[0];
+    for (const candidate of [byId, newest]) {
+      const found = [candidate?.url, candidate?.url_w_host, candidate?.url_w_query].find(isUsableUrl);
+      if (found) return found;
+    }
+  } catch {
+    // Leave it to the caller to report — a failed read-back is still "no URL".
+  }
+  return undefined;
+}
+
 /**
  * Put a file somewhere ClickUp Chat can reference it.
  *
@@ -722,8 +758,15 @@ export async function uploadFile(
       if (uploadId) uploadControllers.delete(uploadId);
     }
 
-    const url = body?.url || body?.url_w_query;
-    if (!url) return { success: false, error: 'ClickUp accepted the file but returned no URL' };
+    const url =
+      [body?.url, body?.url_w_query, body?.url_w_host, body?.thumbnail_large].find(isUsableUrl) ||
+      (await attachmentUrlFromTask(apiKey, taskId, String(body?.id ?? '')));
+    if (!url) {
+      return {
+        success: false,
+        error: `ClickUp stored ${file.name} on the upload task but returned no usable URL for it`,
+      };
+    }
 
     return {
       success: true,

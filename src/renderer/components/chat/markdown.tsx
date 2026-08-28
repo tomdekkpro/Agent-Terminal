@@ -1,9 +1,15 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import { FileText, Image as ImageIcon, Mail, Ticket } from 'lucide-react';
 import { useChatStore } from '../../stores/chat-store';
 import { describeLink } from './link-label';
+import {
+  IMAGE_RETRY_DELAY_MS,
+  MAX_IMAGE_RETRIES,
+  retryUrl,
+  viewableAttachmentUrl,
+} from './attachment-url';
 import { cn } from '../../../shared/utils';
 
 function MarkdownLink({ href, children }: { href?: string; children: React.ReactNode }) {
@@ -18,7 +24,7 @@ function MarkdownLink({ href, children }: { href?: string; children: React.React
 
   const open = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (target) window.electronAPI.openExternal(target);
+    if (target) window.electronAPI.openExternal(viewableAttachmentUrl(target));
   };
 
   // A ClickUp @mention. It has no destination, so it must not look clickable.
@@ -68,10 +74,35 @@ function MarkdownLink({ href, children }: { href?: string; children: React.React
  * An image pasted into a message. Clicking opens the in-app viewer rather than
  * a browser: a screenshot is usually the point of the message, and bouncing to
  * an external window to read it loses the conversation around it.
+ *
+ * A just-uploaded attachment can miss for a second or two before ClickUp's CDN
+ * serves it, so the first failures are retried with a short backoff. Latching
+ * on the first `onError` left the message showing a text chip for the rest of
+ * the session — long after the image had become fetchable.
  */
 function InlineImage({ src, alt }: { src?: string; alt?: string }) {
+  const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
+  const attemptRef = useRef(0);
+  const timerRef = useRef<number | undefined>(undefined);
   const openLightbox = useChatStore((s) => s.openLightbox);
+
+  // A new src is a new image: whatever state the last one ended in is stale.
+  useEffect(() => {
+    attemptRef.current = 0;
+    setAttempt(0);
+    setFailed(false);
+    return () => window.clearTimeout(timerRef.current);
+  }, [src]);
+
+  const onError = useCallback(() => {
+    if (attemptRef.current >= MAX_IMAGE_RETRIES) {
+      setFailed(true);
+      return;
+    }
+    const next = ++attemptRef.current;
+    timerRef.current = window.setTimeout(() => setAttempt(next), IMAGE_RETRY_DELAY_MS * next);
+  }, []);
 
   if (!src) return null;
 
@@ -80,7 +111,7 @@ function InlineImage({ src, alt }: { src?: string; alt?: string }) {
       <button
         onClick={(e) => {
           e.stopPropagation();
-          window.electronAPI.openExternal(src);
+          window.electronAPI.openExternal(viewableAttachmentUrl(src));
         }}
         title={src}
         className="my-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--bg-tertiary)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--accent)]"
@@ -101,10 +132,10 @@ function InlineImage({ src, alt }: { src?: string; alt?: string }) {
       className="block my-1.5 rounded-lg overflow-hidden border border-[var(--border)] hover:border-[var(--accent)]/50 transition-colors"
     >
       <img
-        src={src}
+        src={retryUrl(src, attempt)}
         alt={alt || ''}
         loading="lazy"
-        onError={() => setFailed(true)}
+        onError={onError}
         className="max-h-72 max-w-full object-contain"
       />
     </button>
