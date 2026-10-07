@@ -502,6 +502,14 @@ export interface AppSettings {
   codeReviewStatuses: string;
   codeReviewProjectPath: string;
   codeReviewTagName: string;
+  /** Merge a PR as soon as its AI review passes — still subject to the release-branch check. */
+  codeReviewAutoMerge: boolean;
+  /** How Code Review merges a PR, from the Merge button or auto-merge. */
+  codeReviewMergeMethod: CodeReviewMergeMethod;
+  /** Branch-name prefix that marks release branches, e.g. `Releases/` for `Releases/26.9.1`. */
+  codeReviewReleaseBranchPrefix: string;
+  /** Pins the current release branch. Empty = detect the newest `<prefix><x.y.z>` on GitHub. */
+  codeReviewReleaseBranch: string;
   // Kanban filter — persisted assignee id; empty = show all tasks; also gates the auto-code loop
   kanbanFilterAssigneeId: string;
   /** Persisted project filter for the Kanban board. Empty = show all projects. */
@@ -1108,6 +1116,21 @@ export interface ActivityEvent {
 export type CodeReviewSeverity = 'critical' | 'major' | 'minor' | 'suggestion';
 export type CodeReviewStatus = 'pending' | 'reviewing' | 'passed' | 'failed' | 'error' | 'skipped';
 
+export type CodeReviewMergeMethod = 'squash' | 'merge' | 'rebase';
+
+/** Where a PR stands on merging — separate from its review status. `blocked`
+ *  means the pre-merge checks (release branch, conflicts, CI) or GitHub refused. */
+export type CodeReviewMergeStatus = 'merging' | 'merged' | 'blocked';
+
+/** The branch Code Review lets PRs merge into. */
+export interface CodeReviewReleaseBranch {
+  /** e.g. `Releases/26.9.1`; null when none could be found. */
+  branch: string | null;
+  /** `pinned` = set in settings, `detected` = newest release branch on GitHub. */
+  source: 'pinned' | 'detected' | 'none';
+  prefix: string;
+}
+
 export interface CodeReviewFinding {
   severity: CodeReviewSeverity;
   file: string;
@@ -1130,6 +1153,12 @@ export interface CodeReviewPR {
   findings: CodeReviewFinding[];
   reviewedAt?: string;
   error?: string;
+  /** Head commit the passing review looked at. Merging is pinned to it, so a
+   *  push after the review can't slip unreviewed code into the release. */
+  reviewedHeadSha?: string;
+  mergeStatus?: CodeReviewMergeStatus;
+  /** Why the merge was refused, when `mergeStatus` is `blocked`. */
+  mergeError?: string;
 }
 
 export interface CodeReviewItem {
@@ -1156,8 +1185,12 @@ export interface CodeReviewItem {
 }
 
 export interface CodeReviewEvent {
-  type: 'progress' | 'finding' | 'done' | 'error' | 'prs';
+  type: 'progress' | 'finding' | 'done' | 'error' | 'prs' | 'merge';
   taskId: string;
+  /** `merge` events only — the PR the merge outcome is for. */
+  prNumber?: number;
+  /** `merge` events only. `message` carries the block reason. */
+  mergeStatus?: CodeReviewMergeStatus;
   message?: string;
   finding?: CodeReviewFinding;
   status?: CodeReviewStatus;
@@ -1321,6 +1354,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewStatuses: 'ready for review, in review, review',
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
+  codeReviewAutoMerge: false,
+  codeReviewMergeMethod: 'squash',
+  codeReviewReleaseBranchPrefix: 'Releases/',
+  codeReviewReleaseBranch: '',
   kanbanFilterAssigneeId: '',
   kanbanFilterProjectId: '',
   kanbanBacklogStatuses: 'to do, open, backlog, planning, ready',

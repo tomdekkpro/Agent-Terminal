@@ -1,10 +1,10 @@
 import type { BrowserWindow, IpcMain } from 'electron';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewPR, CodeReviewSeverity, TaskManagerTask } from '../../shared/types';
+import type { AppSettings, CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewMergeMethod, CodeReviewPR, CodeReviewReleaseBranch, CodeReviewSeverity, TaskManagerTask } from '../../shared/types';
 import { getSettings } from './settings-handlers';
 import { recordActivity } from '../activity/activity-store';
 import { ClickUpProvider } from './providers/clickup';
@@ -305,9 +305,10 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
   author: string;
   state: string;
   mergeable: string;
+  headSha: string;
 }> {
   const infoJson = await ghExec(
-    `gh pr view ${prNumber} --json title,url,headRefName,baseRefName,author,state,mergeable`,
+    `gh pr view ${prNumber} --json title,url,headRefName,baseRefName,author,state,mergeable,headRefOid`,
     projectPath,
   );
   const info = JSON.parse(infoJson);
@@ -319,6 +320,7 @@ async function fetchPRInfo(projectPath: string, prNumber: number): Promise<{
     author: info.author?.login || '',
     state: (info.state || '').toUpperCase(),
     mergeable: (info.mergeable || '').toUpperCase(),
+    headSha: info.headRefOid || '',
   };
 }
 
@@ -405,6 +407,287 @@ async function loadOpenPRMetadata(projectPath: string): Promise<OpenPRList | nul
     // gh CLI not available or not in a repo — list will just lack metadata
     return null;
   }
+}
+
+// ─── Merging ─────────────────────────────────────────────────
+
+/** Run gh with an argument array — no shell, so GraphQL queries and comment
+ *  bodies need no quoting on either cmd.exe or sh. */
+function ghRun(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('gh', args, { cwd, encoding: 'utf-8', timeout: GH_TIMEOUT, maxBuffer: 10 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        const err = error as any;
+        err.stderr = stderr;
+        reject(err);
+      } else {
+        resolve(stdout.trim());
+      }
+    });
+  });
+}
+
+/** gh's own message is in stderr; `error.message` is just "Command failed: …". */
+function ghErrorMessage(err: unknown): string {
+  const stderr = (err as any)?.stderr;
+  if (typeof stderr === 'string' && stderr.trim()) return stderr.trim().split('\n').slice(-3).join(' ');
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** `26.9.1` → [26, 9, 1]. Null for anything that isn't a plain dotted number —
+ *  side branches like `Releases/26.6.Angular21` or `Releases/test-master` are
+ *  never "the current release". */
+function parseVersion(text: string): number[] | null {
+  return /^\d+(\.\d+)+$/.test(text) ? text.split('.').map(Number) : null;
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/** Release branches with no commit within this window of the newest one are
+ *  retired. Keeps a stray, long-dead `Releases/2026.2.3` from outranking the
+ *  live `Releases/26.9.1` just because its number is bigger. */
+const RELEASE_ACTIVE_WINDOW_MS = 45 * 24 * 60 * 60_000;
+const RELEASE_BRANCH_TTL = 5 * 60_000;
+const releaseBranchCache = new Map<string, { branch: string | null; timestamp: number }>();
+
+const RELEASE_REFS_QUERY = `query($owner: String!, $name: String!, $prefix: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    refs(refPrefix: $prefix, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { name target { ... on Commit { committedDate } } }
+    }
+  }
+}`;
+
+/**
+ * The current release branch: the highest `<prefix><x.y.z>` among release
+ * branches still being committed to. Asks GitHub rather than local refs, which
+ * are only as fresh as the user's last fetch. Null when there is none.
+ */
+async function detectReleaseBranch(projectPath: string, prefix: string, refresh = false): Promise<string | null> {
+  const key = `${projectPath}\n${prefix}`;
+  const hit = releaseBranchCache.get(key);
+  if (!refresh && hit && Date.now() - hit.timestamp < RELEASE_BRANCH_TTL) return hit.branch;
+
+  const repo = JSON.parse(await ghRun(['repo', 'view', '--json', 'owner,name'], projectPath));
+  const branches: Array<{ name: string; version: number[]; committedAt: number }> = [];
+  let after: string | null = null;
+  for (let page = 0; page < 10; page++) {
+    const args = [
+      'api', 'graphql',
+      '-f', `query=${RELEASE_REFS_QUERY}`,
+      '-f', `owner=${repo.owner.login}`,
+      '-f', `name=${repo.name}`,
+      '-f', `prefix=refs/heads/${prefix}`,
+    ];
+    if (after) args.push('-f', `after=${after}`);
+    const refs: any = JSON.parse(await ghRun(args, projectPath))?.data?.repository?.refs;
+    for (const node of refs?.nodes ?? []) {
+      const version = parseVersion(node.name);
+      const committedAt = Date.parse(node.target?.committedDate ?? '');
+      if (version && Number.isFinite(committedAt)) {
+        branches.push({ name: `${prefix}${node.name}`, version, committedAt });
+      }
+    }
+    if (!refs?.pageInfo?.hasNextPage) break;
+    after = refs.pageInfo.endCursor;
+  }
+
+  let branch: string | null = null;
+  if (branches.length > 0) {
+    const newest = Math.max(...branches.map((b) => b.committedAt));
+    const active = branches.filter((b) => newest - b.committedAt <= RELEASE_ACTIVE_WINDOW_MS);
+    active.sort((a, b) => compareVersions(b.version, a.version));
+    branch = active[0].name;
+  }
+  debugLog(`[CodeReview] Current release branch for ${projectPath}: ${branch ?? '(none)'} (${branches.length} release branch(es))`);
+  releaseBranchCache.set(key, { branch, timestamp: Date.now() });
+  return branch;
+}
+
+async function getReleaseBranch(projectPath: string, refresh = false): Promise<CodeReviewReleaseBranch> {
+  const settings = getSettings();
+  const prefix = settings.codeReviewReleaseBranchPrefix || 'Releases/';
+  const pinned = (settings.codeReviewReleaseBranch || '').trim();
+  if (pinned) return { branch: pinned, source: 'pinned', prefix };
+  const branch = await detectReleaseBranch(projectPath, prefix, refresh);
+  return { branch, source: branch ? 'detected' : 'none', prefix };
+}
+
+const FAILING_CHECK_STATES = new Set(['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE']);
+
+/** Names of failing and still-running checks from gh's statusCheckRollup,
+ *  which mixes CheckRuns (status + conclusion) and StatusContexts (state). */
+function summarizeChecks(rollup: any[]): { failing: string[]; pending: string[] } {
+  const failing: string[] = [];
+  const pending: string[] = [];
+  for (const check of rollup ?? []) {
+    const name = check.name || check.context || 'check';
+    if (check.__typename === 'StatusContext') {
+      const state = String(check.state || '').toUpperCase();
+      if (state === 'PENDING' || state === 'EXPECTED') pending.push(name);
+      else if (FAILING_CHECK_STATES.has(state)) failing.push(name);
+    } else if (String(check.status || '').toUpperCase() !== 'COMPLETED') {
+      pending.push(name);
+    } else if (FAILING_CHECK_STATES.has(String(check.conclusion || '').toUpperCase())) {
+      failing.push(name);
+    }
+  }
+  return { failing, pending };
+}
+
+/**
+ * Everything that must hold before a PR may merge. The release-branch rule is
+ * the important one: the PR has to target the current release branch, and if
+ * the ClickUp task names a release version, it has to be that same release —
+ * a ticket planned for 26.8.1 must not land in 26.9.1 by accident.
+ *
+ * Returns a human-readable reason when it may not merge, null when it may.
+ */
+async function checkMergeReadiness(
+  projectPath: string,
+  taskId: string,
+  pr: any,
+  reviewedHeadSha: string | undefined,
+): Promise<string | null> {
+  if (pr.state !== 'OPEN') return `PR #${pr.number} is already ${String(pr.state).toLowerCase()}.`;
+  if (pr.isDraft) return `PR #${pr.number} is still a draft.`;
+
+  const release = await getReleaseBranch(projectPath);
+  if (!release.branch) {
+    return `No current release branch found (nothing named "${release.prefix}x.y.z"). Pin one in the Auto Review settings.`;
+  }
+  if (pr.baseRefName !== release.branch) {
+    return `PR targets "${pr.baseRefName}", but the current release branch is "${release.branch}". Retarget the PR before merging.`;
+  }
+  const head = String(pr.headRefName || '');
+  if (head.startsWith(release.prefix) && parseVersion(head.slice(release.prefix.length))) {
+    return `PR merges release branch "${head}" into "${pr.baseRefName}" — release-to-release merges must be done by hand.`;
+  }
+
+  const task = await clickUpProvider.getTask(getSettings(), taskId);
+  const taskRelease = task.success ? task.data?.releaseVersion?.trim() : undefined;
+  if (taskRelease && `${release.prefix}${taskRelease}` !== pr.baseRefName) {
+    return `Task is planned for release ${taskRelease}, but the PR targets "${pr.baseRefName}". Fix the PR target or the task's Release version.`;
+  }
+
+  if (reviewedHeadSha && pr.headRefOid !== reviewedHeadSha) {
+    return `PR #${pr.number} has new commits since it was reviewed. Re-run the review before merging.`;
+  }
+  if (String(pr.mergeable).toUpperCase() === 'CONFLICTING') {
+    return `PR #${pr.number} has merge conflicts with "${pr.baseRefName}".`;
+  }
+  const checks = summarizeChecks(pr.statusCheckRollup);
+  if (checks.failing.length > 0) return `CI checks failing: ${checks.failing.join(', ')}.`;
+  if (checks.pending.length > 0) return `CI checks still running: ${checks.pending.join(', ')}. Merge again once they finish.`;
+  return null;
+}
+
+type MergeOutcome =
+  | { merged: true; baseBranch: string; message: string }
+  | { merged: false; reason: string };
+
+/** PRs with a merge in flight, so a double click or a scheduler cycle racing
+ *  the button can't merge (or comment) twice. */
+const mergesInFlight = new Set<string>();
+
+/**
+ * Approve and merge one PR after the pre-merge checks. Approving first covers
+ * branch protection that requires an approving review — the step that used to
+ * mean opening the PR in a browser. `auto` marks a merge nobody clicked: a
+ * refusal is then reported on the ClickUp task, since nobody is watching the UI.
+ *
+ * Never throws; every outcome is also pushed to the renderer as a `merge` event.
+ */
+async function mergePullRequest(
+  getWindow: () => BrowserWindow | null,
+  projectPath: string,
+  taskId: string,
+  prNumber: number,
+  options: { reviewedHeadSha?: string; auto?: boolean } = {},
+): Promise<MergeOutcome> {
+  const key = `${projectPath}#${prNumber}`;
+  if (mergesInFlight.has(key)) return { merged: false, reason: `PR #${prNumber} is already being merged.` };
+  mergesInFlight.add(key);
+  sendReviewEvent(getWindow, { type: 'merge', taskId, prNumber, mergeStatus: 'merging' });
+
+  const settings = getSettings();
+  const method: CodeReviewMergeMethod = settings.codeReviewMergeMethod || 'squash';
+  let pr: any = null;
+  let outcome: MergeOutcome;
+  try {
+    pr = JSON.parse(await ghRun(
+      ['pr', 'view', String(prNumber), '--json', 'number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,statusCheckRollup'],
+      projectPath,
+    ));
+    const blocked = await checkMergeReadiness(projectPath, taskId, pr, options.reviewedHeadSha);
+    if (blocked) {
+      outcome = { merged: false, reason: blocked };
+    } else {
+      try {
+        await ghRun(['pr', 'review', String(prNumber), '--approve', '--body', 'Approved via Agent Terminal — AI code review passed.'], projectPath);
+      } catch (err) {
+        // Expected when the PR is your own or already approved; if branch
+        // protection really needs an approval, the merge below says so.
+        debugLog(`[CodeReview] Approve PR #${prNumber} skipped: ${ghErrorMessage(err)}`);
+      }
+      // --match-head-commit makes GitHub refuse the merge if the head moved
+      // after the checks above, closing the gap between check and merge.
+      await ghRun(['pr', 'merge', String(prNumber), `--${method}`, '--match-head-commit', pr.headRefOid], projectPath);
+      outcome = { merged: true, baseBranch: pr.baseRefName, message: `Merged into ${pr.baseRefName} (${method}).` };
+    }
+  } catch (err) {
+    outcome = { merged: false, reason: `Merge failed: ${ghErrorMessage(err)}` };
+  } finally {
+    mergesInFlight.delete(key);
+  }
+
+  const label = pr?.title ? `PR #${prNumber} (${pr.title})` : `PR #${prNumber}`;
+  if (outcome.merged) {
+    openPRCache.delete(projectPath);
+    debugLog(`[CodeReview] ${label} merged into ${outcome.baseBranch}`);
+    sendReviewEvent(getWindow, { type: 'merge', taskId, prNumber, mergeStatus: 'merged', message: outcome.message });
+    await clickUpProvider.postComment(
+      settings,
+      taskId,
+      `🔀 ${label} merged into \`${outcome.baseBranch}\` (${method})${options.auto ? ' automatically after the code review passed' : ''}.\n\n_Automated by Agent Terminal_`,
+    ).catch(() => {});
+    recordActivity({
+      source: 'code-review',
+      kind: options.auto ? 'pr-auto-merged' : 'pr-merged',
+      level: 'success',
+      title: `PR #${prNumber} merged into ${outcome.baseBranch}`,
+      message: pr?.title,
+      clickupTaskId: taskId,
+      url: pr?.url,
+    });
+  } else {
+    debugLog(`[CodeReview] ${label} not merged: ${outcome.reason}`);
+    sendReviewEvent(getWindow, { type: 'merge', taskId, prNumber, mergeStatus: 'blocked', message: outcome.reason });
+    if (options.auto) {
+      await clickUpProvider.postComment(
+        settings,
+        taskId,
+        `⚠️ Auto-merge skipped for ${label}: ${outcome.reason}\n\n_Automated by Agent Terminal_`,
+      ).catch(() => {});
+      recordActivity({
+        source: 'code-review',
+        kind: 'merge-blocked',
+        level: 'warn',
+        title: `Auto-merge blocked: PR #${prNumber}`,
+        message: outcome.reason,
+        clickupTaskId: taskId,
+        url: pr?.url,
+      });
+    }
+  }
+  return outcome;
 }
 
 /** Run AI code review on a PR diff using Claude CLI */
@@ -1124,6 +1407,8 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       let allPassed = true;
       let anyFailed = false;
       const allFindings: CodeReviewFinding[] = [];
+      // PRs that passed in this cycle, with the head they were reviewed at.
+      const passedPRs: Array<{ prNumber: number; headSha: string }> = [];
 
       for (const pr of prs) {
         if (stopAllRequested) break;
@@ -1173,6 +1458,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
           if (result.passed) {
             await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — PR #${prNumber} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
+            passedPRs.push({ prNumber, headSha: prInfo.headSha });
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} PASSED`);
           } else {
             allPassed = false;
@@ -1226,6 +1512,13 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
       if (allPassed && prs.length > 0) {
         await clickUpProvider.addTag(settings, task.id, tagName);
         clearAllSessionsForTask(task.id);
+        // Read live so flipping the toggle mid-cycle takes effect.
+        if (getSettings().codeReviewAutoMerge) {
+          for (const pr of passedPRs) {
+            if (stopAllRequested) break;
+            await mergePullRequest(getWindow, projectPath, task.id, pr.prNumber, { reviewedHeadSha: pr.headSha, auto: true });
+          }
+        }
       } else if (anyFailed) {
         try {
           await clickUpProvider.updateStatus(settings, task.id, 'review failed');
@@ -1466,6 +1759,7 @@ export function registerCodeReviewHandlers(
             prBranch: prInfo.branch,
             prBaseBranch: prInfo.baseBranch,
             prAuthor: prInfo.author,
+            prHeadSha: prInfo.headSha,
           },
         };
       } catch (error) {
@@ -1618,6 +1912,28 @@ export function registerCodeReviewHandlers(
       }
     },
   );
+
+  // ─── Merge ──────────────────────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_REVIEW_MERGE,
+    async (_event, projectPath: string, taskId: string, prNumber: number, options?: { reviewedHeadSha?: string; auto?: boolean }) => {
+      if (!projectPath) return { success: false, error: 'Project path is required' };
+      const outcome = await mergePullRequest(getWindow, projectPath, taskId, prNumber, options);
+      return outcome.merged
+        ? { success: true, data: { message: outcome.message, baseBranch: outcome.baseBranch } }
+        : { success: false, error: outcome.reason };
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.CODE_REVIEW_RELEASE_BRANCH, async (_event, projectPath: string, refresh?: boolean) => {
+    try {
+      if (!projectPath) return { success: false, error: 'Project path is required' };
+      return { success: true, data: await getReleaseBranch(projectPath, !!refresh) };
+    } catch (error) {
+      debugError('[CodeReview] Release branch detection failed:', error);
+      return { success: false, error: ghErrorMessage(error) };
+    }
+  });
 
   // ─── Stop review ────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.CODE_REVIEW_STOP, async (_event, taskId: string) => {

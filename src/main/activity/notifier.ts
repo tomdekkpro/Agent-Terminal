@@ -10,6 +10,7 @@ const NOTIFY_KINDS = new Set<string>([
   'fix-escalated',
   'fix-failed',
   'pr-auto-merged',
+  'merge-blocked',
   'qc-failed',
   'review-rejected',
   'review-failed',
