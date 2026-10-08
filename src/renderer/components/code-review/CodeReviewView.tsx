@@ -762,7 +762,7 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
                 className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)]"
               />
               <p className="text-[11px] text-[var(--text-muted)] mt-1">
-                A PR only merges when it targets this branch and the task's Release version (if set) matches it. Leave empty to use the newest active release branch.
+                A PR only merges when it targets this branch and the task's Release version is set and matches it. Leave empty to use the newest active release branch.
               </p>
             </div>
           </div>

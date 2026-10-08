@@ -544,9 +544,9 @@ function summarizeChecks(rollup: any[]): { failing: string[]; pending: string[] 
 
 /**
  * Everything that must hold before a PR may merge. The release-branch rule is
- * the important one: the PR has to target the current release branch, and if
- * the ClickUp task names a release version, it has to be that same release —
- * a ticket planned for 26.8.1 must not land in 26.9.1 by accident.
+ * the important one: the PR has to target the current release branch, and the
+ * ClickUp task's Release version must be set to that same release — a ticket
+ * planned for 26.8.1, or not planned at all, must not land in 26.9.1.
  *
  * Returns a human-readable reason when it may not merge, null when it may.
  */
@@ -571,9 +571,17 @@ async function checkMergeReadiness(
     return `PR merges release branch "${head}" into "${pr.baseRefName}" — release-to-release merges must be done by hand.`;
   }
 
+  // The task's Release version is required, not optional: an unplanned task
+  // (empty field) or one we couldn't read must never slip into the release.
   const task = await clickUpProvider.getTask(getSettings(), taskId);
-  const taskRelease = task.success ? task.data?.releaseVersion?.trim() : undefined;
-  if (taskRelease && `${release.prefix}${taskRelease}` !== pr.baseRefName) {
+  if (!task.success) {
+    return `Couldn't read the ClickUp task to check its Release version (${task.error}). Try again.`;
+  }
+  const taskRelease = task.data?.releaseVersion?.trim();
+  if (!taskRelease) {
+    return `Task has no Release version set — set it to ${release.branch.slice(release.prefix.length)} in ClickUp if it belongs in "${release.branch}".`;
+  }
+  if (`${release.prefix}${taskRelease}` !== pr.baseRefName) {
     return `Task is planned for release ${taskRelease}, but the PR targets "${pr.baseRefName}". Fix the PR target or the task's Release version.`;
   }
 
