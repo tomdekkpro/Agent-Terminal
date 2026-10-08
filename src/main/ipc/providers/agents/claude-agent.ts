@@ -21,6 +21,9 @@ const INSIGHTS_MODEL_MAP: Record<string, string> = {
   haiku: 'claude-haiku-4-5-20251001',
 };
 
+/** Live model catalog is refetched at most once per hour per app run. */
+const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
+
 export class ClaudeAgentProvider implements IAgentProvider {
   readonly id = 'claude' as const;
   readonly displayName = 'Claude Code';
@@ -28,6 +31,7 @@ export class ClaudeAgentProvider implements IAgentProvider {
   readonly iconName = 'Bot';
   readonly color = '#6366f1';
   readonly installHint = 'Install with: npm install -g @anthropic-ai/claude-code';
+  private modelCache: { models: AgentModelOption[]; fetchedAt: number } | null = null;
   readonly capabilities: AgentCapabilities = {
     resume: true,
     continue: true,
@@ -131,16 +135,50 @@ export class ClaudeAgentProvider implements IAgentProvider {
     // Aliases auto-resolve to the latest version Anthropic ships — picking
     // these means new releases work immediately without an app update.
     // Pinned IDs let users hold a specific release; the Custom field in
-    // settings accepts any future ID the CLI accepts.
+    // settings accepts any future ID the CLI accepts. This static list is
+    // the fallback — fetchModels() replaces it with the live Models API
+    // catalog when an ANTHROPIC_API_KEY is available.
     return [
+      { id: 'claude-fable-5', label: 'Claude Fable 5' },
       { id: 'opus', label: 'Opus (latest)' },
       { id: 'sonnet', label: 'Sonnet (latest)' },
       { id: 'haiku', label: 'Haiku (latest)' },
       { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
       { id: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
+      { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
     ];
+  }
+
+  async fetchModels(): Promise<AgentModelOption[] | null> {
+    if (this.modelCache && Date.now() - this.modelCache.fetchedAt < MODEL_CACHE_TTL_MS) {
+      return this.modelCache.models;
+    }
+    // The Models API needs an API key; subscription-auth users don't have
+    // one, so they keep the static list (whose aliases still auto-resolve).
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return null;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { data?: Array<{ id: string; display_name?: string }> };
+      if (!body.data?.length) return null;
+      const aliases: AgentModelOption[] = [
+        { id: 'opus', label: 'Opus (latest)' },
+        { id: 'sonnet', label: 'Sonnet (latest)' },
+        { id: 'haiku', label: 'Haiku (latest)' },
+      ];
+      const fetched = body.data.map((m) => ({ id: m.id, label: m.display_name || m.id }));
+      const models = [...aliases, ...fetched.filter((f) => !aliases.some((a) => a.id === f.id))];
+      this.modelCache = { models, fetchedAt: Date.now() };
+      return models;
+    } catch {
+      return null; // offline / bad key — static list applies
+    }
   }
 
   getDefaultModel(): string {

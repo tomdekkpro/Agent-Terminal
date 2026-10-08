@@ -3,12 +3,12 @@ import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
   FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
-  GitBranch, ArrowRight, User, Check,
+  GitBranch, ArrowRight, User, Check, GitMerge,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useSettingsStore } from '../../stores/settings-store';
-import type { CodeReviewItem, CodeReviewPR, CodeReviewFinding, CodeReviewSeverity, TaskManagerList } from '../../../shared/types';
+import type { CodeReviewItem, CodeReviewPR, CodeReviewFinding, CodeReviewMergeMethod, CodeReviewReleaseBranch, CodeReviewSeverity, TaskManagerList } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 
 const SEVERITY_CONFIG: Record<CodeReviewSeverity, { icon: typeof Bug; color: string; bg: string; label: string }> = {
@@ -39,9 +39,10 @@ const INTERVAL_OPTIONS = [
 ];
 
 /** Render text that may contain inline `code` or ```code blocks``` */
-function RichText({ text, className }: { text: string; className?: string }) {
-  // Split on fenced code blocks (```...```) and inline code (`...`)
-  const parts = text.split(/(```[\s\S]*?```|`[^`]+`)/g);
+function RichText({ text, className }: { text?: string; className?: string }) {
+  // Findings ultimately come from model output, so tolerate a missing string
+  // rather than taking the whole view down with it.
+  const parts = String(text ?? '').split(/(```[\s\S]*?```|`[^`]+`)/g);
   return (
     <span className={className}>
       {parts.map((part, i) => {
@@ -67,7 +68,7 @@ function RichText({ text, className }: { text: string; className?: string }) {
 }
 
 function FindingCard({ finding }: { finding: CodeReviewFinding }) {
-  const config = SEVERITY_CONFIG[finding.severity];
+  const config = SEVERITY_CONFIG[finding.severity] || SEVERITY_CONFIG.minor;
   const Icon = config.icon;
 
   return (
@@ -114,23 +115,62 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+/** Two-step merge button: the first click arms it, the second merges. A merge
+ *  into the release branch can't be taken back, so one stray click shouldn't do it. */
+function MergeButton({ onMerge }: { onMerge: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+
+  return (
+    <button
+      onClick={() => {
+        if (armed) {
+          setArmed(false);
+          onMerge();
+        } else {
+          setArmed(true);
+        }
+      }}
+      title="Approve and merge this PR on GitHub"
+      className={cn(
+        'flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+        armed ? 'bg-purple-500 text-white hover:bg-purple-600' : 'bg-purple-500/10 text-purple-400 hover:bg-purple-500/20',
+      )}
+    >
+      <GitMerge className="w-3 h-3" />
+      {armed ? 'Confirm merge' : 'Merge'}
+    </button>
+  );
+}
+
 function PRRow({
   pr,
   taskId,
+  releaseBranch,
   onReview,
   onStop,
   onApprove,
+  onMerge,
 }: {
   pr: CodeReviewPR;
   taskId: string;
+  releaseBranch: string | null;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
   onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
+  onMerge: (taskId: string, prNumber: number) => void;
 }) {
   const [expanded, setExpanded] = useState(pr.status === 'failed');
   const status = STATUS_CONFIG[pr.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
   const isReviewing = pr.status === 'reviewing';
+  // Only known once the release branch has been resolved; until then the base
+  // branch is shown neutrally rather than guessed at.
+  const targetsRelease = releaseBranch && pr.prBaseBranch ? pr.prBaseBranch === releaseBranch : null;
 
   const criticals = pr.findings.filter((f) => f.severity === 'critical').length;
   const majors = pr.findings.filter((f) => f.severity === 'major').length;
@@ -181,6 +221,33 @@ function PRRow({
               </button>
             )}
 
+            {pr.status === 'passed' && !pr.mergeStatus && <MergeButton onMerge={() => onMerge(taskId, pr.prNumber)} />}
+
+            {pr.status === 'passed' && pr.mergeStatus === 'blocked' && (
+              <button
+                onClick={() => onMerge(taskId, pr.prNumber)}
+                title="Run the merge checks again"
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 transition-colors"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Retry merge
+              </button>
+            )}
+
+            {pr.mergeStatus === 'merging' && (
+              <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-purple-400">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Merging...
+              </span>
+            )}
+
+            {pr.mergeStatus === 'merged' && (
+              <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium bg-purple-500/10 text-purple-400">
+                <GitMerge className="w-3 h-3" />
+                Merged
+              </span>
+            )}
+
             {pr.prUrl && (
               <button
                 onClick={() => window.electronAPI.openExternal(pr.prUrl!)}
@@ -205,7 +272,24 @@ function PRRow({
                 {pr.prBaseBranch && (
                   <>
                     <ArrowRight className="w-3 h-3 shrink-0 text-[var(--text-muted)]" />
-                    <code className="text-[10px] bg-[var(--accent)]/10 text-[var(--accent)] px-1.5 py-0.5 rounded font-medium">{pr.prBaseBranch}</code>
+                    <code
+                      title={
+                        targetsRelease === null
+                          ? undefined
+                          : targetsRelease
+                            ? 'Targets the current release branch'
+                            : `Not the current release branch (${releaseBranch}) — this PR can't be merged from here`
+                      }
+                      className={cn(
+                        'text-[10px] px-1.5 py-0.5 rounded font-medium',
+                        targetsRelease === null && 'bg-[var(--accent)]/10 text-[var(--accent)]',
+                        targetsRelease === true && 'bg-green-500/10 text-green-400',
+                        targetsRelease === false && 'bg-red-500/10 text-red-400',
+                      )}
+                    >
+                      {pr.prBaseBranch}
+                    </code>
+                    {targetsRelease === false && <AlertTriangle className="w-3 h-3 shrink-0 text-red-400" />}
                   </>
                 )}
               </div>
@@ -241,6 +325,13 @@ function PRRow({
           <div className="mt-2 flex items-center gap-2 text-xs text-red-400 bg-red-500/10 rounded-md px-2.5 py-1.5">
             <XCircle className="w-3 h-3 shrink-0" />
             {pr.error}
+          </div>
+        )}
+
+        {pr.mergeStatus === 'blocked' && pr.mergeError && (
+          <div className="mt-2 flex items-start gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-md px-2.5 py-1.5">
+            <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+            <span>Not merged: {pr.mergeError}</span>
           </div>
         )}
       </div>
@@ -345,22 +436,29 @@ function AddPRInput({
 function ReviewItemCard({
   item,
   projectPath,
+  releaseBranch,
   onReview,
   onStop,
   onApprove,
+  onMerge,
   onAddPR,
 }: {
   item: CodeReviewItem;
   projectPath: string;
+  releaseBranch: string | null;
   onReview: (taskId: string, prNumber: number) => void;
   onStop: (taskId: string, prNumber: number) => void;
   onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
+  onMerge: (taskId: string, prNumber: number) => void;
   onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
   const isReviewing = item.status === 'reviewing';
   const hasPRs = item.prs && item.prs.length > 0;
+  // PRs are resolved after the task list paints, so "no PR found" would
+  // otherwise flash on every load before the real answer arrives.
+  const resolvingPRs = !hasPRs && !!item.prsResolving;
 
   return (
     <div className="border border-[var(--border)] rounded-xl bg-[var(--bg-secondary)] overflow-hidden">
@@ -380,6 +478,12 @@ function ReviewItemCard({
                   {item.prs.length} PR{item.prs.length !== 1 ? 's' : ''}
                 </span>
               )}
+              {resolvingPRs && (
+                <span className="flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Finding PRs...
+                </span>
+              )}
             </div>
           </div>
 
@@ -395,8 +499,8 @@ function ReviewItemCard({
           </div>
         </div>
 
-        {/* No PRs warning + manual input */}
-        {!hasPRs && item.status === 'pending' && (
+        {/* No PRs warning + manual input — held back until resolution finishes */}
+        {!hasPRs && !resolvingPRs && item.status === 'pending' && (
           <>
             <div className="mt-3 flex items-center gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
@@ -414,9 +518,11 @@ function ReviewItemCard({
                 key={pr.prNumber}
                 pr={pr}
                 taskId={item.taskId}
+                releaseBranch={releaseBranch}
                 onReview={onReview}
                 onStop={onStop}
                 onApprove={onApprove}
+                onMerge={onMerge}
               />
             ))}
             <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} compact />
@@ -428,7 +534,7 @@ function ReviewItemCard({
 }
 
 // ─── Scheduler Panel ──────────────────────────────────────────
-function SchedulerPanel({ projectPath }: { projectPath: string }) {
+function SchedulerPanel({ projectPath, release }: { projectPath: string; release: CodeReviewReleaseBranch | null }) {
   const settings = useSettingsStore((s) => s.settings);
   const updateSettings = useSettingsStore((s) => s.updateSettings);
   const projects = useProjectStore((s) => s.projects);
@@ -616,6 +722,51 @@ function SchedulerPanel({ projectPath }: { projectPath: string }) {
             <p className="text-[11px] text-[var(--text-muted)] mt-1">Tag added to tasks that pass review. Must exist in ClickUp space.</p>
           </div>
 
+          {/* Merge — read at merge time, so no scheduler restart needed */}
+          <div className="pt-3 border-t border-[var(--border)] space-y-3">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-[var(--text-primary)]">
+              <GitMerge className="w-3.5 h-3.5 text-purple-400" />
+              Merging
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Merge Method</label>
+                <select
+                  value={settings.codeReviewMergeMethod || 'squash'}
+                  onChange={(e) => updateSettings({ codeReviewMergeMethod: e.target.value as CodeReviewMergeMethod })}
+                  className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                >
+                  <option value="squash">Squash and merge</option>
+                  <option value="merge">Merge commit</option>
+                  <option value="rebase">Rebase and merge</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Release Branch Prefix</label>
+                <input
+                  type="text"
+                  value={settings.codeReviewReleaseBranchPrefix ?? 'Releases/'}
+                  onChange={(e) => updateSettings({ codeReviewReleaseBranchPrefix: e.target.value })}
+                  placeholder="Releases/"
+                  className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)]"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Current Release Branch</label>
+              <input
+                type="text"
+                value={settings.codeReviewReleaseBranch || ''}
+                onChange={(e) => updateSettings({ codeReviewReleaseBranch: e.target.value })}
+                placeholder={release?.source === 'detected' && release.branch ? `Auto-detect (${release.branch})` : 'Auto-detect'}
+                className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)]"
+              />
+              <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                A PR only merges when it targets this branch and the task's Release version is set and matches it. Leave empty to use the newest active release branch.
+              </p>
+            </div>
+          </div>
+
           {/* Status info */}
           {isActive && (
             <div className="flex items-center gap-4 text-xs text-[var(--text-muted)] pt-2 border-t border-[var(--border)]">
@@ -640,11 +791,15 @@ function SchedulerPanel({ projectPath }: { projectPath: string }) {
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR, mergePR } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const taskManagerProvider = useSettingsStore((s) => s.settings.taskManagerProvider);
+  const autoMerge = useSettingsStore((s) => s.settings.codeReviewAutoMerge);
+  const releasePrefix = useSettingsStore((s) => s.settings.codeReviewReleaseBranchPrefix);
+  const pinnedRelease = useSettingsStore((s) => s.settings.codeReviewReleaseBranch);
+  const updateSettings = useSettingsStore((s) => s.updateSettings);
 
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
   const [customStatuses, setCustomStatuses] = useState('ready for review, in review, review');
@@ -709,6 +864,24 @@ export function CodeReviewView() {
     }
   }, [activeProjectId, projects, selectedProjectPath]);
 
+  // The branch PRs may merge into — shown in the header and used to flag PRs
+  // that target anything else. `releaseRefresh` bumps on Refresh to bypass the cache.
+  const [release, setRelease] = useState<CodeReviewReleaseBranch | null>(null);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+  const [releaseRefresh, setReleaseRefresh] = useState(0);
+  useEffect(() => {
+    if (!selectedProjectPath) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      window.electronAPI.codeReviewReleaseBranch(selectedProjectPath, releaseRefresh > 0).then((res: any) => {
+        if (cancelled) return;
+        setRelease(res.success ? res.data : null);
+        setReleaseError(res.success ? null : res.error || 'Could not detect the release branch');
+      });
+    }, 400); // prefix/pin are typed into inputs — wait for a pause
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [selectedProjectPath, releasePrefix, pinnedRelease, releaseRefresh]);
+
   useEffect(() => {
     const unsub = window.electronAPI.onCodeReviewEvent?.((event: any) => {
       // Use getState() to avoid stale closure — ensures store updates trigger re-renders
@@ -728,7 +901,13 @@ export function CodeReviewView() {
   const handleLoadTasks = useCallback(() => {
     const statuses = customStatuses.split(',').map((s) => s.trim()).filter(Boolean);
     loadTasks(statuses, selectedProjectPath || undefined, selectedListIds.length ? selectedListIds : undefined);
+    setReleaseRefresh((n) => n + 1);
   }, [customStatuses, selectedProjectPath, selectedListIds, loadTasks]);
+
+  const handleMerge = useCallback((taskId: string, prNumber: number) => {
+    if (!selectedProjectPath) return;
+    mergePR(selectedProjectPath, taskId, prNumber);
+  }, [selectedProjectPath, mergePR]);
 
   const handleReview = useCallback((taskId: string, prNumber: number) => {
     if (!selectedProjectPath) return;
@@ -797,6 +976,27 @@ export function CodeReviewView() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => updateSettings({ codeReviewAutoMerge: !autoMerge })}
+              title={autoMerge
+                ? 'PRs are approved and merged as soon as their review passes (if they target the current release branch)'
+                : 'Turn on to merge PRs automatically once their review passes'}
+              className={cn(
+                'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-colors',
+                autoMerge
+                  ? 'bg-purple-500/10 border-purple-500/30 text-purple-400'
+                  : 'bg-[var(--bg-tertiary)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              <GitMerge className="w-4 h-4" />
+              Auto-merge
+              <span className={cn('relative w-7 h-4 rounded-full transition-colors', autoMerge ? 'bg-purple-500' : 'bg-[var(--bg-primary)]')}>
+                <span className={cn(
+                  'absolute top-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-transform',
+                  autoMerge ? 'translate-x-3.5' : 'translate-x-0.5',
+                )} />
+              </span>
+            </button>
             {(reviewingAll || reviewingCount > 0) && (
               <button
                 onClick={handleStopAll}
@@ -944,6 +1144,28 @@ export function CodeReviewView() {
           </button>
         </div>
 
+        {/* Merge target — PRs aimed anywhere else are refused at merge time */}
+        {selectedProjectPath && (
+          <div className="flex items-center gap-2 mt-3 text-xs text-[var(--text-muted)]">
+            <GitMerge className="w-3.5 h-3.5 shrink-0" />
+            <span>Merges into</span>
+            {release?.branch ? (
+              <>
+                <code className="text-[11px] bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded font-medium">{release.branch}</code>
+                <span>({release.source === 'pinned' ? 'pinned in Auto Review settings' : 'newest active release branch'})</span>
+              </>
+            ) : (
+              <span className="text-orange-400">
+                {releaseError
+                  ? `release branch unknown — ${releaseError}`
+                  : release
+                    ? `no "${release.prefix}x.y.z" branch found — pin one in Auto Review settings`
+                    : 'detecting release branch...'}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Stats bar */}
         {items.length > 0 && (
           <div className="flex items-center gap-4 mt-3 text-xs text-[var(--text-muted)]">
@@ -967,7 +1189,7 @@ export function CodeReviewView() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
         {/* Scheduler panel — always at top */}
-        <SchedulerPanel projectPath={projectPath} />
+        <SchedulerPanel projectPath={projectPath} release={release} />
 
         {/* Task list */}
         {items.length === 0 && !loading && !error && (
@@ -992,9 +1214,11 @@ export function CodeReviewView() {
               key={item.taskId}
               item={item}
               projectPath={projectPath}
+              releaseBranch={release?.branch ?? null}
               onReview={handleReview}
               onStop={handleStop}
               onApprove={handleApprove}
+              onMerge={handleMerge}
               onAddPR={handleAddPR}
             />
           ))}

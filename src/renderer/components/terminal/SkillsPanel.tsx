@@ -11,9 +11,19 @@ interface SkillsPanelProps {
   onClose: () => void;
 }
 
-/** Resolve the .claude/skills file path for a claude-skill id */
-function resolveSkillPaths(projectPath: string, skillId: string): string[] {
-  const name = skillId.replace('claude-skill:', '');
+/**
+ * Where to read a skill's markdown from.
+ *
+ * The loader now reports `filePath` directly, which is the only thing that
+ * works for skills outside the project — a plugin skill such as `dp:ship`
+ * lives in the plugin cache, not under `.claude/skills`, so guessing a
+ * project-relative path could never find it. The guess is kept as a fallback
+ * for skills that predate `filePath`.
+ */
+function resolveSkillPaths(projectPath: string | undefined, skill: ProjectSkill): string[] {
+  if (skill.filePath) return [skill.filePath];
+  if (!projectPath) return [];
+  const name = skill.id.replace('claude-skill:', '');
   const base = projectPath.replace(/\\/g, '/');
   return [
     `${base}/.claude/skills/${name}/SKILL.md`,
@@ -26,26 +36,35 @@ export function SkillsPanel({ skills, onInvokeSkill, projectPath, onClose }: Ski
   const [selectedSkill, setSelectedSkill] = useState<ProjectSkill | null>(null);
   const [skillContent, setSkillContent] = useState<string | null>(null);
 
+  // Skills configured by hand in project settings, versus the three kinds
+  // discovered on disk. Plugin skills are listed separately because their name
+  // is namespaced (`dp:ship`) and they are shared across every project the
+  // plugin is enabled for, not owned by this one.
   const manualSkills = skills.filter((s) => !s.id.startsWith('claude-skill:'));
-  const claudeSkills = skills.filter((s) => s.id.startsWith('claude-skill:'));
+  const discovered = skills.filter((s) => s.id.startsWith('claude-skill:'));
+  const claudeSkills = discovered.filter((s) => s.source !== 'plugin');
+  const pluginSkills = discovered.filter((s) => s.source === 'plugin');
 
   const lower = search.toLowerCase();
   const filterFn = (s: ProjectSkill) =>
     !search || s.name.toLowerCase().includes(lower) || s.description?.toLowerCase().includes(lower);
   const filteredManual = manualSkills.filter(filterFn);
   const filteredClaude = claudeSkills.filter(filterFn);
+  const filteredPlugin = pluginSkills.filter(filterFn);
 
   // Load skill file content when selected
   useEffect(() => {
     if (!selectedSkill) { setSkillContent(null); return; }
 
-    if (!selectedSkill.id.startsWith('claude-skill:') || !projectPath) {
+    // A hand-configured skill has no file — its prompt IS the content. A
+    // discovered skill needs either its own filePath or a project to guess in.
+    if (!selectedSkill.id.startsWith('claude-skill:') || (!selectedSkill.filePath && !projectPath)) {
       setSkillContent(selectedSkill.prompt);
       return;
     }
 
     let cancelled = false;
-    const paths = resolveSkillPaths(projectPath, selectedSkill.id);
+    const paths = resolveSkillPaths(projectPath, selectedSkill);
     (async () => {
       for (const p of paths) {
         try {
@@ -148,7 +167,15 @@ export function SkillsPanel({ skills, onInvokeSkill, projectPath, onClose }: Ski
             {filteredClaude.map(renderSkillItem)}
           </>
         )}
-        {filteredManual.length === 0 && filteredClaude.length === 0 && (
+        {filteredPlugin.length > 0 && (
+          <>
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] mt-1">
+              Plugin Skills
+            </div>
+            {filteredPlugin.map(renderSkillItem)}
+          </>
+        )}
+        {filteredManual.length === 0 && filteredClaude.length === 0 && filteredPlugin.length === 0 && (
           <div className="text-center py-8 text-xs text-[var(--text-muted)]">
             {search ? 'No matching skills' : 'No skills configured'}
           </div>

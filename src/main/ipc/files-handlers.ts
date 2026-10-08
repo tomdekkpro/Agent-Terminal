@@ -1,7 +1,8 @@
 import type { IpcMain } from 'electron';
-import { readdir, stat, readFile, writeFile, mkdir } from 'fs/promises';
+import { readdir, stat, readFile, writeFile, mkdir, open } from 'fs/promises';
 import { join, extname, basename } from 'path';
 import { existsSync } from 'fs';
+import { homedir } from 'os';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { ProjectSkill } from '../../shared/types';
 
@@ -80,56 +81,204 @@ function parseFrontmatter(content: string): Record<string, string> {
   return result;
 }
 
+/** Read a JSON file, returning undefined rather than throwing. */
+async function readJson(path: string): Promise<any | undefined> {
+  try {
+    return JSON.parse(await readFile(path, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Enough to hold any realistic frontmatter block. */
+const FRONTMATTER_HEAD_BYTES = 16 * 1024;
+
 /**
- * Scan .claude/skills directory for Claude Code skill files.
- * Supports two layouts:
- *   .claude/skills/{name}.md          — flat file
- *   .claude/skills/{name}/SKILL.md    — folder with SKILL.md
+ * Read just enough of a skill file to parse its frontmatter.
+ *
+ * Only `name` and `description` are needed to list a skill, but some SKILL.md
+ * files are large — the plugin set here totals half a megabyte, with a single
+ * 72KB file — and the whole lot was being read on every panel open. Falls back
+ * to the full file if the closing delimiter is not in the head, so an unusually
+ * long frontmatter block still parses rather than silently losing its
+ * description.
  */
-async function loadClaudeSkills(projectPath: string): Promise<ProjectSkill[]> {
-  const skillsDir = join(projectPath, '.claude', 'skills');
+async function readFrontmatterHead(path: string): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, 'r');
+    const buffer = Buffer.alloc(FRONTMATTER_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, FRONTMATTER_HEAD_BYTES, 0);
+    const head = buffer.subarray(0, bytesRead).toString('utf-8');
+    // A complete block needs the opening and closing `---`.
+    if (/^---\s*\n[\s\S]*?\n---/.test(head)) return head;
+    if (bytesRead < FRONTMATTER_HEAD_BYTES) return head; // whole file already
+  } catch {
+    /* fall through to the full read */
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+  return readFile(path, 'utf-8');
+}
+
+/**
+ * Scan one skills directory. Supports both layouts Claude Code accepts:
+ *   {dir}/{name}.md          - flat file
+ *   {dir}/{name}/SKILL.md    - folder with SKILL.md
+ *
+ * `namespace` prefixes the invoked name for plugin skills (`dp` -> `dp:ship`),
+ * matching how Claude Code addresses them.
+ */
+async function scanSkillsDir(
+  skillsDir: string,
+  source: 'project' | 'user' | 'plugin',
+  namespace?: string,
+): Promise<ProjectSkill[]> {
   if (!existsSync(skillsDir)) return [];
 
   const skills: ProjectSkill[] = [];
-  const items = await readdir(skillsDir, { withFileTypes: true });
+  const items = await readdir(skillsDir, { withFileTypes: true }).catch(() => []);
 
   for (const item of items) {
     try {
       let mdPath: string | null = null;
-      let skillId: string;
+      let dirName: string;
 
       if (item.isDirectory()) {
-        // Folder layout: {name}/SKILL.md
         const candidate = join(skillsDir, item.name, 'SKILL.md');
-        if (existsSync(candidate)) {
-          mdPath = candidate;
-          skillId = `claude-skill:${item.name}`;
-        } else {
-          continue;
-        }
+        if (!existsSync(candidate)) continue; // an empty folder is not a skill
+        mdPath = candidate;
+        dirName = item.name;
       } else if (item.name.endsWith('.md')) {
-        // Flat file layout: {name}.md
         mdPath = join(skillsDir, item.name);
-        skillId = `claude-skill:${basename(item.name, '.md')}`;
+        dirName = basename(item.name, '.md');
       } else {
         continue;
       }
 
-      const content = await readFile(mdPath, 'utf-8');
-      const fm = parseFrontmatter(content);
-      const name = fm.name || basename(item.name, '.md');
+      const fm = parseFrontmatter(await readFrontmatterHead(mdPath));
+      // Claude Code addresses a skill by its directory name, so that wins over
+      // the frontmatter `name` when the two disagree.
+      const bare = dirName || fm.name;
+      const invoked = namespace ? `${namespace}:${bare}` : bare;
 
       skills.push({
-        id: skillId,
-        name,
+        id: `claude-skill:${invoked}`,
+        name: invoked,
         description: fm.description || undefined,
-        prompt: `/${name} `,
+        prompt: `/${invoked} `,
         icon: 'FileText',
-        color: '#8b5cf6',
+        color: source === 'plugin' ? '#0ea5e9' : '#8b5cf6',
+        source,
+        filePath: mdPath,
+        ...(namespace ? { pluginName: namespace } : {}),
       });
     } catch { /* skip unreadable files */ }
   }
+  return skills;
+}
 
+/**
+ * Which plugins are enabled for this project.
+ *
+ * `enabledPlugins` is keyed `<plugin>@<marketplace>`. Project settings win over
+ * user settings, and settings.local.json wins over settings.json, so a plugin
+ * turned off for one project stays off there.
+ */
+async function resolveEnabledPlugins(projectPath: string): Promise<Record<string, boolean>> {
+  const sources = [
+    join(homedir(), '.claude', 'settings.json'),
+    join(projectPath, '.claude', 'settings.json'),
+    join(projectPath, '.claude', 'settings.local.json'),
+  ];
+  const merged: Record<string, boolean> = {};
+  for (const path of sources) {
+    const json = await readJson(path);
+    if (json?.enabledPlugins && typeof json.enabledPlugins === 'object') {
+      Object.assign(merged, json.enabledPlugins);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Skills contributed by installed plugins, e.g. `dp:ship`.
+ *
+ * These are the ones the panel used to miss entirely: a plugin's skills do not
+ * live under the project at all, but in the plugin cache
+ * (~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills), with
+ * installed_plugins.json as the index. A plugin is included when it is enabled
+ * for this project and installed either for the user or for this project path.
+ */
+async function loadPluginSkills(projectPath: string): Promise<ProjectSkill[]> {
+  const registry = await readJson(join(homedir(), '.claude', 'plugins', 'installed_plugins.json'));
+  const plugins = registry?.plugins;
+  if (!plugins || typeof plugins !== 'object') return [];
+
+  const enabled = await resolveEnabledPlugins(projectPath);
+  // Compare paths separator- and case-insensitively, ignoring trailing slashes.
+  const normalize = (p: string) =>
+    p.split('\\').join('/').replace(/\/+$/, '').toLowerCase();
+  const project = normalize(projectPath);
+
+  const results: ProjectSkill[] = [];
+  const seenDirs = new Set<string>();
+
+  for (const [key, installs] of Object.entries(plugins)) {
+    if (enabled[key] !== true) continue;              // not enabled here
+    const pluginName = key.split('@')[0];
+    if (!pluginName || !Array.isArray(installs)) continue;
+
+    for (const install of installs as any[]) {
+      const installPath = install?.installPath;
+      if (!installPath) continue;
+
+      // A user-scope install is available everywhere. A project-scope install
+      // applies to its own path, and to worktrees nested under it.
+      if (install.scope === 'project') {
+        const owner = normalize(String(install.projectPath || ''));
+        if (!owner || !(project === owner || project.startsWith(`${owner}/`) || owner.startsWith(`${project}/`))) {
+          continue;
+        }
+      }
+
+      const skillsDir = join(installPath, 'skills');
+      const dedupeKey = normalize(skillsDir);
+      if (seenDirs.has(dedupeKey)) continue;  // same version installed twice
+      seenDirs.add(dedupeKey);
+
+      results.push(...(await scanSkillsDir(skillsDir, 'plugin', pluginName)));
+    }
+  }
+  return results;
+}
+
+/**
+ * Every skill available to a project, matching what Claude Code itself would
+ * offer: project skills, the user's own skills, and skills from enabled
+ * plugins.
+ *
+ * Previously only `<projectPath>/.claude/skills` was scanned, so plugin skills
+ * such as `dp:ship` never appeared even though they were installed and enabled.
+ *
+ * On a name clash the more specific definition wins - project over user over
+ * plugin - which is the precedence Claude Code applies. Plugin skills are
+ * namespaced, so they only ever collide with each other.
+ */
+async function loadClaudeSkills(projectPath: string): Promise<ProjectSkill[]> {
+  const [project, user, plugin] = await Promise.all([
+    scanSkillsDir(join(projectPath, '.claude', 'skills'), 'project'),
+    scanSkillsDir(join(homedir(), '.claude', 'skills'), 'user'),
+    loadPluginSkills(projectPath),
+  ]);
+
+  const byId = new Map<string, ProjectSkill>();
+  // Reverse precedence order: later writes win, so add the weakest first.
+  for (const skill of [...plugin, ...user, ...project]) {
+    byId.set(skill.id, skill);
+  }
+
+  const skills = [...byId.values()];
   skills.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   return skills;
 }

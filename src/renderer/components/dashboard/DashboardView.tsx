@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   LayoutDashboard, Plus, Play, Loader2, Pencil, Trash2, X,
   AlertTriangle, Sparkles, CheckCircle2, CalendarClock, Bell,
-  ListChecks, Github, Globe,
+  ListChecks, Github, Globe, GripVertical,
 } from 'lucide-react';
 import { useDashboardStore, subscribeDashboardEvents, type SaveNoticeInput } from '../../stores/dashboard-store';
+import { UsageSummaryCard } from './UsageSummaryCard';
 import { useProjectStore } from '../../stores/project-store';
 import type { DashboardNotice, NoticeSource } from '../../../shared/types';
 import { cn, formatRelativeTime } from '../../../shared/utils';
@@ -56,19 +57,95 @@ function NoticeCard({
   onEdit,
   onDelete,
   onToggleEnabled,
+  onReorder,
+  onResize,
+  draggingId,
+  onDragStart,
+  onDragEnd,
 }: {
   notice: DashboardNotice;
   onRun: (id: string) => void;
   onEdit: (n: DashboardNotice) => void;
   onDelete: (id: string) => void;
   onToggleEnabled: (n: DashboardNotice) => void;
+  onReorder: (draggedId: string, targetId: string, position: 'before' | 'after') => void;
+  onResize: (id: string, width: number, height: number) => void;
+  draggingId: string | null;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
 }) {
   const running = notice.status === 'running';
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [insertHint, setInsertHint] = useState<'before' | 'after' | null>(null);
+
+  // Persist size after the user finishes dragging the resize corner.
+  const savedSize = useRef({ w: notice.width || 0, h: notice.height || 0 });
+  const firstObs = useRef(true);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver(() => {
+      if (firstObs.current) { firstObs.current = false; return; }
+      const w = Math.round(el.offsetWidth);
+      const h = Math.round(el.offsetHeight);
+      if (Math.abs(w - savedSize.current.w) < 4 && Math.abs(h - savedSize.current.h) < 4) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { savedSize.current = { w, h }; onResize(notice.id, w, h); }, 500);
+    });
+    ro.observe(el);
+    return () => { ro.disconnect(); if (timer) clearTimeout(timer); };
+  }, [notice.id, onResize]);
+
+  const isDropTarget = draggingId && draggingId !== notice.id;
+
   return (
-    <div className="rounded-2xl border border-[var(--border)] glass-card overflow-hidden lift">
+    <div
+      ref={cardRef}
+      style={{ width: notice.width ?? 460, height: notice.height, minWidth: 300, minHeight: 220, maxWidth: '100%' }}
+      onDragOver={(e) => {
+        if (!isDropTarget) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = e.currentTarget.getBoundingClientRect();
+        setInsertHint(e.clientX < r.left + r.width / 2 ? 'before' : 'after');
+      }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setInsertHint(null); }}
+      onDrop={(e) => {
+        if (!isDropTarget) return;
+        e.preventDefault();
+        const r = e.currentTarget.getBoundingClientRect();
+        const pos: 'before' | 'after' = e.clientX < r.left + r.width / 2 ? 'before' : 'after';
+        setInsertHint(null);
+        onReorder(draggingId!, notice.id, pos);
+      }}
+      className={cn(
+        'relative rounded-2xl border border-[var(--border)] glass-card overflow-hidden flex flex-col [resize:both]',
+        draggingId === notice.id && 'opacity-50',
+      )}
+    >
+      {/* Drop indicator */}
+      {insertHint === 'before' && <div className="absolute top-2 bottom-2 -left-0.5 w-1 rounded-full bg-[var(--accent)] pointer-events-none z-10" />}
+      {insertHint === 'after' && <div className="absolute top-2 bottom-2 -right-0.5 w-1 rounded-full bg-[var(--accent)] pointer-events-none z-10" />}
+
       {/* Header */}
-      <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-[var(--border)]">
-        <div className="min-w-0">
+      <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-[var(--border)] shrink-0">
+        <div className="min-w-0 flex items-start gap-2">
+          <span
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', notice.id);
+              if (cardRef.current) e.dataTransfer.setDragImage(cardRef.current, 24, 24);
+              onDragStart(notice.id);
+            }}
+            onDragEnd={onDragEnd}
+            title="Drag to reorder"
+            className="mt-0.5 shrink-0 cursor-grab active:cursor-grabbing text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
+          >
+            <GripVertical className="w-4 h-4" />
+          </span>
+          <div className="min-w-0">
           <h3 className="font-display text-sm font-semibold text-[var(--text-primary)] truncate">{notice.title}</h3>
           <div className="flex items-center gap-3 mt-1 flex-wrap">
             <span className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)]">
@@ -89,6 +166,7 @@ function NoticeCard({
                 );
               })}
             </div>
+          </div>
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
@@ -125,19 +203,19 @@ function NoticeCard({
       </div>
 
       {/* Prompt */}
-      <div className="px-4 py-2 text-[11px] text-[var(--text-muted)] italic border-b border-[var(--border)] line-clamp-2">
+      <div className="px-4 py-2 text-[11px] text-[var(--text-muted)] italic border-b border-[var(--border)] line-clamp-2 shrink-0">
         “{notice.prompt}”
       </div>
 
       {/* Result */}
-      <div className="px-4 py-3">
+      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">
         {notice.status === 'error' ? (
           <div className="flex items-start gap-2 text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{notice.lastError || 'Run failed.'}</span>
           </div>
         ) : notice.lastResult ? (
-          <div className="insights-prose text-sm text-[var(--text-secondary)] max-h-96 overflow-y-auto pr-1">
+          <div className="insights-prose text-sm text-[var(--text-secondary)] pr-1">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{notice.lastResult}</ReactMarkdown>
           </div>
         ) : running ? (
@@ -359,24 +437,59 @@ function NoticeModal({
   );
 }
 
+const orderKey = (n: DashboardNotice) =>
+  typeof n.orderIndex === 'number' ? n.orderIndex : (Date.parse(n.createdAt) || 0);
+
 export function DashboardView() {
   const { notices, loading, error, load, save, remove, run } = useDashboardStore();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<DashboardNotice | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   useEffect(() => {
     load();
     return subscribeDashboardEvents();
   }, [load]);
 
+  const sortedNotices = [...notices].sort((a, b) => orderKey(a) - orderKey(b));
+
   const openNew = () => { setEditing(null); setModalOpen(true); };
   const openEdit = (n: DashboardNotice) => { setEditing(n); setModalOpen(true); };
-  const toggleEnabled = (n: DashboardNotice) => {
+
+  /** Persist a partial change, re-sending the required fields save() expects. */
+  const persist = useCallback((n: DashboardNotice, patch: Partial<SaveNoticeInput>) => {
     void save({
       id: n.id, title: n.title, prompt: n.prompt, scheduleTime: n.scheduleTime,
-      enabled: !n.enabled, projectPath: n.projectPath, sources: n.sources, urls: n.urls,
+      enabled: n.enabled, projectPath: n.projectPath, sources: n.sources, urls: n.urls,
+      ...patch,
     });
-  };
+  }, [save]);
+
+  const toggleEnabled = (n: DashboardNotice) => persist(n, { enabled: !n.enabled });
+  const handleResize = useCallback((id: string, width: number, height: number) => {
+    const n = notices.find((x) => x.id === id);
+    if (n) persist(n, { width, height });
+  }, [notices, persist]);
+
+  const handleReorder = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    setDraggingId(null);
+    if (draggedId === targetId) return;
+    const dragged = notices.find((n) => n.id === draggedId);
+    if (!dragged) return;
+    const list = [...notices].sort((a, b) => orderKey(a) - orderKey(b)).filter((n) => n.id !== draggedId);
+    const idx = list.findIndex((n) => n.id === targetId);
+    if (idx < 0) return;
+    const tKey = orderKey(list[idx]);
+    let newOrder: number;
+    if (position === 'before') {
+      const prev = idx > 0 ? list[idx - 1] : undefined;
+      newOrder = prev ? (orderKey(prev) + tKey) / 2 : tKey - 1;
+    } else {
+      const next = idx < list.length - 1 ? list[idx + 1] : undefined;
+      newOrder = next ? (tKey + orderKey(next)) / 2 : tKey + 1;
+    }
+    persist(dragged, { orderIndex: newOrder });
+  }, [notices, persist]);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -412,6 +525,11 @@ export function DashboardView() {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-6 py-5">
+        {/* Claude Code usage summary — always visible */}
+        <div className="max-w-6xl mx-auto mb-5">
+          <UsageSummaryCard />
+        </div>
+
         {loading && notices.length === 0 ? (
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-6 h-6 text-[var(--accent)] animate-spin" />
@@ -434,8 +552,8 @@ export function DashboardView() {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 max-w-6xl mx-auto">
-            {notices.map((n) => (
+          <div className="flex flex-wrap gap-4 items-start max-w-6xl mx-auto">
+            {sortedNotices.map((n) => (
               <NoticeCard
                 key={n.id}
                 notice={n}
@@ -443,6 +561,11 @@ export function DashboardView() {
                 onEdit={openEdit}
                 onDelete={remove}
                 onToggleEnabled={toggleEnabled}
+                onReorder={handleReorder}
+                onResize={handleResize}
+                draggingId={draggingId}
+                onDragStart={setDraggingId}
+                onDragEnd={() => setDraggingId(null)}
               />
             ))}
           </div>

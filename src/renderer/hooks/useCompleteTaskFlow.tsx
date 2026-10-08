@@ -5,6 +5,7 @@ import { cn } from '../../shared/utils';
 import { useTerminalStore } from '../stores/terminal-store';
 import { useKanbanStore } from '../stores/kanban-store';
 import { CompleteTaskModal, type TaskCompleteOptions } from '../components/terminal/CompleteTaskModal';
+import { sendAgentPrompt } from '../lib/send-agent-prompt';
 
 interface MergeTarget {
   id: string;
@@ -168,7 +169,7 @@ export function useCompleteTaskFlow(
       }
       parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
 
-      window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
+      sendAgentPrompt(saved.id, parts.join('\n'));
       await stopAndSyncTimer(saved.id, saved.task?.id);
       if (shouldCleanup) {
         useTerminalStore.getState().markPendingWorktreeCleanup(saved.id);
@@ -253,7 +254,7 @@ export function useCompleteTaskFlow(
       }
       parts.push(`\nImportant: Use the PR title exactly as specified, do not modify it.`);
 
-      window.electronAPI.sendTerminalInput(saved.id, parts.join('\n') + '\n');
+      sendAgentPrompt(saved.id, parts.join('\n'));
       await stopAndSyncTimer(saved.id, saved.task?.id);
       if (shouldCleanup) useTerminalStore.getState().markPendingWorktreeCleanup(saved.id);
       setMergeStatus({

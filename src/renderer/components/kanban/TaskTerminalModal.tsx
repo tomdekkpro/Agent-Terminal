@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   ExternalLink,
   GitBranch,
+  GitFork,
   GitPullRequest,
   Copy,
   Check,
@@ -20,6 +22,7 @@ import {
   GitCommitVertical,
   Search,
   Rocket,
+  MessageSquare,
 } from 'lucide-react';
 import type { KanbanTask, AgentProviderMeta, AgentProviderId, TaskManagerTask, TerminalTask } from '../../../shared/types';
 import { useTerminalStore, type Terminal } from '../../stores/terminal-store';
@@ -28,9 +31,12 @@ import { useProjectStore } from '../../stores/project-store';
 import { useKanbanStore, type AutoCodeLogEntry } from '../../stores/kanban-store';
 import { TerminalPanel, ActionsDropdown } from '../terminal/TerminalPanel';
 import { ChangesSplitLayout, TaskPickerModal } from '../terminal/TerminalView';
-import { cn } from '../../../shared/utils';
+import { FilesPanel } from '../terminal/FilesPanel';
+import { CommentsSplitLayout } from '../comments';
+import { cn, isLocalTaskId } from '../../../shared/utils';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 
 interface TaskTerminalModalProps {
   task: KanbanTask | null;
@@ -50,6 +56,128 @@ function toTerminalTask(t: KanbanTask): TerminalTask {
     // so downstream UI (PR title prefix, task-manager actions) skips them.
     provider: t.provider === 'local' ? 'none' : 'clickup',
   };
+}
+
+/** Status pill + dropdown — change the task's status straight from the task
+ *  detail header. Writes through the kanban store's moveTask so the board
+ *  stays 1-1 with ClickUp (optimistic move + revert-on-reject), and mirrors
+ *  the result onto any terminal linked to the same task so its toolbar chip
+ *  updates immediately instead of waiting for the next poll. */
+function TaskStatusDropdown({ task }: { task: KanbanTask }) {
+  const statuses = useKanbanStore((s) => s.statuses);
+  const moveTask = useKanbanStore((s) => s.moveTask);
+  const pendingStatus = useKanbanStore((s) => s.pendingMoves[task.id]);
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Statuses may not be loaded yet if the modal opens before the board did.
+  useEffect(() => {
+    if (statuses.length === 0) void useKanbanStore.getState().loadStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onScroll = () => setMenu(null);
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [menu]);
+
+  const statusColorFor = (name: string) =>
+    statuses.find((s) => s.name.trim().toLowerCase() === name.trim().toLowerCase())?.color;
+
+  // While a move is in flight, show the destination status (optimistic — the
+  // store reverts pendingMoves if ClickUp rejects the change).
+  const currentName = (pendingStatus || task.clickupStatus || '').trim();
+  const color = statusColorFor(currentName) || task.clickupStatusColor || '#94a3b8';
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenu({ top: r.bottom + 4, left: r.left });
+  };
+
+  const pickStatus = async (e: React.MouseEvent, name: string) => {
+    e.stopPropagation();
+    setMenu(null);
+    if (name.trim().toLowerCase() === (task.clickupStatus || '').trim().toLowerCase()) return;
+    await moveTask(task.id, name);
+    // Mirror the confirmed change onto any linked terminal's task chip.
+    const after = useKanbanStore.getState().tasks.find((t) => t.id === task.id);
+    if (!after || (after.clickupStatus || '').trim().toLowerCase() !== name.trim().toLowerCase()) return;
+    const newColor = statusColorFor(name) || after.clickupStatusColor || '#94a3b8';
+    const termStore = useTerminalStore.getState();
+    for (const term of termStore.terminals) {
+      if (term.task?.id === task.clickupTaskId) {
+        termStore.updateTerminal(term.id, {
+          task: { ...term.task, status: name, statusColor: newColor },
+        });
+      }
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={openMenu}
+        disabled={!!pendingStatus || statuses.length === 0}
+        className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide hover:opacity-80 transition-opacity disabled:opacity-60"
+        style={{
+          backgroundColor: `${color}20`,
+          color,
+        }}
+        title="Change task status"
+      >
+        {pendingStatus && <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />}
+        {currentName}
+        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+      </button>
+
+      {/* Portal so the header's overflow doesn't clip the menu */}
+      {menu && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[100] min-w-[180px] max-h-72 overflow-y-auto glass-card border border-[var(--border)] rounded-lg shadow-xl py-1"
+          style={{ top: menu.top, left: menu.left }}
+        >
+          <div className="px-3 py-1 text-[9px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+            Set status
+          </div>
+          {statuses.map((s) => {
+            const active = s.name.trim().toLowerCase() === currentName.toLowerCase();
+            return (
+              <button
+                key={s.name}
+                onClick={(e) => void pickStatus(e, s.name)}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors',
+                  active && 'bg-[var(--accent-soft)]',
+                )}
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px 0 ${s.color}` }} />
+                <span className="truncate flex-1 text-left text-[var(--text-primary)]">{s.name}</span>
+                {active && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
 }
 
 /** Short-form copy helper */
@@ -459,8 +587,16 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     );
 
   const [isFullscreen, setIsFullscreen] = useState(true);
+  // Which side panel is open: docs repo files, project source tree, or none.
+  const [rightPanel, setRightPanel] = useState<'docs' | 'project' | null>(null);
+  // Comments split the main area beside the terminal (like Changes) rather than
+  // taking the right-hand rail, so both can be open at once.
+  const [commentsOpen, setCommentsOpen] = useState(false);
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
+  const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
+  const startMenuRef = useRef<HTMLDivElement>(null);
+  const yoloMenuRef = useRef<HTMLDivElement>(null);
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   const [terminalId, setTerminalId] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -607,6 +743,40 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
               worktreeBranch: undefined,
             });
           }
+        }
+
+        // FRESH START (no stored session): don't create a worktree here. The
+        // Start button decides worktree vs current branch at launch, creating
+        // the worktree on demand only if the user picks it. Open the PTY at the
+        // project root either way — `claude --worktree` (added at Start) cd's
+        // into the worktree when that mode is chosen.
+        if (!sessionId) {
+          updateTerminal(terminal.id, {
+            task: toTerminalTask(task),
+            cwd: project.path,
+            worktreePath: undefined,
+            worktreeBranch: undefined,
+            title,
+          } as Partial<Terminal>);
+
+          if (task.baseBranch) {
+            updateTerminal(terminal.id, { baseBranch: task.baseBranch });
+          } else {
+            try {
+              const br = await window.electronAPI.listBranches(project.path);
+              if (br?.success && br.current) updateTerminal(terminal.id, { baseBranch: br.current });
+            } catch { /* non-critical */ }
+          }
+
+          await window.electronAPI.createTerminal({
+            id: terminal.id,
+            cwd: project.path,
+            cols: 80,
+            rows: 24,
+          });
+
+          setTerminalId(terminal.id);
+          return;
         }
 
         if (!wantsWorktree) {
@@ -784,22 +954,60 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
     return () => document.removeEventListener('mousedown', handler);
   }, [showProviderMenu]);
 
+  // Close the Start / YOLO mode dropdowns on outside click
+  useEffect(() => {
+    if (!startMenu) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (startMenuRef.current?.contains(t) || yoloMenuRef.current?.contains(t)) return;
+      setStartMenu(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [startMenu]);
+
   const terminal: Terminal | undefined = terminalId ? terminals.find((t) => t.id === terminalId) : undefined;
   const currentProvider = terminal ? agentProviders.find((p) => p.id === terminal.agentProvider) : undefined;
 
-  const handleInvokeAgent = useCallback(async (skipPermissions?: boolean) => {
+  const handleInvokeAgent = useCallback(async (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => {
     if (!terminal) return;
+    const skipPermissions = opts?.skipPermissions;
     const agentId = terminal.agentProvider;
     const project = projects.find((p) => p.id === terminal.projectId);
     const model = project?.agentModel || settings.agentModels?.[agentId] || undefined;
-    // Pass --worktree <id> when this terminal is bound to a task so Claude
-    // creates / reuses <repo>/.claude/worktrees/<id>. Skip for non-Claude
-    // providers (flag is Claude-specific) and for tasks the user opted out of
-    // worktree mode (`useWorktree === false`) — those run on the project's
-    // checked-out branch.
-    const worktreeName = terminal.task && agentId === 'claude' && task?.useWorktree !== false
-      ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
-      : undefined;
+
+    // Worktree vs current branch is decided HERE, at Start — not locked in at
+    // create/import time. Default to the task's saved preference; an explicit
+    // Start-menu pick overrides it. The --worktree flag is Claude-specific.
+    // Default is always current branch ("normal"); a worktree is only used when
+    // explicitly picked from the Start/YOLO dropdown for this launch.
+    const mode: 'worktree' | 'current' = opts?.mode ?? 'current';
+    const canWorktree = !!terminal.task && agentId === 'claude' && !!project;
+
+    let worktreeName: string | undefined;
+    if (mode === 'worktree' && canWorktree) {
+      const safeId = (terminal.task!.customId || terminal.task!.id).replace(/[^a-zA-Z0-9_-]/g, '-');
+      // Create the worktree on demand if it isn't there yet, so git ops
+      // (status/push/PR) resolve against it and `claude --worktree` reuses it.
+      let wtPath = terminal.worktreePath;
+      let wtBranch = terminal.worktreeBranch;
+      if (!wtPath) {
+        try {
+          const wt = await window.electronAPI.createTaskWorktree(project!.path, safeId, task?.baseBranch);
+          if (wt?.success && wt.data) { wtPath = wt.data; wtBranch = wt.branch || wtBranch; }
+        } catch { /* fall back to project root — claude --worktree creates it */ }
+      }
+      useTerminalStore.getState().updateTerminal(terminal.id, { worktreePath: wtPath, worktreeBranch: wtBranch });
+      worktreeName = safeId;
+    } else {
+      // Current branch: unbind any worktree so git ops target the project's
+      // checked-out tree and Claude runs there.
+      useTerminalStore.getState().updateTerminal(terminal.id, { worktreePath: undefined, worktreeBranch: undefined });
+    }
+
+    // Remember the choice as this task's default for next time.
+    if (task) void useKanbanStore.getState().updateTask(task.id, { useWorktree: mode === 'worktree' });
+
     const result = await window.electronAPI.invokeAgent(terminal.id, agentId, {
       cwd: project?.path || terminal.cwd,
       skipPermissions,
@@ -827,7 +1035,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
           }
           const prompt = parts.join('\n');
           setTimeout(() => {
-            window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+            sendAgentPrompt(terminal.id, prompt);
           }, 3000);
         } else {
           const taskId = terminal.task.id;
@@ -846,13 +1054,83 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             if (t.url) parts.push(`URL: ${t.url}`);
             const prompt = parts.join('\n');
             setTimeout(() => {
-              window.electronAPI.sendTerminalInput(terminal.id, prompt + '\n');
+              sendAgentPrompt(terminal.id, prompt);
             }, 3000);
           }).catch(() => { /* non-critical */ });
         }
       }
     }
   }, [terminal, projects, settings.agentModels, task]);
+
+  // Split "Start" / "YOLO" control: primary click uses the task's default
+  // (current branch unless a worktree was explicitly chosen before); the caret
+  // picks worktree vs current branch for this launch. YOLO adds skip-permissions.
+  const renderStartControl = (kind: 'start' | 'yolo') => {
+    const isYolo = kind === 'yolo';
+    const color = isYolo ? '#fbbf24' : (currentProvider?.color || '#6366f1');
+    const bg = isYolo ? '#f59e0b20' : `${currentProvider?.color || '#6366f1'}20`;
+    const label = isYolo ? 'YOLO' : 'Start';
+    // Primary action always starts on the current branch; worktree is opt-in.
+    const defaultWorktree = false;
+    const invoke = (mode?: 'worktree' | 'current') => { void handleInvokeAgent({ mode, skipPermissions: isYolo }); };
+    const open = startMenu === kind;
+    return (
+      <div className="relative flex" ref={isYolo ? yoloMenuRef : startMenuRef}>
+        <button
+          onClick={() => invoke()}
+          className="flex items-center gap-1.5 pl-2.5 pr-2 py-1 rounded-l-md text-xs transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title={`${label} ${defaultWorktree ? 'in an isolated worktree' : 'on the project\'s current branch'}${isYolo ? ' (skip permissions)' : ''}`}
+        >
+          <Bot className="w-3.5 h-3.5" />
+          {label}
+          <span className="opacity-70">{defaultWorktree ? '· worktree' : '· branch'}</span>
+        </button>
+        <button
+          onClick={() => setStartMenu(open ? null : kind)}
+          className="flex items-center px-1 py-1 rounded-r-md text-xs border-l border-black/20 transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title="Choose how to start"
+        >
+          <ChevronDown className="w-3 h-3" />
+        </button>
+        {open && (
+          <div className="absolute right-0 top-full mt-1 z-50 w-60 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl overflow-hidden">
+            <button
+              onClick={() => { setStartMenu(null); invoke('current'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+            >
+              <GitBranch className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} on current branch
+                  {!defaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Runs on the project's checked-out branch — shares uncommitted state.
+                </span>
+              </span>
+            </button>
+            <button
+              onClick={() => { setStartMenu(null); invoke('worktree'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left border-t border-[var(--border)]"
+            >
+              <GitFork className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} in worktree
+                  {defaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Isolated branch, forked from base.
+                </span>
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const handleProviderChange = useCallback((provider: AgentProviderId) => {
     if (!terminal) return;
@@ -875,6 +1153,9 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
   // Headless Auto Code run in flight → show live progress instead of trying to
   // attach a terminal / resume a session.
   const isAutoCoding = task.autoCodeState === 'coding';
+
+  // Comments live in ClickUp — a board-only task has no thread to show.
+  const isClickupLinked = task.provider !== 'local' && !isLocalTaskId(task.clickupTaskId);
 
   return (
     <div
@@ -904,15 +1185,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                   {task.clickupCustomId}
                 </code>
               )}
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide"
-                style={{
-                  backgroundColor: `${task.clickupStatusColor || '#94a3b8'}20`,
-                  color: task.clickupStatusColor || '#94a3b8',
-                }}
-              >
-                {task.clickupStatus}
-              </span>
+              <TaskStatusDropdown task={task} />
               {task.clickupPriority && (
                 <span
                   className="text-[10px] px-1.5 py-0.5 rounded font-medium"
@@ -1043,29 +1316,39 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                         </div>
                       )}
                     </div>
-                    {/* Start */}
-                    <button
-                      onClick={() => handleInvokeAgent()}
-                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
-                      style={{
-                        backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
-                        color: currentProvider?.color || '#6366f1',
-                      }}
-                      title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
-                    >
-                      <Bot className="w-3.5 h-3.5" />
-                      Start
-                    </button>
-                    {/* YOLO — only for agents that support skip-permissions */}
-                    {currentProvider?.capabilities.yolo && (
+                    {/* Start — for Claude tasks a split button whose caret picks
+                        worktree vs current branch at launch; otherwise a plain Start. */}
+                    {terminal.agentProvider === 'claude' && terminal.task ? (
+                      renderStartControl('start')
+                    ) : (
                       <button
-                        onClick={() => handleInvokeAgent(true)}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
-                        title={`Start ${currentProvider.displayName} (skip permissions)`}
+                        onClick={() => handleInvokeAgent()}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
+                        style={{
+                          backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
+                          color: currentProvider?.color || '#6366f1',
+                        }}
+                        title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
                       >
                         <Bot className="w-3.5 h-3.5" />
-                        YOLO
+                        Start
                       </button>
+                    )}
+                    {/* YOLO — same worktree/current split as Start; only for
+                        agents that support skip-permissions. */}
+                    {currentProvider?.capabilities.yolo && (
+                      terminal.agentProvider === 'claude' && terminal.task ? (
+                        renderStartControl('yolo')
+                      ) : (
+                        <button
+                          onClick={() => handleInvokeAgent({ skipPermissions: true })}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
+                          title={`Start ${currentProvider.displayName} (skip permissions)`}
+                        >
+                          <Bot className="w-3.5 h-3.5" />
+                          YOLO
+                        </button>
+                      )
                     )}
                   </>
                 ) : (
@@ -1102,6 +1385,51 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
                 <div className="h-5 w-px bg-[var(--border)] mx-1" />
               </>
             )}
+            {isClickupLinked && (
+              <button
+                onClick={() => setCommentsOpen((v) => !v)}
+                title={commentsOpen ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  commentsOpen
+                    ? 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                Comments
+              </button>
+            )}
+            {taskProject?.docsPath && (
+              <button
+                onClick={() => setRightPanel((p) => (p === 'docs' ? null : 'docs'))}
+                title={rightPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  rightPanel === 'docs'
+                    ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Documents
+              </button>
+            )}
+            {taskProject?.path && (
+              <button
+                onClick={() => setRightPanel((p) => (p === 'project' ? null : 'project'))}
+                title={rightPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                  rightPanel === 'project'
+                    ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                    : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+                )}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Files
+              </button>
+            )}
             <button
               onClick={() => refreshClickup()}
               title="Refresh ClickUp snapshot"
@@ -1127,7 +1455,12 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div className="flex-1 flex min-h-0 overflow-hidden">
+          {(() => {
+          // The main column: the terminal (or the Auto Code progress panel)
+          // plus the banners above it.
+          const mainColumn = (
+            <div className="flex-1 h-full flex flex-col min-h-0 overflow-hidden">
           {setupError && (
             <div className="m-4 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
               {setupError}
@@ -1198,6 +1531,52 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
             </div>
           )}
           </>
+          )}
+            </div>
+          );
+          // Comments open beside the main column with a draggable splitter,
+          // the same way Changes does — not as a right-hand rail.
+          if (!commentsOpen || !isClickupLinked) return mainColumn;
+          return (
+            <div className="flex-1 min-w-0 min-h-0">
+              <CommentsSplitLayout
+                taskId={task.clickupTaskId}
+                taskLabel={task.clickupCustomId || task.clickupTaskId}
+                taskName={task.clickupName}
+                taskUrl={task.clickupUrl}
+                projectPath={taskProject?.path}
+                onClose={() => setCommentsOpen(false)}
+                onSendToAgent={
+                  terminal?.isClaudeMode
+                    ? (text) => sendAgentPrompt(terminal.id, text, { submit: false })
+                    : undefined
+                }
+              >
+                {mainColumn}
+              </CommentsSplitLayout>
+            </div>
+          );
+          })()}
+          {/* Right-side files panel — browse the project's docs repo or its
+              source tree. Drag files into the terminal to insert their path. */}
+          {rightPanel === 'docs' && taskProject?.docsPath && (
+            <div className="shrink-0 min-h-0">
+              <FilesPanel
+                docsPath={taskProject.docsPath}
+                label="Documents"
+                onClose={() => setRightPanel(null)}
+              />
+            </div>
+          )}
+          {rightPanel === 'project' && taskProject?.path && (
+            <div className="shrink-0 min-h-0">
+              <FilesPanel
+                docsPath={taskProject.path}
+                label="Files"
+                enablePull={false}
+                onClose={() => setRightPanel(null)}
+              />
+            </div>
           )}
         </div>
         {/* CompleteTask modal — must live inside the stopPropagation wrapper so

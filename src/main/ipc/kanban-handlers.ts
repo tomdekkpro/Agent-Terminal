@@ -44,6 +44,17 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
   const tasks = listKanbanTasks();
   if (tasks.length === 0) return tasks;
 
+  // Batch-read every tracked task in a couple of list-scoped queries instead of
+  // one request per task, which overruns ClickUp's 100/min token budget on a
+  // board of ~100 tasks. Anything the batch misses falls back to a single read.
+  const batch = await clickUpProvider.getTaskSnapshots(
+    settings,
+    tasks
+      .filter((t) => t.provider !== 'local')
+      .map((t) => ({ taskId: t.clickupTaskId, listId: t.clickupListId })),
+  );
+  const snapshots = batch.success ? batch.data : {};
+
   const updated: KanbanTask[] = [];
   await Promise.all(
     tasks.map(async (task) => {
@@ -53,12 +64,15 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
         return;
       }
       try {
-        const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
-        if (!result.success) {
-          updated.push(task);
-          return;
+        let fresh = snapshots[task.clickupTaskId];
+        if (!fresh) {
+          const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
+          if (!result.success) {
+            updated.push(task);
+            return;
+          }
+          fresh = result.data;
         }
-        const fresh = result.data;
         const patch: Partial<KanbanTask> = {
           clickupName: fresh.name,
           clickupStatus: fresh.status.name,
@@ -73,6 +87,8 @@ async function refreshClickupSnapshots(): Promise<KanbanTask[]> {
           clickupTags: fresh.tags,
           clickupReleaseVersion: fresh.releaseVersion,
           clickupUpdatedAt: fresh.updatedAt,
+          // Remember the list so the next refresh can batch this task.
+          ...(fresh.listId ? { clickupListId: fresh.listId } : {}),
         };
 
         // Auto-transition kanbanStatus when ClickUp status actually changes —

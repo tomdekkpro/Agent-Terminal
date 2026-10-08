@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewPR, CodeReviewStatus } from '../../shared/types';
+import { useSettingsStore } from './settings-store';
 
 interface CodeReviewState {
   items: CodeReviewItem[];
@@ -15,6 +16,8 @@ interface CodeReviewState {
   submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
   forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) => Promise<void>;
   addPR: (projectPath: string, taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
+  /** Approve + merge on GitHub after the release-branch checks. `auto` = triggered by a passing review, not a click. */
+  mergePR: (projectPath: string, taskId: string, prNumber: number, auto?: boolean) => Promise<void>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
   updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
@@ -57,7 +60,7 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     try {
       const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber);
       if (result.success) {
-        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, skipped } = result.data;
+        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, prHeadSha, skipped, approved } = result.data;
         if (skipped) {
           get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle });
           return;
@@ -71,9 +74,17 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           prAuthor,
           prTitle,
           reviewedAt: new Date().toISOString(),
+          reviewedHeadSha: prHeadSha,
+          mergeStatus: undefined,
+          mergeError: undefined,
         });
         // Auto-submit result
         await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle);
+        // Not after a `review:approve` override — the AI never passed that
+        // code, so it waits for someone to press Merge.
+        if (passed && !approved && useSettingsStore.getState().settings.codeReviewAutoMerge) {
+          await get().mergePR(projectPath, taskId, prNumber, true);
+        }
       } else {
         get().updatePR(taskId, prNumber, { status: 'error', error: result.error });
       }
@@ -168,6 +179,23 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }
   },
 
+  mergePR: async (projectPath, taskId, prNumber, auto) => {
+    const pr = get().items.find((i) => i.taskId === taskId)?.prs.find((p) => p.prNumber === prNumber);
+    if (!pr || pr.mergeStatus === 'merging' || pr.mergeStatus === 'merged') return;
+    get().updatePR(taskId, prNumber, { mergeStatus: 'merging', mergeError: undefined });
+    try {
+      const result = await window.electronAPI.codeReviewMerge(projectPath, taskId, prNumber, {
+        reviewedHeadSha: pr.reviewedHeadSha,
+        auto,
+      });
+      get().updatePR(taskId, prNumber, result.success
+        ? { mergeStatus: 'merged', mergeError: undefined }
+        : { mergeStatus: 'blocked', mergeError: result.error });
+    } catch (err) {
+      get().updatePR(taskId, prNumber, { mergeStatus: 'blocked', mergeError: err instanceof Error ? err.message : 'Merge failed' });
+    }
+  },
+
   handleEvent: (event) => {
     const { taskId } = event;
     const TERMINAL: string[] = ['passed', 'failed', 'error', 'skipped'];
@@ -205,6 +233,39 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           items: state.items.map((i) =>
             i.taskId === taskId ? { ...i, status: 'error' as const, error: event.message } : i,
           ),
+        }));
+        break;
+      case 'merge':
+        // Scheduler-driven merges report here; button merges also get the
+        // IPC result, and both carry the same outcome.
+        if (item && event.prNumber && event.mergeStatus) {
+          get().updatePR(taskId, event.prNumber, {
+            mergeStatus: event.mergeStatus,
+            mergeError: event.mergeStatus === 'blocked' ? event.message : undefined,
+          });
+        }
+        break;
+      case 'prs':
+        // Phase 2 of the load: the task list arrives first, its PRs follow as
+        // each task is matched. Only applies while the task is still pending —
+        // once a review is under way it owns its own PR statuses, and a late
+        // event must not reset them.
+        if (!item || item.status !== 'pending') break;
+        set((state) => ({
+          items: state.items.map((i) => {
+            if (i.taskId !== taskId) return i;
+            const prs = event.prs ?? [];
+            const only = prs.length === 1 ? prs[0] : undefined;
+            return {
+              ...i,
+              prs,
+              prsResolving: false,
+              // Deprecated single-PR fields, kept in step for any consumer
+              // still reading them.
+              prNumber: only?.prNumber,
+              prUrl: only?.prUrl,
+            };
+          }),
         }));
         break;
     }

@@ -97,8 +97,260 @@ export interface TaskManagerTask {
   url: string;
   createdAt: string;
   updatedAt: string;
+  /** List the task lives in. Lets snapshot refreshes fetch many tasks with one
+   *  list-scoped query instead of one request per task. */
+  listId?: string;
   providerTaskId: string;
   provider: TaskManagerProvider;
+}
+
+// ─── Task comments (ClickUp thread) ───────────────────────────
+
+/** One run of comment content. ClickUp stores a comment as an array of these
+ *  blocks (rich text, @mentions, attachments), and `comment_text` is only a
+ *  flattened copy — rendering the blocks keeps links, mentions and images. */
+export interface TaskCommentBlock {
+  /** 'mention' covers @user, task references and task embeds — anything that
+   *  renders as a chip; 'attachment' covers files, pasted images and video
+   *  frames; 'divider' is a rule with no content. */
+  kind: 'text' | 'mention' | 'attachment' | 'divider';
+  /** Text run, or the mention's display name. */
+  text?: string;
+  /** Set when the run is a link (or the chip opens something). */
+  url?: string;
+  bold?: boolean;
+  italic?: boolean;
+  strike?: boolean;
+  underline?: boolean;
+  code?: boolean;
+  attachment?: {
+    id?: string;
+    title?: string;
+    url?: string;
+    thumbnailUrl?: string;
+    extension?: string;
+    isImage?: boolean;
+  };
+}
+
+export interface TaskCommentAuthor {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
+}
+
+/** A normalized comment from the task manager, provider-agnostic. */
+export interface TaskComment {
+  id: string;
+  /** Flattened plain text — used for search, copy, and the AI prompt. */
+  text: string;
+  blocks: TaskCommentBlock[];
+  user: TaskCommentAuthor;
+  createdAtMs: number;
+  resolved?: boolean;
+  assignee?: { id: string; username: string } | null;
+  /** Threaded replies hanging off this comment (loaded on demand). */
+  replyCount: number;
+  reactions?: Array<{ reaction: string; count: number }>;
+  /** True when the comment was posted by this app's own automation. */
+  bot?: boolean;
+  /** Set on replies — the comment they belong to. */
+  parentId?: string;
+}
+
+/** Cursor for the next (older) page of a comment thread. */
+export interface TaskCommentCursor {
+  start: number;
+  startId: string;
+}
+
+export interface TaskCommentThread {
+  /** Oldest first — the order the panel renders them in. */
+  comments: TaskComment[];
+  /** Pass back as `before` to fetch the next older page. */
+  older?: TaskCommentCursor | null;
+  hasMore: boolean;
+  /** The task-manager account this API key belongs to, so the UI can tell
+   *  the user's own comments from everyone else's. */
+  me?: { id: string; username: string } | null;
+}
+
+/** One AI-drafted reply offered in the comments panel. */
+export interface CommentSuggestion {
+  /** Short label for the angle taken, e.g. "Ask for repro steps". */
+  title: string;
+  text: string;
+}
+
+export type CommentAssistKind = 'suggest' | 'summarize';
+
+export interface CommentAssistResult {
+  kind: CommentAssistKind;
+  suggestions?: CommentSuggestion[];
+  /** Markdown digest for kind === 'summarize'. */
+  summary?: string;
+  /** Model output that could not be parsed as JSON — shown as-is. */
+  raw?: string;
+}
+
+// ─── ClickUp Chat (v3) ────────────────────────────────────────
+
+/** A person in Chat — the workspace member behind a message or a DM. */
+export interface ChatUser {
+  id: string;
+  username: string;
+  email?: string;
+  initials?: string;
+  color?: string;
+  profilePicture?: string;
+  /** ms epoch this person was last active in ClickUp. Not a live presence
+   *  channel — ClickUp has none — but it does track real app usage, and
+   *  notably is NOT bumped by API traffic, so it reflects a human being
+   *  there rather than an integration polling. */
+  lastActiveMs?: number;
+}
+
+/** How recently someone was active, bucketed for display. */
+export type ChatPresence = 'online' | 'away' | 'offline';
+
+/** Within this, someone is treated as at their desk. */
+export const PRESENCE_ONLINE_MS = 5 * 60_000;
+/** Within this, recently around — probably still reachable. */
+export const PRESENCE_AWAY_MS = 30 * 60_000;
+
+export function presenceOf(lastActiveMs?: number): ChatPresence {
+  if (!lastActiveMs) return 'offline';
+  const idle = Date.now() - lastActiveMs;
+  if (idle <= PRESENCE_ONLINE_MS) return 'online';
+  if (idle <= PRESENCE_AWAY_MS) return 'away';
+  return 'offline';
+}
+
+/** "Active 12m ago" — the honest label behind the dot. */
+export function presenceLabel(lastActiveMs?: number): string {
+  if (!lastActiveMs) return 'No recent activity';
+  const idle = Date.now() - lastActiveMs;
+  if (idle <= PRESENCE_ONLINE_MS) return 'Active now';
+  const mins = Math.floor(idle / 60_000);
+  if (mins < 60) return `Active ${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `Active ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return days < 30 ? `Active ${days}d ago` : 'Not active recently';
+}
+
+/** CHANNEL = a named room; DM = one-to-one; GROUP_DM = a small unnamed group. */
+export type ChatChannelKind = 'CHANNEL' | 'DM' | 'GROUP_DM';
+
+/** A Chat room, normalized. DMs carry no name of their own, so `members`
+ *  is resolved lazily and `name` is derived from the people in it. */
+export interface ChatChannel {
+  id: string;
+  /** Display name. For DMs this is built from `members` once they resolve. */
+  name: string;
+  kind: ChatChannelKind;
+  visibility?: 'PUBLIC' | 'PRIVATE';
+  topic?: string;
+  description?: string;
+  archived?: boolean;
+  /** True when this account follows the Channel — the "my channels" filter. */
+  isFollower?: boolean;
+  /** ms epoch of the newest message, for sorting the sidebar by recency. */
+  latestCommentAtMs?: number;
+  createdAtMs?: number;
+  /** Resolved participants. Empty until the DM name resolver has run. */
+  members?: ChatUser[];
+  /** Deep link into the ClickUp web app. */
+  url?: string;
+}
+
+/** One message in a Channel. ClickUp returns Markdown when asked for it. */
+export interface ChatMessage {
+  id: string;
+  channelId: string;
+  /** Markdown body as ClickUp stores it. */
+  content: string;
+  user: ChatUser;
+  createdAtMs: number;
+  updatedAtMs?: number;
+  type?: 'message' | 'post';
+  /** Post title, for `type: 'post'` announcements. */
+  postTitle?: string;
+  resolved?: boolean;
+  replyCount: number;
+  reactions?: Array<{ reaction: string; count: number; mine?: boolean }>;
+  /** Set on replies — the message they hang off. */
+  parentMessageId?: string;
+}
+
+/** A page of messages, newest-last, with a cursor for the older page. */
+export interface ChatMessagePage {
+  messages: ChatMessage[];
+  /** Pass back as `cursor` to fetch the next older page. */
+  cursor?: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * A file staged in the composer, before it is sent.
+ *
+ * ClickUp's Chat API has no attachment endpoint of its own (verified: the v3
+ * attachments API rejects `chat_messages` as an entity type), so a file is
+ * uploaded to a designated task and its public URL embedded in the message as
+ * Markdown — which is exactly what ClickUp Chat itself stores for a pasted
+ * image, so it renders inline for everyone.
+ */
+export interface ChatPendingAttachment {
+  /** Client-side id, so a staged file can be removed before sending. */
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** Base64 payload, no `data:` prefix. */
+  data: string;
+  /** True when it should embed as an image rather than a link. */
+  isImage: boolean;
+}
+
+/** A file that made it to ClickUp and now has a URL to reference. */
+export interface ChatUploadedFile {
+  name: string;
+  url: string;
+  isImage: boolean;
+}
+
+/** What the Chat page can ask the local agent CLI to do with a thread or a
+ *  hand-picked excerpt. */
+export type ChatAssistKind =
+  | 'suggest'       // draft 3 replies to the conversation
+  | 'summarize'     // digest the conversation (or the selection)
+  | 'translate'     // render the selection/draft in another language
+  | 'explain'       // "what is this?" for a selected excerpt
+  | 'action-items'  // pull out decisions, todos and who owes what
+  | 'rewrite';      // polish the user's draft in a given tone
+
+/** Languages the Chat page offers one-click translation into. */
+export type ChatLanguage = 'vi' | 'en' | 'no';
+
+export interface ChatSuggestion {
+  /** Short label for the angle taken, e.g. "Ask for the log". */
+  title: string;
+  text: string;
+}
+
+export interface ChatAssistResult {
+  kind: ChatAssistKind;
+  /** kind === 'suggest' */
+  suggestions?: ChatSuggestion[];
+  /** Markdown answer for summarize / explain / action-items. */
+  summary?: string;
+  /** Single rewritten body for translate / rewrite — drops straight into the composer. */
+  text?: string;
+  /** Model output that could not be parsed as JSON — shown as-is. */
+  raw?: string;
 }
 
 /** Data sources a Dashboard Notice's AI run is allowed to use. */
@@ -122,6 +374,11 @@ export interface DashboardNotice {
   sources?: NoticeSource[];
   /** Websites to consult when the 'web' source is enabled. */
   urls?: string[];
+  /** Manual sort order on the Dashboard (drag to reorder). */
+  orderIndex?: number;
+  /** Persisted card size in px (drag the corner to resize). */
+  width?: number;
+  height?: number;
   status: 'idle' | 'running' | 'done' | 'error';
   /** Latest result, Markdown. */
   lastResult?: string;
@@ -208,6 +465,17 @@ export interface AppSettings {
   jiraApiToken: string;
   jiraDomain: string;
   jiraProjectKey: string;
+  // Chat (ClickUp Chat page)
+  /** Language the one-click "Translate" button targets. */
+  chatTranslateLanguage: ChatLanguage;
+  /** How often an open Channel re-reads its messages, in seconds. 0 disables. */
+  chatPollSeconds: number;
+  /** Show every Channel in the Workspace, not only the ones this account follows. */
+  chatShowAllChannels: boolean;
+  /** Task that hosts files shared in Chat. ClickUp has no chat-attachment API,
+   *  so uploads are attached here and linked from the message. Empty disables
+   *  attachments rather than picking a task on the user's behalf. */
+  chatUploadTaskId: string;
   // Agent
   defaultModel: string;
   workingDirectory: string;
@@ -234,6 +502,14 @@ export interface AppSettings {
   codeReviewStatuses: string;
   codeReviewProjectPath: string;
   codeReviewTagName: string;
+  /** Merge a PR as soon as its AI review passes — still subject to the release-branch check. */
+  codeReviewAutoMerge: boolean;
+  /** How Code Review merges a PR, from the Merge button or auto-merge. */
+  codeReviewMergeMethod: CodeReviewMergeMethod;
+  /** Branch-name prefix that marks release branches, e.g. `Releases/` for `Releases/26.9.1`. */
+  codeReviewReleaseBranchPrefix: string;
+  /** Pins the current release branch. Empty = detect the newest `<prefix><x.y.z>` on GitHub. */
+  codeReviewReleaseBranch: string;
   // Kanban filter — persisted assignee id; empty = show all tasks; also gates the auto-code loop
   kanbanFilterAssigneeId: string;
   /** Persisted project filter for the Kanban board. Empty = show all projects. */
@@ -329,6 +605,24 @@ export interface UsageCostData {
   timestamp: Date;
 }
 
+/** 7-day usage rollup for one model, derived from session JSONL entries. */
+export interface ModelUsageSummary {
+  /** Normalized model id (date suffix stripped), e.g. "claude-opus-4-8". */
+  model: string;
+  /** Human label, e.g. "Opus 4.8". */
+  label: string;
+  costToday: number;
+  /** Cost over the last 7 days inclusive of today. */
+  costWeek: number;
+  /** Token totals over the last 7 days. */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Assistant messages over the last 7 days. */
+  messages: number;
+}
+
 /** Per-day cost breakdown across all imported Kanban tasks, derived from
  *  Claude session JSONL timestamps. `byDay` is sorted oldest → newest and
  *  always covers the most recent 7 calendar days (entries with $0 included
@@ -342,6 +636,8 @@ export interface KanbanDailyCostBreakdown {
   week: number;
   /** Sum across the entire history found on disk. */
   total: number;
+  /** Per-model rollup for the last 7 days, sorted by costWeek desc. */
+  byModel: ModelUsageSummary[];
 }
 
 /** Cumulative per-terminal usage accumulated from the session JSONL.
@@ -430,6 +726,15 @@ export interface ProjectSkill {
   agentProvider?: AgentProviderId;
   icon?: string;
   color?: string;
+  /** Where a disk-discovered skill came from. Absent for skills configured by
+   *  hand in project settings. */
+  source?: 'project' | 'user' | 'plugin';
+  /** Absolute path of the backing SKILL.md. The panel reads this directly
+   *  instead of reconstructing a path from the id, which only ever worked for
+   *  project-local skills. */
+  filePath?: string;
+  /** Owning plugin for `source: 'plugin'`, e.g. `dp` for `dp:ship`. */
+  pluginName?: string;
 }
 
 export interface Project {
@@ -693,6 +998,10 @@ export interface KanbanTask {
   /** Selected "Release version" custom-field value (snapshot), if set. */
   clickupReleaseVersion?: string;
   clickupUpdatedAt?: string;
+  /** ClickUp list this task belongs to. Recorded on the first snapshot refresh
+   *  so later refreshes can batch every tracked task into a few list-scoped
+   *  queries instead of one request per task. */
+  clickupListId?: string;
 
   /** Local project path for worktree + gh CLI */
   projectPath: string;
@@ -735,10 +1044,12 @@ export interface KanbanTask {
   worktreePath?: string;
   worktreeBranch?: string;
   baseBranch?: string;
-  /** When false, the agent runs directly against the project's current branch
-   *  — no worktree is created and `--worktree` is not passed to Claude. The
-   *  baseBranch + worktreeBranch fields are not used in that case. Undefined
-   *  defaults to worktree mode for back-compat with pre-1.23.5 records. */
+  /** Worktree mode is opt-in: a worktree is used only when this is explicitly
+   *  true (chosen via the Start button, which persists it). Default / undefined
+   *  / false → the agent runs directly against the project's current branch, no
+   *  worktree created and no `--worktree` passed to Claude. NOTE: records from
+   *  before this default flip are backfilled to true on load (see
+   *  kanban-task-store) so existing worktree tasks keep their behavior. */
   useWorktree?: boolean;
 
   /** Auto-fix loop state */
@@ -805,6 +1116,21 @@ export interface ActivityEvent {
 export type CodeReviewSeverity = 'critical' | 'major' | 'minor' | 'suggestion';
 export type CodeReviewStatus = 'pending' | 'reviewing' | 'passed' | 'failed' | 'error' | 'skipped';
 
+export type CodeReviewMergeMethod = 'squash' | 'merge' | 'rebase';
+
+/** Where a PR stands on merging — separate from its review status. `blocked`
+ *  means the pre-merge checks (release branch, conflicts, CI) or GitHub refused. */
+export type CodeReviewMergeStatus = 'merging' | 'merged' | 'blocked';
+
+/** The branch Code Review lets PRs merge into. */
+export interface CodeReviewReleaseBranch {
+  /** e.g. `Releases/26.9.1`; null when none could be found. */
+  branch: string | null;
+  /** `pinned` = set in settings, `detected` = newest release branch on GitHub. */
+  source: 'pinned' | 'detected' | 'none';
+  prefix: string;
+}
+
 export interface CodeReviewFinding {
   severity: CodeReviewSeverity;
   file: string;
@@ -827,6 +1153,12 @@ export interface CodeReviewPR {
   findings: CodeReviewFinding[];
   reviewedAt?: string;
   error?: string;
+  /** Head commit the passing review looked at. Merging is pinned to it, so a
+   *  push after the review can't slip unreviewed code into the release. */
+  reviewedHeadSha?: string;
+  mergeStatus?: CodeReviewMergeStatus;
+  /** Why the merge was refused, when `mergeStatus` is `blocked`. */
+  mergeError?: string;
 }
 
 export interface CodeReviewItem {
@@ -845,15 +1177,26 @@ export interface CodeReviewItem {
   reviewedAt?: string;
   error?: string;
   prs: CodeReviewPR[];
+  /** True while the task's PRs are still being resolved in the background.
+   *  The task list is returned as soon as ClickUp answers; matching each task
+   *  to its PRs needs a `gh` listing (~2s) and sometimes a comment read, so
+   *  that runs after the first paint and arrives via a `prs` event. */
+  prsResolving?: boolean;
 }
 
 export interface CodeReviewEvent {
-  type: 'progress' | 'finding' | 'done' | 'error';
+  type: 'progress' | 'finding' | 'done' | 'error' | 'prs' | 'merge';
   taskId: string;
+  /** `merge` events only — the PR the merge outcome is for. */
+  prNumber?: number;
+  /** `merge` events only. `message` carries the block reason. */
+  mergeStatus?: CodeReviewMergeStatus;
   message?: string;
   finding?: CodeReviewFinding;
   status?: CodeReviewStatus;
   findings?: CodeReviewFinding[];
+  /** `prs` events only — resolved PRs for `taskId`. */
+  prs?: CodeReviewPR[];
 }
 
 // ─── Team Chat ────────────────────────────────────────────────
@@ -982,6 +1325,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   jiraApiToken: '',
   jiraDomain: '',
   jiraProjectKey: '',
+  chatTranslateLanguage: 'vi',
+  chatPollSeconds: 20,
+  chatShowAllChannels: false,
+  chatUploadTaskId: '',
   teamServerUrl: '',
   teamAutoConnect: false,
   teamAutoStartServer: false,
@@ -1007,6 +1354,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewStatuses: 'ready for review, in review, review',
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
+  codeReviewAutoMerge: false,
+  codeReviewMergeMethod: 'squash',
+  codeReviewReleaseBranchPrefix: 'Releases/',
+  codeReviewReleaseBranch: '',
   kanbanFilterAssigneeId: '',
   kanbanFilterProjectId: '',
   kanbanBacklogStatuses: 'to do, open, backlog, planning, ready',

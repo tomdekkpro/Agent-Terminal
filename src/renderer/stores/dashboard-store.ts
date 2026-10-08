@@ -11,6 +11,9 @@ export interface SaveNoticeInput {
   listId?: string;
   sources?: NoticeSource[];
   urls?: string[];
+  orderIndex?: number;
+  width?: number;
+  height?: number;
 }
 
 interface DashboardState {

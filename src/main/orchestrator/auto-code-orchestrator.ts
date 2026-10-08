@@ -482,14 +482,28 @@ class AutoCodeOrchestrator {
 
   private async refreshSnapshots(tasks: KanbanTask[]): Promise<void> {
     const settings = getSettings();
+
+    // One batched read for the whole cycle — per-task reads overrun ClickUp's
+    // 100 requests/minute token budget once the board holds ~100 tasks.
+    const batch = await clickUpProvider.getTaskSnapshots(
+      settings,
+      tasks
+        .filter((t) => t.provider !== 'local')
+        .map((t) => ({ taskId: t.clickupTaskId, listId: t.clickupListId })),
+    );
+    const snapshots = batch.success ? batch.data : {};
+
     await Promise.all(
       tasks.map(async (task) => {
         // Local tasks aren't backed by ClickUp.
         if (task.provider === 'local') return;
         try {
-          const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
-          if (!result.success) return;
-          const fresh = result.data;
+          let fresh = snapshots[task.clickupTaskId];
+          if (!fresh) {
+            const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
+            if (!result.success) return;
+            fresh = result.data;
+          }
 
           const snapshotPatch: Partial<KanbanTask> = {
             clickupName: fresh.name,
@@ -505,6 +519,8 @@ class AutoCodeOrchestrator {
             clickupTags: fresh.tags,
             clickupReleaseVersion: fresh.releaseVersion,
             clickupUpdatedAt: fresh.updatedAt,
+            // Remember the list so the next cycle can batch this task.
+            ...(fresh.listId ? { clickupListId: fresh.listId } : {}),
           };
 
           // Auto-map the column when ClickUp status actually changed — only on diff,

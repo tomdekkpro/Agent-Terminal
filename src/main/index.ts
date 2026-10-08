@@ -4,6 +4,7 @@ import { TerminalManager } from './terminal/terminal-manager';
 import { saveOutputBuffers } from './terminal/terminal-state-store';
 import { registerTerminalHandlers } from './ipc/terminal-handlers';
 import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
+import { registerChatHandlers } from './ipc/chat-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
 import { sessionUsageTracker } from './usage/session-usage-tracker';
@@ -27,6 +28,7 @@ import { registerFilesHandlers } from './ipc/files-handlers';
 import { stopAllDevServers } from './dev-server/dev-server-manager';
 import { cleanupAllQC } from './qc/qc-executor';
 import { initAutoUpdater } from './updater';
+import { setApiLogFile, flush as flushApiLog, getApiLogFile } from './logging/api-log';
 import { IPC_CHANNELS } from '../shared/constants';
 import { registerAllAgents } from './ipc/providers/agents';
 import { initAnalytics, trackAppStarted, trackShutdown } from './analytics/analytics-service';
@@ -109,6 +111,13 @@ function getWindow(): BrowserWindow | null {
 initAnalytics();
 
 app.whenReady().then(() => {
+  // Point the outbound-API log at userData before anything can issue a request,
+  // so the very first call of the session is recorded.
+  const apiLogPath = join(app.getPath('userData'), 'logs', 'api-requests.log');
+  setApiLogFile(apiLogPath);
+  // eslint-disable-next-line no-console
+  console.log(`[api] request log: ${apiLogPath}`);
+
   // Register all agent providers before anything else
   registerAllAgents();
 
@@ -120,6 +129,7 @@ app.whenReady().then(() => {
 
   registerTerminalHandlers(ipcMain, terminalManager, getWindow);
   registerTaskManagerHandlers(ipcMain);
+  registerChatHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerUsageHandlers(ipcMain, getWindow);
   registerProjectHandlers(ipcMain, getWindow);
@@ -149,6 +159,13 @@ app.whenReady().then(() => {
     await shell.openPath(filePath);
   });
 
+  // Where the outbound-API request log lives, so Settings can offer to open it.
+  ipcMain.handle(IPC_CHANNELS.API_LOG_PATH, async () => {
+    // Flush first — the newest lines are the ones being investigated.
+    await flushApiLog();
+    return getApiLogFile();
+  });
+
   createWindow();
 });
 
@@ -171,6 +188,7 @@ app.on('before-quit', () => {
   stopDashboardScheduler();
   flushKanbanTasks();
   flushNotices();
+  void flushApiLog();
   if (terminalManager) {
     // Save output buffers while terminals are still alive
     // (terminals are killed later in will-quit, after renderer has saved state)

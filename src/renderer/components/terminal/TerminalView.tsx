@@ -3,9 +3,10 @@ import { createPortal } from 'react-dom';
 import {
   Plus, X, Bot, Terminal as TerminalIcon, Search,
   Columns2, ChevronDown, ChevronRight, GitBranch,
-  ArrowLeft, FolderGit2, Folder, Download, RefreshCw, List,
+  Folder, Download, RefreshCw, List,
   Filter, Loader2, GripVertical, Zap, FolderOpen, Rocket,
 } from 'lucide-react';
+import { isLocalTaskId } from '../../../shared/utils';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useKanbanStore } from '../../stores/kanban-store';
 import { useSettingsStore } from '../../stores/settings-store';
@@ -21,6 +22,8 @@ import { cn, csvToLowerSet, toggleInCsv } from '../../../shared/utils';
 import type { TaskManagerTask, TaskManagerList, TerminalTask, AgentProviderMeta } from '../../../shared/types';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
 import { resolveSessionCwd, buildSessionCandidates } from '../../lib/resolve-session-cwd';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
+import { CommentsSplitLayout } from '../comments';
 import { useCompleteTaskFlow } from '../../hooks/useCompleteTaskFlow';
 
 const PICKER_PAGE_SIZE = 100;
@@ -43,7 +46,6 @@ export function TaskPickerModal({
   const [loadingMore, setLoadingMore] = useState(false);
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState('');
-  const [selectedTask, setSelectedTask] = useState<TaskManagerTask | null>(null);
   const [includeClosed, setIncludeClosed] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
 
@@ -237,74 +239,8 @@ export function TaskPickerModal({
     return acc;
   }, {});
 
-  // Step 2: task selected — choose worktree or current branch
-  if (selectedTask) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="w-[440px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-[var(--border)]">
-            <div className="flex items-center gap-2 mb-2">
-              <button
-                onClick={() => setSelectedTask(null)}
-                className="w-6 h-6 rounded flex items-center justify-center hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-              </button>
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                Working Directory
-              </h2>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <div
-                className="w-2 h-2 rounded-full shrink-0"
-                style={{ backgroundColor: selectedTask.status.color }}
-              />
-              <span className="text-xs text-[var(--text-secondary)] truncate">
-                {selectedTask.customId && <span className="font-mono mr-1.5">{selectedTask.customId}</span>}
-                {selectedTask.name}
-              </span>
-            </div>
-          </div>
-
-          <div className="p-3 space-y-2">
-            <button
-              onClick={() => onSelect(selectedTask, true)}
-              className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors text-left border border-[var(--border)]"
-            >
-              <FolderGit2 className="w-5 h-5 shrink-0 text-[var(--accent)] mt-0.5" />
-              <div>
-                <div className="text-sm font-medium text-[var(--text-primary)]">New Worktree</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                  Create an isolated branch for this task. Changes stay separate from main.
-                </div>
-              </div>
-            </button>
-            <button
-              onClick={() => onSelect(selectedTask, false)}
-              className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors text-left border border-[var(--border)]"
-            >
-              <Folder className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
-              <div>
-                <div className="text-sm font-medium text-[var(--text-primary)]">Current Branch</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                  Work directly on the current branch in the project directory.
-                </div>
-              </div>
-            </button>
-          </div>
-
-          <div className="p-3 border-t border-[var(--border)] flex items-center justify-end">
-            <button
-              onClick={onCancel}
-              className="px-3 py-1.5 rounded-md text-xs text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Picking a task starts it immediately — worktree vs current branch is now
+  // chosen on the Start button, per launch (see handleInvokeAgent).
 
   // Step 1: pick a task
   return (
@@ -491,7 +427,7 @@ export function TaskPickerModal({
               {tasks.map((task) => (
                 <button
                   key={task.id}
-                  onClick={() => mode === 'link' ? onSelect(task, false) : setSelectedTask(task)}
+                  onClick={() => onSelect(task, mode !== 'link')}
                   className="w-full text-left p-3 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors"
                 >
                   <div className="flex items-center gap-3">
@@ -706,28 +642,43 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       .catch(() => {});
   }, []);
 
-  // Refresh task status colors from API so tabs reflect current status
+  // Refresh task status colors so tabs reflect current status.
+  //
+  // This used to issue one /task/{id} per task-linked terminal on every tick.
+  // With 110 such terminals that was 110 requests a minute — more than the
+  // whole interactive budget, so it crowded out anything the user clicked and
+  // kept the token bucket permanently drained. One bulk read now covers the
+  // set, on the background lane, sharing its store with the Kanban refresh.
+  //
+  // Tasks the bulk read cannot see keep their current colour rather than
+  // triggering a per-task read, which is exactly the fan-out being removed.
   useEffect(() => {
-    const refresh = () => {
+    const refresh = async () => {
       const terms = useTerminalStore.getState().terminals;
-      for (const t of terms) {
-        if (!t.task) continue;
-        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
-          if (!res.success || !res.data) return;
-          const task = res.data;
-          const newStatus = task.status.name;
-          const newColor = task.status.color;
-          const newRelease = task.releaseVersion;
-          if (newStatus !== t.task!.status || newColor !== t.task!.statusColor || newRelease !== t.task!.releaseVersion) {
-            useTerminalStore.getState().updateTerminal(t.id, {
-              task: { ...t.task!, status: newStatus, statusColor: newColor, releaseVersion: newRelease },
-            });
-          }
-        }).catch(() => {});
+      const linked = terms.filter((t) => t.task && !isLocalTaskId(t.task.id));
+      if (linked.length === 0) return;
+
+      const res = await window.electronAPI
+        .getTaskManagerTaskSnapshots?.([...new Set(linked.map((t) => t.task!.id))])
+        .catch(() => null);
+      const snapshots = res?.success ? res.data : null;
+      if (!snapshots) return;
+
+      for (const t of linked) {
+        const task = snapshots[t.task!.id];
+        if (!task) continue;
+        const newStatus = task.status.name;
+        const newColor = task.status.color;
+        const newRelease = task.releaseVersion;
+        if (newStatus !== t.task!.status || newColor !== t.task!.statusColor || newRelease !== t.task!.releaseVersion) {
+          useTerminalStore.getState().updateTerminal(t.id, {
+            task: { ...t.task!, status: newStatus, statusColor: newColor, releaseVersion: newRelease },
+          });
+        }
       }
     };
-    refresh();
-    const iv = setInterval(refresh, 60_000);
+    void refresh();
+    const iv = setInterval(() => { void refresh(); }, 60_000);
     return () => clearInterval(iv);
   }, []);
 
@@ -766,6 +717,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const reorderTerminalsInGroup = useTerminalStore((s) => s.reorderTerminalsInGroup);
+  const toggleComments = useTerminalStore((s) => s.toggleComments);
 
   // Tree sidebar — search + collapsed categories (persisted)
   const [treeSearch, setTreeSearch] = useState('');
@@ -893,7 +845,8 @@ export function TerminalView({ projectId }: TerminalViewProps) {
   const [currentBranch, setCurrentBranch] = useState<string>('');
   const [fetchStatus, setFetchStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [pullStatus, setPullStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
-  const [filesOpen, setFilesOpen] = useState(false);
+  // Which side panel is open: docs repo files, project source tree, or none.
+  const [filesPanel, setFilesPanel] = useState<'docs' | 'project' | null>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [behindCount, setBehindCount] = useState<number>(0);
   const [pullMessage, setPullMessage] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -1015,27 +968,12 @@ export function TerminalView({ projectId }: TerminalViewProps) {
             worktreePath: cwdOverride.worktreePath,
             worktreeBranch: cwdOverride.worktreeBranch,
           });
-        } else if (useWorktree && activeProject?.path) {
-          // Pre-create the worktree using Claude's native convention so
-          // <repo>/.claude/worktrees/<id> exists for git ops (status, push,
-          // PR). The terminal stays at the project root and `claude
-          // --worktree <id>` will reuse this worktree on launch.
-          const taskSlug = task.customId || task.id;
-          const result = await window.electronAPI.createTaskWorktree(activeProject.path, taskSlug, taskBaseBranch);
-          if (result.success && result.data) {
-            useTerminalStore.getState().updateTerminal(terminal.id, {
-              title,
-              task: terminalTask,
-              cwd, // project path — Claude handles cd into the worktree
-              worktreePath: result.data,
-              worktreeBranch: result.branch,
-            });
-          } else {
-            // Worktree failed (not a git repo, etc.) — use project dir
-            useTerminalStore.getState().updateTerminal(terminal.id, { title, task: terminalTask });
-          }
         } else {
-          // Use current branch / project directory
+          // Fresh task terminal — don't create a worktree yet. The Start button
+          // decides worktree vs current branch at launch and creates the
+          // worktree on demand only if the user picks it. The PTY opens at the
+          // project root either way; `claude --worktree` (added at Start) cd's
+          // into the worktree when that mode is chosen.
           useTerminalStore.getState().updateTerminal(terminal.id, { title, task: terminalTask });
         }
 
@@ -1281,7 +1219,9 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           worktreeBranch: resolved.isWorktree ? detail.worktreeBranch : undefined,
         });
       } else {
-        await setupTerminalWithTask(terminal, taskForSetup, true);
+        // Honor the task's saved workspace choice — a "Current branch" task
+        // must not be forced into a worktree here.
+        await setupTerminalWithTask(terminal, taskForSetup, detail.useWorktree !== false);
       }
 
       // Carry over session + agent provider from the KanbanTask if we have them
@@ -1364,18 +1304,49 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
   const [cliError, setCliError] = useState<string | null>(null);
 
-  const handleInvokeAgent = useCallback(async (id: string, skipPermissions?: boolean) => {
+  const handleInvokeAgent = useCallback(async (id: string, opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => {
     const terminal = useTerminalStore.getState().getTerminal(id);
     if (!terminal) return;
+    const skipPermissions = opts?.skipPermissions;
     const agentId = terminal.agentProvider;
     const settings = useSettingsStore.getState().settings;
     // Project model override > app-wide model
     const model = activeProject?.agentModel || settings.agentModels?.[agentId] || undefined;
-    // Pass --worktree <id> for task terminals so Claude isolates the work
-    // in its own worktree (Claude-specific flag).
-    const worktreeName = terminal.task && agentId === 'claude'
-      ? (terminal.task.customId || terminal.task.id).replace(/[^a-zA-Z0-9_-]/g, '-')
+
+    // Worktree vs current branch is decided HERE, at Start. Default to the
+    // task's saved preference; an explicit Start-menu pick overrides it. Only
+    // Claude supports the --worktree flag, and only task terminals get one.
+    const kanbanTask = terminal.task
+      ? useKanbanStore.getState().tasks.find((t) => t.clickupTaskId === terminal.task!.id)
       : undefined;
+    // Default is always current branch ("normal"); a worktree is only used when
+    // explicitly picked from the Start/YOLO dropdown for this launch.
+    const mode: 'worktree' | 'current' = opts?.mode ?? 'current';
+    const canWorktree = !!terminal.task && agentId === 'claude' && !!activeProject;
+
+    let worktreeName: string | undefined;
+    if (mode === 'worktree' && canWorktree) {
+      const safeId = (terminal.task!.customId || terminal.task!.id).replace(/[^a-zA-Z0-9_-]/g, '-');
+      // Create the worktree on demand if it isn't there yet, so git ops resolve
+      // against it and `claude --worktree` reuses it.
+      let wtPath = terminal.worktreePath;
+      let wtBranch = terminal.worktreeBranch;
+      if (!wtPath) {
+        try {
+          const wt = await window.electronAPI.createTaskWorktree(activeProject!.path, safeId, kanbanTask?.baseBranch);
+          if (wt?.success && wt.data) { wtPath = wt.data; wtBranch = wt.branch || wtBranch; }
+        } catch { /* fall back to project root — claude --worktree creates it */ }
+      }
+      useTerminalStore.getState().updateTerminal(id, { worktreePath: wtPath, worktreeBranch: wtBranch });
+      worktreeName = safeId;
+    } else {
+      // Current branch: unbind any worktree so git ops target the checked-out tree.
+      useTerminalStore.getState().updateTerminal(id, { worktreePath: undefined, worktreeBranch: undefined });
+    }
+
+    // Remember the choice as this task's default for next time.
+    if (kanbanTask) void useKanbanStore.getState().updateTask(kanbanTask.id, { useWorktree: mode === 'worktree' });
+
     const result = await window.electronAPI.invokeAgent(id, agentId, {
       cwd: activeProject?.path,
       skipPermissions,
@@ -1393,7 +1364,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
         useTerminalStore.getState().updateTerminal(id, { skipPermissions: true });
       }
       // Send task context as first prompt if terminal is linked to a task
-      if (terminal.task) {
+      if (terminal.task && !isLocalTaskId(terminal.task.id)) {
         const taskId = terminal.task.id;
         window.electronAPI.getTaskManagerTask(taskId).then((taskResult: any) => {
           if (!taskResult.success || !taskResult.data) return;
@@ -1413,7 +1384,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
           if (task.url) parts.push(`URL: ${task.url}`);
           const prompt = parts.join('\n');
           setTimeout(() => {
-            window.electronAPI.sendTerminalInput(id, prompt + '\n');
+            sendAgentPrompt(id, prompt);
           }, 3000);
         }).catch(() => { /* non-critical */ });
       }
@@ -1488,11 +1459,13 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       // Invoke agent first, then send skill prompt after it starts
       await handleInvokeAgent(terminalId);
       setTimeout(() => {
-        window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
+        // Don't submit — leave the (possibly multi-line) prompt in the input
+        // for the user to review/edit before sending.
+        sendAgentPrompt(terminalId, skill.prompt, { submit: false });
       }, 3000);
     } else {
-      // Agent already running — send prompt directly
-      window.electronAPI.sendTerminalInput(terminalId, skill.prompt);
+      // Agent already running — send prompt directly (no auto-submit)
+      sendAgentPrompt(terminalId, skill.prompt, { submit: false });
     }
   }, [handleInvokeAgent]);
 
@@ -1644,12 +1617,28 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               </button>
               {activeProject?.docsPath && (
                 <button
-                  onClick={() => setFilesOpen((v) => !v)}
-                  title={filesOpen ? 'Close files panel' : 'Open project documents'}
+                  onClick={() => setFilesPanel((p) => (p === 'docs' ? null : 'docs'))}
+                  title={filesPanel === 'docs' ? 'Close documents panel' : 'Open project documents'}
                   className={cn(
                     'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
                     'hover:bg-[var(--bg-tertiary)] border border-transparent',
-                    filesOpen
+                    filesPanel === 'docs'
+                      ? 'text-amber-400 border-amber-500/20 bg-amber-500/10'
+                      : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>Documents</span>
+                </button>
+              )}
+              {activeProject?.path && (
+                <button
+                  onClick={() => setFilesPanel((p) => (p === 'project' ? null : 'project'))}
+                  title={filesPanel === 'project' ? 'Close project files panel' : 'Browse the project source files'}
+                  className={cn(
+                    'flex items-center gap-1 px-2 h-7 rounded-md text-[11px] transition-all',
+                    'hover:bg-[var(--bg-tertiary)] border border-transparent',
+                    filesPanel === 'project'
                       ? 'text-amber-400 border-amber-500/20 bg-amber-500/10'
                       : 'text-[var(--text-muted)]',
                   )}
@@ -2041,6 +2030,14 @@ export function TerminalView({ projectId }: TerminalViewProps) {
               : groupTerminals.find((t) => t.previewOpen);
             const hasChanges = !!changesTerminal;
 
+            // Same shape for the comments panel — a task-linked terminal with
+            // it open splits the group's width, Changes-style.
+            const canComment = (t: typeof activeTerminalObj) =>
+              !!t?.commentsOpen && !!t.task && !isLocalTaskId(t.task.id);
+            const commentsTerminal = canComment(activeTerminalObj)
+              ? activeTerminalObj
+              : groupTerminals.find((t) => canComment(t));
+
             const terminalContent = isGroupSplit ? (
               /* Grid layout for split terminals */
               <div className={cn('grid h-full gap-1 p-1', getGridClass(groupTerminals.length))}>
@@ -2081,7 +2078,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                       isSplit={true}
                       agentProviders={agentProviders}
                       skills={projectSkills}
-                      onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                      onInvokeAgent={(opts) => handleInvokeAgent(terminal.id, opts)}
                       onProviderChange={(p) => handleProviderChange(terminal.id, p)}
                       onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                       onMergeComplete={() => openCompleteTask(terminal)}
@@ -2114,7 +2111,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                     isActive={isCurrentGroup}
                     agentProviders={agentProviders}
                     skills={projectSkills}
-                    onInvokeAgent={(skip) => handleInvokeAgent(terminal.id, skip)}
+                    onInvokeAgent={(opts) => handleInvokeAgent(terminal.id, opts)}
                     onProviderChange={(p) => handleProviderChange(terminal.id, p)}
                     onInvokeSkill={(skill) => handleInvokeSkill(terminal.id, skill)}
                     onMergeComplete={() => openCompleteTask(terminal)}
@@ -2136,15 +2133,36 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                   !isCurrentGroup && 'invisible pointer-events-none'
                 )}
               >
-                {hasChanges ? (
-                  <ChangesSplitLayout
-                    terminal={changesTerminal!}
-                  >
-                    {terminalContent}
-                  </ChangesSplitLayout>
-                ) : (
-                  terminalContent
-                )}
+                {(() => {
+                  const withChanges = hasChanges ? (
+                    <ChangesSplitLayout
+                      terminal={changesTerminal!}
+                    >
+                      {terminalContent}
+                    </ChangesSplitLayout>
+                  ) : (
+                    terminalContent
+                  );
+                  if (!commentsTerminal?.task) return withChanges;
+                  const task = commentsTerminal.task;
+                  return (
+                    <CommentsSplitLayout
+                      taskId={task.id}
+                      taskLabel={task.customId || task.id}
+                      taskName={task.name}
+                      taskUrl={task.url}
+                      projectPath={commentsTerminal.worktreePath || commentsTerminal.cwd}
+                      onClose={() => toggleComments(commentsTerminal.id)}
+                      onSendToAgent={
+                        commentsTerminal.isClaudeMode
+                          ? (text) => sendAgentPrompt(commentsTerminal.id, text, { submit: false })
+                          : undefined
+                      }
+                    >
+                      {withChanges}
+                    </CommentsSplitLayout>
+                  );
+                })()}
               </div>
             );
           })
@@ -2152,11 +2170,22 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       </div>
 
       {/* Right-side panels */}
-      {filesOpen && activeProject?.docsPath && (
-        <div className="w-72 shrink-0 min-h-0">
+      {filesPanel === 'docs' && activeProject?.docsPath && (
+        <div className="shrink-0 min-h-0">
           <FilesPanel
             docsPath={activeProject.docsPath}
-            onClose={() => setFilesOpen(false)}
+            label="Documents"
+            onClose={() => setFilesPanel(null)}
+          />
+        </div>
+      )}
+      {filesPanel === 'project' && activeProject?.path && (
+        <div className="shrink-0 min-h-0">
+          <FilesPanel
+            docsPath={activeProject.path}
+            label="Files"
+            enablePull={false}
+            onClose={() => setFilesPanel(null)}
           />
         </div>
       )}

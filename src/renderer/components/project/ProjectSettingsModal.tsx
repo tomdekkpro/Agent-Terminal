@@ -171,15 +171,24 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
 
   // Claude skill file editing
   const startEditClaudeSkill = async (skill: ProjectSkill) => {
-    if (!project.path) return;
     setEditingClaudeSkillId(skill.id);
     setClaudeSkillContent('');
-    const skillFileName = skill.id.replace('claude-skill:', '');
-    const base = project.path.replace(/\\/g, '/');
-    const paths = [
-      `${base}/.claude/skills/${skillFileName}/SKILL.md`,
-      `${base}/.claude/skills/${skillFileName}.md`,
-    ].map((p) => p.replace(/\//g, '\\'));
+    // Prefer the path the loader reported. A plugin or user skill does not live
+    // under the project, so a project-relative guess could never find it.
+    const paths: string[] = [];
+    if (skill.filePath) {
+      paths.push(skill.filePath);
+    } else {
+      if (!project.path) return;
+      const skillFileName = skill.id.replace('claude-skill:', '');
+      const base = project.path.replace(/\\/g, '/');
+      paths.push(
+        ...[
+          `${base}/.claude/skills/${skillFileName}/SKILL.md`,
+          `${base}/.claude/skills/${skillFileName}.md`,
+        ].map((p) => p.replace(/\//g, '\\')),
+      );
+    }
     for (const p of paths) {
       try {
         const result = await window.electronAPI.readFile(p);
@@ -202,7 +211,13 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
         await window.electronAPI.saveClaudeSkill(project.path, fileName, claudeSkillContent);
       } else {
         const skillFileName = editingClaudeSkillId.replace('claude-skill:', '');
-        await window.electronAPI.saveClaudeSkill(project.path, skillFileName, claudeSkillContent);
+        // A namespaced name means a plugin skill, versioned outside this
+        // project. Writing it here would create a bogus `.claude/skills/dp:ship/`
+        // — and a colon is not a legal path character on Windows — so plugin
+        // skills are read-only.
+        if (!skillFileName.includes(':')) {
+          await window.electronAPI.saveClaudeSkill(project.path, skillFileName, claudeSkillContent);
+        }
       }
       reloadClaudeSkills();
       setEditingClaudeSkillId(null);
@@ -502,7 +517,11 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-[var(--text-primary)]">{skill.name}</span>
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">
-                              slash command
+                              {skill.source === 'plugin'
+                                ? `plugin${skill.pluginName ? `: ${skill.pluginName}` : ''}`
+                                : skill.source === 'user'
+                                  ? 'user skill'
+                                  : 'slash command'}
                             </span>
                           </div>
                           {skill.description && (
@@ -516,24 +535,37 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                           <textarea
                             value={claudeSkillContent}
                             onChange={(e) => setClaudeSkillContent(e.target.value)}
+                            readOnly={skill.source === 'plugin'}
                             rows={12}
                             className="w-full text-xs bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-2 outline-none focus:border-[var(--accent)] resize-none font-mono leading-relaxed"
                           />
-                          <div className="flex justify-end gap-2">
-                            <button
-                              onClick={() => setEditingClaudeSkillId(null)}
-                              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-3 py-1.5 rounded hover:bg-[var(--bg-tertiary)]"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={saveClaudeSkill}
-                              disabled={claudeSkillSaving}
-                              className="flex items-center gap-1 text-xs text-white bg-[var(--accent)] hover:bg-[var(--accent-hover)] px-3 py-1.5 rounded disabled:opacity-50"
-                            >
-                              <Save className="w-3 h-3" /> {claudeSkillSaving ? 'Saving...' : 'Save'}
-                            </button>
-                          </div>
+                          {skill.source === 'plugin' ? (
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[11px] text-[var(--text-muted)] truncate font-mono">{skill.filePath}</p>
+                              <button
+                                onClick={() => setEditingClaudeSkillId(null)}
+                                className="shrink-0 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-3 py-1.5 rounded hover:bg-[var(--bg-tertiary)]"
+                              >
+                                Close
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex justify-end gap-2">
+                              <button
+                                onClick={() => setEditingClaudeSkillId(null)}
+                                className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-3 py-1.5 rounded hover:bg-[var(--bg-tertiary)]"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={saveClaudeSkill}
+                                disabled={claudeSkillSaving}
+                                className="flex items-center gap-1 text-xs text-white bg-[var(--accent)] hover:bg-[var(--accent-hover)] px-3 py-1.5 rounded disabled:opacity-50"
+                              >
+                                <Save className="w-3 h-3" /> {claudeSkillSaving ? 'Saving...' : 'Save'}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
