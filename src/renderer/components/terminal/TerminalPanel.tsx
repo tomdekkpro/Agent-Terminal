@@ -31,13 +31,19 @@ function formatElapsed(ms: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** ClickUp "Ready for test" / "ready for testing" — the status /dp:qc-demo picks up. */
+function isReadyForTestStatus(status: string | undefined): boolean {
+  return !!status && /ready\s*for\s*test/i.test(status);
+}
+
 interface TerminalPanelProps {
   terminal: Terminal;
   isActive: boolean;
   isSplit?: boolean;
   agentProviders: AgentProviderMeta[];
   skills?: import('../../../shared/types').ProjectSkill[];
-  onInvokeAgent: (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => void;
+  /** `initialPrompt` replaces the task-context first prompt (e.g. a skill command). */
+  onInvokeAgent: (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current'; initialPrompt?: string }) => void;
   onProviderChange: (provider: AgentProviderId) => void;
   onInvokeSkill?: (skill: import('../../../shared/types').ProjectSkill) => void;
   onMergeComplete?: () => void;
@@ -520,6 +526,20 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   // renders CommentsSplitLayout around this panel.
   const commentsOpen = !!terminal.commentsOpen;
   const taskCommentsAvailable = !!terminal.task && !isLocalTaskId(terminal.task.id) && !hideToolbar;
+
+  // Suggest /dp:qc-demo for a task sitting in "Ready for test" before the
+  // agent starts — in the Terminal page and the Kanban task modal alike.
+  // Claude-only — dp:qc-demo is a Claude Code plugin skill.
+  const [qcSuggestDismissed, setQcSuggestDismissed] = useState(false);
+  const showQcSuggest =
+    !qcSuggestDismissed &&
+    !!terminal.task &&
+    !isLocalTaskId(terminal.task.id) &&
+    terminal.agentProvider === 'claude' &&
+    !terminal.isClaudeMode &&
+    !terminal.isResuming &&
+    !terminal.needsResume &&
+    isReadyForTestStatus(terminal.task.status);
 
   // Drag and drop state
   const [isDragOver, setIsDragOver] = useState(false);
@@ -1713,6 +1733,14 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           {terminal.needsResume && (
             <ResumeBanner terminal={terminal} />
           )}
+          {showQcSuggest && terminal.task && (
+            <QcDemoSuggestBanner
+              taskLabel={terminal.task.customId || terminal.task.id}
+              status={terminal.task.status}
+              onRun={() => onInvokeAgent({ initialPrompt: `/dp:qc-demo ${terminal.task!.customId || terminal.task!.id}` })}
+              onDismiss={() => setQcSuggestDismissed(true)}
+            />
+          )}
         </div>
       )}
     </div>
@@ -1799,6 +1827,45 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
         <p className="text-[10px] text-[var(--text-muted)] opacity-60">
           Previous session from last run
         </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── QC Demo Suggest Banner (overlay on terminal) ─────────────
+
+function QcDemoSuggestBanner({ taskLabel, status, onRun, onDismiss }: {
+  taskLabel: string;
+  status: string;
+  onRun: () => void;
+  onDismiss: () => void;
+}) {
+  const command = `/dp:qc-demo ${taskLabel}`;
+  return (
+    <div className="absolute inset-x-0 bottom-0 z-10 pointer-events-none">
+      <div className="bg-gradient-to-t from-[#0f0f23] via-[#0f0f23]/95 to-transparent pt-8 pb-4 px-4 pointer-events-auto">
+        <div className="flex items-center justify-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+            <CheckCircle2 className="w-4 h-4 text-teal-400" />
+            <span>
+              Task is <span className="text-[var(--text-secondary)]">{status}</span> — QC it on demo with{' '}
+              <code className="font-mono text-teal-300">{command}</code>
+            </span>
+          </div>
+          <button
+            onClick={onDismiss}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--text-muted)] transition-colors"
+          >
+            Dismiss
+          </button>
+          <button
+            onClick={onRun}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-500/20 text-teal-300 text-xs font-medium hover:bg-teal-500/30 transition-colors"
+            title={`Start Claude and run ${command}`}
+          >
+            <Play className="w-3.5 h-3.5" /> Run QC
+          </button>
+        </div>
       </div>
     </div>
   );

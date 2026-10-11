@@ -1304,7 +1304,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
 
   const [cliError, setCliError] = useState<string | null>(null);
 
-  const handleInvokeAgent = useCallback(async (id: string, opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => {
+  const handleInvokeAgent = useCallback(async (id: string, opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current'; initialPrompt?: string }) => {
     const terminal = useTerminalStore.getState().getTerminal(id);
     if (!terminal) return;
     const skipPermissions = opts?.skipPermissions;
@@ -1363,8 +1363,15 @@ export function TerminalView({ projectId }: TerminalViewProps) {
       if (skipPermissions) {
         useTerminalStore.getState().updateTerminal(id, { skipPermissions: true });
       }
-      // Send task context as first prompt if terminal is linked to a task
-      if (terminal.task && !isLocalTaskId(terminal.task.id)) {
+      // An explicit first prompt (e.g. the /dp:qc-demo suggestion) replaces the
+      // task context — the skill reads the task itself.
+      if (opts?.initialPrompt) {
+        const initialPrompt = opts.initialPrompt;
+        setTimeout(() => {
+          sendAgentPrompt(id, initialPrompt);
+        }, 3000);
+      } else if (terminal.task && !isLocalTaskId(terminal.task.id)) {
+        // Send task context as first prompt if terminal is linked to a task
         const taskId = terminal.task.id;
         window.electronAPI.getTaskManagerTask(taskId).then((taskResult: any) => {
           if (!taskResult.success || !taskResult.data) return;

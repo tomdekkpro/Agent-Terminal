@@ -969,7 +969,7 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
   const terminal: Terminal | undefined = terminalId ? terminals.find((t) => t.id === terminalId) : undefined;
   const currentProvider = terminal ? agentProviders.find((p) => p.id === terminal.agentProvider) : undefined;
 
-  const handleInvokeAgent = useCallback(async (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current' }) => {
+  const handleInvokeAgent = useCallback(async (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current'; initialPrompt?: string }) => {
     if (!terminal) return;
     const skipPermissions = opts?.skipPermissions;
     const agentId = terminal.agentProvider;
@@ -1019,10 +1019,17 @@ export function TaskTerminalModal({ task, onClose }: TaskTerminalModalProps) {
       if (skipPermissions) {
         useTerminalStore.getState().updateTerminal(terminal.id, { skipPermissions: true });
       }
-      // Send the task context as the first prompt. Local tasks have no
-      // ClickUp source — use the description stored on the KanbanTask.
+      // An explicit first prompt (e.g. the /dp:qc-demo suggestion) replaces the
+      // task context — the skill reads the task itself. Otherwise send the task
+      // context as the first prompt. Local tasks have no ClickUp source — use
+      // the description stored on the KanbanTask.
       const kanbanTask = task; // narrow for closure
-      if (terminal.task && kanbanTask) {
+      if (opts?.initialPrompt) {
+        const initialPrompt = opts.initialPrompt;
+        setTimeout(() => {
+          sendAgentPrompt(terminal.id, initialPrompt);
+        }, 3000);
+      } else if (terminal.task && kanbanTask) {
         if (kanbanTask.provider === 'local') {
           const parts: string[] = [
             `I'm working on task: ${kanbanTask.clickupName}`,
