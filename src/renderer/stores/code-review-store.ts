@@ -7,21 +7,31 @@ interface CodeReviewState {
   loading: boolean;
   error: string | null;
   reviewingAll: boolean;
-  // Actions
+  // Actions. `prRepo` is the PR's `owner/name` — a task can have PRs in
+  // several repos, and PR numbers are only unique within one.
   loadTasks: (statuses?: string[], projectPath?: string, listIds?: string[]) => Promise<void>;
-  runReview: (projectPath: string, taskId: string, prNumber: number) => Promise<void>;
+  runReview: (projectPath: string, taskId: string, prNumber: number, prRepo?: string) => Promise<void>;
   runAllReviews: (projectPath: string) => Promise<void>;
-  stopReview: (taskId: string, prNumber?: number) => Promise<void>;
+  stopReview: (taskId: string, prNumber?: number, prRepo?: string) => Promise<void>;
   stopAllReviews: () => Promise<void>;
-  submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string) => Promise<void>;
-  forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) => Promise<void>;
+  submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string, prRepo?: string) => Promise<void>;
+  forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string, prRepo?: string) => Promise<void>;
   addPR: (projectPath: string, taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
-  /** Approve + merge on GitHub after the release-branch checks. `auto` = triggered by a passing review, not a click. */
-  mergePR: (projectPath: string, taskId: string, prNumber: number, auto?: boolean) => Promise<void>;
+  /** Approve + merge one PR on GitHub after the release-branch checks. */
+  mergePR: (projectPath: string, taskId: string, prNumber: number, prRepo?: string) => Promise<void>;
+  /** Merge every passed, unmerged PR of a task together — all or nothing, so
+   *  a fix split across repos never lands half-merged. `auto` = triggered by
+   *  a passing review, not a click. */
+  mergeTask: (projectPath: string, taskId: string, auto?: boolean) => Promise<void>;
   handleEvent: (event: CodeReviewEvent) => void;
   updateItem: (taskId: string, updates: Partial<CodeReviewItem>) => void;
-  updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>) => void;
+  updatePR: (taskId: string, prNumber: number, updates: Partial<CodeReviewPR>, prRepo?: string) => void;
   clearItems: () => void;
+}
+
+/** Same PR? Numbers repeat across repos, so the repo decides when both sides know it. */
+export function isSamePR(pr: CodeReviewPR, prNumber: number, prRepo?: string): boolean {
+  return pr.prNumber === prNumber && (!prRepo || !pr.prRepo || pr.prRepo.toLowerCase() === prRepo.toLowerCase());
 }
 
 /** Derive task-level status from its PRs */
@@ -33,6 +43,11 @@ function deriveTaskStatus(prs: CodeReviewPR[]): CodeReviewStatus {
   if (prs.every((p) => p.status === 'passed')) return 'passed';
   if (prs.every((p) => p.status === 'skipped')) return 'skipped';
   return 'pending';
+}
+
+/** PRs of a task that still need merging — skipped ones are already closed or merged on GitHub. */
+function unmergedPRs(item: CodeReviewItem): CodeReviewPR[] {
+  return item.prs.filter((p) => p.status !== 'skipped' && p.mergeStatus !== 'merged');
 }
 
 export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
@@ -55,14 +70,14 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }
   },
 
-  runReview: async (projectPath, taskId, prNumber) => {
-    get().updatePR(taskId, prNumber, { status: 'reviewing', findings: [], error: undefined });
+  runReview: async (projectPath, taskId, prNumber, prRepo) => {
+    get().updatePR(taskId, prNumber, { status: 'reviewing', findings: [], error: undefined, overridden: undefined }, prRepo);
     try {
-      const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber);
+      const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber, prRepo);
       if (result.success) {
         const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, prHeadSha, skipped, approved } = result.data;
         if (skipped) {
-          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle });
+          get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle }, prRepo);
           return;
         }
         get().updatePR(taskId, prNumber, {
@@ -77,19 +92,25 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           reviewedHeadSha: prHeadSha,
           mergeStatus: undefined,
           mergeError: undefined,
-        });
+        }, prRepo);
         // Auto-submit result
-        await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle);
+        await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo);
         // Not after a `review:approve` override — the AI never passed that
-        // code, so it waits for someone to press Merge.
+        // code, so it waits for someone to press Merge. And only once EVERY
+        // PR of the task has passed: a fix in wp and customerweb merges as a
+        // whole or not at all, so the first PR to pass waits for the others.
         if (passed && !approved && useSettingsStore.getState().settings.codeReviewAutoMerge) {
-          await get().mergePR(projectPath, taskId, prNumber, true);
+          const item = get().items.find((i) => i.taskId === taskId);
+          const pending = item ? unmergedPRs(item) : [];
+          if (pending.length > 0 && pending.every((p) => p.status === 'passed' && !p.overridden)) {
+            await get().mergeTask(projectPath, taskId, true);
+          }
         }
       } else {
-        get().updatePR(taskId, prNumber, { status: 'error', error: result.error });
+        get().updatePR(taskId, prNumber, { status: 'error', error: result.error }, prRepo);
       }
     } catch (err) {
-      get().updatePR(taskId, prNumber, { status: 'error', error: err instanceof Error ? err.message : 'Review failed' });
+      get().updatePR(taskId, prNumber, { status: 'error', error: err instanceof Error ? err.message : 'Review failed' }, prRepo);
     }
   },
 
@@ -101,16 +122,16 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       const pendingPRs = item.prs.filter((pr) => pr.status === 'pending');
       for (const pr of pendingPRs) {
         if (!get().reviewingAll) break;
-        await get().runReview(projectPath, item.taskId, pr.prNumber);
+        await get().runReview(projectPath, item.taskId, pr.prNumber, pr.prRepo);
       }
     }
     set({ reviewingAll: false });
   },
 
-  stopReview: async (taskId, prNumber) => {
+  stopReview: async (taskId, prNumber, prRepo) => {
     await window.electronAPI.codeReviewStop?.(taskId);
     if (prNumber) {
-      get().updatePR(taskId, prNumber, { status: 'pending', error: undefined });
+      get().updatePR(taskId, prNumber, { status: 'pending', error: undefined }, prRepo);
     } else {
       get().updateItem(taskId, { status: 'pending', error: undefined });
     }
@@ -128,23 +149,23 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }
   },
 
-  submitResult: async (projectPath, taskId, prNumber, passed, findings, prTitle) => {
+  submitResult: async (projectPath, taskId, prNumber, passed, findings, prTitle, prRepo) => {
     try {
-      await window.electronAPI.codeReviewSubmit(projectPath, taskId, prNumber, passed, findings, prTitle);
+      await window.electronAPI.codeReviewSubmit(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo);
     } catch (err) {
       // Non-critical — review result is already shown in UI
       console.error('[CodeReview] Failed to submit result:', err);
     }
   },
 
-  forceApprove: async (projectPath, taskId, prNumber, prTitle) => {
+  forceApprove: async (projectPath, taskId, prNumber, prTitle, prRepo) => {
     // Optimistically update UI
-    get().updatePR(taskId, prNumber, { status: 'passed', findings: [] });
+    get().updatePR(taskId, prNumber, { status: 'passed', findings: [], overridden: true }, prRepo);
     try {
-      await window.electronAPI.codeReviewForceApprove(projectPath, taskId, prNumber, prTitle);
+      await window.electronAPI.codeReviewForceApprove(projectPath, taskId, prNumber, prTitle, prRepo);
     } catch (err) {
       // Revert on failure
-      get().updatePR(taskId, prNumber, { status: 'failed' });
+      get().updatePR(taskId, prNumber, { status: 'failed', overridden: undefined }, prRepo);
       console.error('[CodeReview] Failed to force approve:', err);
     }
   },
@@ -155,14 +176,15 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       if (!result.success) {
         return { success: false, error: result.error };
       }
-      const { prNumber, prUrl, prBranch, prBaseBranch, prAuthor, prTitle } = result.data;
+      const { prNumber, prRepo, prUrl, prBranch, prBaseBranch, prAuthor, prTitle } = result.data;
       const item = get().items.find((i) => i.taskId === taskId);
       if (!item) return { success: false, error: 'Task not found' };
-      if (item.prs.some((p) => p.prNumber === prNumber)) {
+      if (item.prs.some((p) => isSamePR(p, prNumber, prRepo))) {
         return { success: false, error: `PR #${prNumber} already attached` };
       }
       const newPR: CodeReviewPR = {
         prNumber,
+        prRepo,
         prUrl,
         prBranch,
         prBaseBranch,
@@ -179,20 +201,50 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }
   },
 
-  mergePR: async (projectPath, taskId, prNumber, auto) => {
-    const pr = get().items.find((i) => i.taskId === taskId)?.prs.find((p) => p.prNumber === prNumber);
+  mergePR: async (projectPath, taskId, prNumber, prRepo) => {
+    const pr = get().items.find((i) => i.taskId === taskId)?.prs.find((p) => isSamePR(p, prNumber, prRepo));
     if (!pr || pr.mergeStatus === 'merging' || pr.mergeStatus === 'merged') return;
-    get().updatePR(taskId, prNumber, { mergeStatus: 'merging', mergeError: undefined });
+    get().updatePR(taskId, prNumber, { mergeStatus: 'merging', mergeError: undefined }, prRepo);
     try {
       const result = await window.electronAPI.codeReviewMerge(projectPath, taskId, prNumber, {
         reviewedHeadSha: pr.reviewedHeadSha,
-        auto,
+        prRepo: pr.prRepo,
       });
       get().updatePR(taskId, prNumber, result.success
         ? { mergeStatus: 'merged', mergeError: undefined }
-        : { mergeStatus: 'blocked', mergeError: result.error });
+        : { mergeStatus: 'blocked', mergeError: result.error }, prRepo);
     } catch (err) {
-      get().updatePR(taskId, prNumber, { mergeStatus: 'blocked', mergeError: err instanceof Error ? err.message : 'Merge failed' });
+      get().updatePR(taskId, prNumber, { mergeStatus: 'blocked', mergeError: err instanceof Error ? err.message : 'Merge failed' }, prRepo);
+    }
+  },
+
+  mergeTask: async (projectPath, taskId, auto) => {
+    const item = get().items.find((i) => i.taskId === taskId);
+    if (!item) return;
+    const prs = unmergedPRs(item).filter((p) => p.status === 'passed' && p.mergeStatus !== 'merging');
+    if (prs.length === 0) return;
+    for (const pr of prs) get().updatePR(taskId, pr.prNumber, { mergeStatus: 'merging', mergeError: undefined }, pr.prRepo);
+    const blockAll = (message: string) => {
+      for (const pr of prs) get().updatePR(taskId, pr.prNumber, { mergeStatus: 'blocked', mergeError: message }, pr.prRepo);
+    };
+    try {
+      const result = await window.electronAPI.codeReviewMergeTask(
+        projectPath,
+        taskId,
+        prs.map((p) => ({ prNumber: p.prNumber, prRepo: p.prRepo, reviewedHeadSha: p.reviewedHeadSha })),
+        auto,
+      );
+      if (!result.data) {
+        blockAll(result.error || 'Merge failed');
+        return;
+      }
+      for (const outcome of result.data as Array<{ prNumber: number; prRepo?: string; merged: boolean; message: string }>) {
+        get().updatePR(taskId, outcome.prNumber, outcome.merged
+          ? { mergeStatus: 'merged', mergeError: undefined }
+          : { mergeStatus: 'blocked', mergeError: outcome.message }, outcome.prRepo);
+      }
+    } catch (err) {
+      blockAll(err instanceof Error ? err.message : 'Merge failed');
     }
   },
 
@@ -242,7 +294,7 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           get().updatePR(taskId, event.prNumber, {
             mergeStatus: event.mergeStatus,
             mergeError: event.mergeStatus === 'blocked' ? event.message : undefined,
-          });
+          }, event.prRepo);
         }
         break;
       case 'prs':
@@ -279,12 +331,12 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }));
   },
 
-  updatePR: (taskId, prNumber, updates) => {
+  updatePR: (taskId, prNumber, updates, prRepo) => {
     set((state) => ({
       items: state.items.map((item) => {
         if (item.taskId !== taskId) return item;
         const updatedPRs = item.prs.map((pr) =>
-          pr.prNumber === prNumber ? { ...pr, ...updates } : pr,
+          isSamePR(pr, prNumber, prRepo) ? { ...pr, ...updates } : pr,
         );
         return {
           ...item,

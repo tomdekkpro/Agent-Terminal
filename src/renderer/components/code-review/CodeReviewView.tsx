@@ -117,7 +117,7 @@ function StatusBadge({ status }: { status: string }) {
 
 /** Two-step merge button: the first click arms it, the second merges. A merge
  *  into the release branch can't be taken back, so one stray click shouldn't do it. */
-function MergeButton({ onMerge }: { onMerge: () => void }) {
+function MergeButton({ onMerge, label = 'Merge', title = 'Approve and merge this PR on GitHub' }: { onMerge: () => void; label?: string; title?: string }) {
   const [armed, setArmed] = useState(false);
   useEffect(() => {
     if (!armed) return;
@@ -135,22 +135,28 @@ function MergeButton({ onMerge }: { onMerge: () => void }) {
           setArmed(true);
         }
       }}
-      title="Approve and merge this PR on GitHub"
+      title={title}
       className={cn(
         'flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
         armed ? 'bg-purple-500 text-white hover:bg-purple-600' : 'bg-purple-500/10 text-purple-400 hover:bg-purple-500/20',
       )}
     >
       <GitMerge className="w-3 h-3" />
-      {armed ? 'Confirm merge' : 'Merge'}
+      {armed ? `Confirm ${label.toLowerCase()}` : label}
     </button>
   );
+}
+
+/** Short repo name for a PR's `owner/name` — "customerweb". */
+function repoName(prRepo?: string): string | undefined {
+  return prRepo?.split('/').pop();
 }
 
 function PRRow({
   pr,
   taskId,
-  releaseBranch,
+  release,
+  showRepo,
   onReview,
   onStop,
   onApprove,
@@ -158,19 +164,25 @@ function PRRow({
 }: {
   pr: CodeReviewPR;
   taskId: string;
-  releaseBranch: string | null;
-  onReview: (taskId: string, prNumber: number) => void;
-  onStop: (taskId: string, prNumber: number) => void;
-  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
-  onMerge: (taskId: string, prNumber: number) => void;
+  release: CodeReviewReleaseBranch | null;
+  /** The task has PRs in more than one repo — label each with its repo. */
+  showRepo: boolean;
+  onReview: (taskId: string, pr: CodeReviewPR) => void;
+  onStop: (taskId: string, pr: CodeReviewPR) => void;
+  onApprove: (taskId: string, pr: CodeReviewPR) => void;
+  onMerge: (taskId: string, pr: CodeReviewPR) => void;
 }) {
   const [expanded, setExpanded] = useState(pr.status === 'failed');
   const status = STATUS_CONFIG[pr.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
   const isReviewing = pr.status === 'reviewing';
-  // Only known once the release branch has been resolved; until then the base
-  // branch is shown neutrally rather than guessed at.
-  const targetsRelease = releaseBranch && pr.prBaseBranch ? pr.prBaseBranch === releaseBranch : null;
+  // The release branch belongs to the selected project's repo. A PR in another
+  // repo (customerweb) merges into that repo's own release branch or Develop,
+  // which only the merge check resolves — so it's shown neutrally, as is any
+  // base branch before the release branch is known.
+  const inSelectedRepo = !pr.prRepo || !release?.repo || pr.prRepo.toLowerCase() === release.repo.toLowerCase();
+  const releaseBranch = release?.branch ?? null;
+  const targetsRelease = inSelectedRepo && releaseBranch && pr.prBaseBranch ? pr.prBaseBranch === releaseBranch : null;
 
   const criticals = pr.findings.filter((f) => f.severity === 'critical').length;
   const majors = pr.findings.filter((f) => f.severity === 'major').length;
@@ -183,7 +195,15 @@ function PRRow({
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <StatusIcon className={cn('w-3.5 h-3.5 shrink-0', status.color, isReviewing && 'animate-spin')} />
-            <span className="text-xs font-medium text-[var(--text-primary)]">PR #{pr.prNumber}</span>
+            {showRepo && pr.prRepo && (
+              <span
+                title={pr.prRepo}
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] shrink-0"
+              >
+                {repoName(pr.prRepo)}
+              </span>
+            )}
+            <span className="text-xs font-medium text-[var(--text-primary)] shrink-0">PR #{pr.prNumber}</span>
             {pr.prTitle && <span className="text-xs text-[var(--text-muted)] truncate">{pr.prTitle}</span>}
           </div>
 
@@ -192,7 +212,7 @@ function PRRow({
 
             {pr.status === 'pending' && (
               <button
-                onClick={() => onReview(taskId, pr.prNumber)}
+                onClick={() => onReview(taskId, pr)}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-opacity"
               >
                 <Play className="w-3 h-3" />
@@ -202,7 +222,7 @@ function PRRow({
 
             {pr.status === 'reviewing' && (
               <button
-                onClick={() => onStop(taskId, pr.prNumber)}
+                onClick={() => onStop(taskId, pr)}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
               >
                 <Square className="w-3 h-3" />
@@ -212,7 +232,7 @@ function PRRow({
 
             {pr.status === 'failed' && (
               <button
-                onClick={() => onApprove(taskId, pr.prNumber, pr.prTitle || `PR #${pr.prNumber}`)}
+                onClick={() => onApprove(taskId, pr)}
                 title="Override review — mark as approved"
                 className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors"
               >
@@ -221,11 +241,11 @@ function PRRow({
               </button>
             )}
 
-            {pr.status === 'passed' && !pr.mergeStatus && <MergeButton onMerge={() => onMerge(taskId, pr.prNumber)} />}
+            {pr.status === 'passed' && !pr.mergeStatus && <MergeButton onMerge={() => onMerge(taskId, pr)} />}
 
             {pr.status === 'passed' && pr.mergeStatus === 'blocked' && (
               <button
-                onClick={() => onMerge(taskId, pr.prNumber)}
+                onClick={() => onMerge(taskId, pr)}
                 title="Run the merge checks again"
                 className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 transition-colors"
               >
@@ -436,26 +456,35 @@ function AddPRInput({
 function ReviewItemCard({
   item,
   projectPath,
-  releaseBranch,
+  release,
   onReview,
   onStop,
   onApprove,
   onMerge,
+  onMergeAll,
   onAddPR,
 }: {
   item: CodeReviewItem;
   projectPath: string;
-  releaseBranch: string | null;
-  onReview: (taskId: string, prNumber: number) => void;
-  onStop: (taskId: string, prNumber: number) => void;
-  onApprove: (taskId: string, prNumber: number, prTitle: string) => void;
-  onMerge: (taskId: string, prNumber: number) => void;
+  release: CodeReviewReleaseBranch | null;
+  onReview: (taskId: string, pr: CodeReviewPR) => void;
+  onStop: (taskId: string, pr: CodeReviewPR) => void;
+  onApprove: (taskId: string, pr: CodeReviewPR) => void;
+  onMerge: (taskId: string, pr: CodeReviewPR) => void;
+  onMergeAll: (taskId: string) => void;
   onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
   const isReviewing = item.status === 'reviewing';
   const hasPRs = item.prs && item.prs.length > 0;
+  const multiRepo = new Set(item.prs.map((p) => (p.prRepo ?? '').toLowerCase())).size > 1;
+  // "Merge all" once every open PR of the task has passed and at least two
+  // still need merging — they then go together, all or nothing.
+  const unmerged = item.prs.filter((p) => p.status !== 'skipped' && p.mergeStatus !== 'merged');
+  const canMergeAll = unmerged.length > 1
+    && unmerged.every((p) => p.status === 'passed')
+    && !unmerged.some((p) => p.mergeStatus === 'merging');
   // PRs are resolved after the task list paints, so "no PR found" would
   // otherwise flash on every load before the real answer arrives.
   const resolvingPRs = !hasPRs && !!item.prsResolving;
@@ -488,6 +517,13 @@ function ReviewItemCard({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {canMergeAll && (
+              <MergeButton
+                onMerge={() => onMergeAll(item.taskId)}
+                label={`Merge all (${unmerged.length})`}
+                title="Approve and merge all of this task's PRs — none are merged unless every one can be"
+              />
+            )}
             <StatusBadge status={item.status} />
             <button
               onClick={() => window.electronAPI.openExternal(item.taskUrl)}
@@ -515,10 +551,11 @@ function ReviewItemCard({
           <div className="mt-3 space-y-2">
             {item.prs.map((pr) => (
               <PRRow
-                key={pr.prNumber}
+                key={`${pr.prRepo ?? ''}#${pr.prNumber}`}
                 pr={pr}
                 taskId={item.taskId}
-                releaseBranch={releaseBranch}
+                release={release}
+                showRepo={multiRepo}
                 onReview={onReview}
                 onStop={onStop}
                 onApprove={onApprove}
@@ -791,7 +828,7 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR, mergePR } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR, mergePR, mergeTask } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
@@ -904,14 +941,19 @@ export function CodeReviewView() {
     setReleaseRefresh((n) => n + 1);
   }, [customStatuses, selectedProjectPath, selectedListIds, loadTasks]);
 
-  const handleMerge = useCallback((taskId: string, prNumber: number) => {
+  const handleMerge = useCallback((taskId: string, pr: CodeReviewPR) => {
     if (!selectedProjectPath) return;
-    mergePR(selectedProjectPath, taskId, prNumber);
+    mergePR(selectedProjectPath, taskId, pr.prNumber, pr.prRepo);
   }, [selectedProjectPath, mergePR]);
 
-  const handleReview = useCallback((taskId: string, prNumber: number) => {
+  const handleMergeAll = useCallback((taskId: string) => {
     if (!selectedProjectPath) return;
-    runReview(selectedProjectPath, taskId, prNumber);
+    mergeTask(selectedProjectPath, taskId);
+  }, [selectedProjectPath, mergeTask]);
+
+  const handleReview = useCallback((taskId: string, pr: CodeReviewPR) => {
+    if (!selectedProjectPath) return;
+    runReview(selectedProjectPath, taskId, pr.prNumber, pr.prRepo);
   }, [selectedProjectPath, runReview]);
 
   const handleReviewAll = useCallback(() => {
@@ -919,17 +961,17 @@ export function CodeReviewView() {
     runAllReviews(selectedProjectPath);
   }, [selectedProjectPath, runAllReviews]);
 
-  const handleStop = useCallback((taskId: string, prNumber?: number) => {
-    stopReview(taskId, prNumber);
+  const handleStop = useCallback((taskId: string, pr: CodeReviewPR) => {
+    stopReview(taskId, pr.prNumber, pr.prRepo);
   }, [stopReview]);
 
   const handleStopAll = useCallback(() => {
     stopAllReviews();
   }, [stopAllReviews]);
 
-  const handleApprove = useCallback((taskId: string, prNumber: number, prTitle: string) => {
+  const handleApprove = useCallback((taskId: string, pr: CodeReviewPR) => {
     if (!selectedProjectPath) return;
-    forceApprove(selectedProjectPath, taskId, prNumber, prTitle);
+    forceApprove(selectedProjectPath, taskId, pr.prNumber, pr.prTitle || `PR #${pr.prNumber}`, pr.prRepo);
   }, [selectedProjectPath, forceApprove]);
 
   const handleAddPR = useCallback(async (taskId: string, prInput: string) => {
@@ -979,8 +1021,8 @@ export function CodeReviewView() {
             <button
               onClick={() => updateSettings({ codeReviewAutoMerge: !autoMerge })}
               title={autoMerge
-                ? 'PRs are approved and merged as soon as their review passes (if they target the current release branch)'
-                : 'Turn on to merge PRs automatically once their review passes'}
+                ? "PRs are approved and merged once all of a task's PRs pass review — together, in every repo, if they target the right branch"
+                : "Turn on to merge a task's PRs automatically once all of them pass review"}
               className={cn(
                 'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-colors',
                 autoMerge
@@ -1214,11 +1256,12 @@ export function CodeReviewView() {
               key={item.taskId}
               item={item}
               projectPath={projectPath}
-              releaseBranch={release?.branch ?? null}
+              release={release}
               onReview={handleReview}
               onStop={handleStop}
               onApprove={handleApprove}
               onMerge={handleMerge}
+              onMergeAll={handleMergeAll}
               onAddPR={handleAddPR}
             />
           ))}

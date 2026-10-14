@@ -291,16 +291,18 @@ const electronAPI = {
 
   // Code Review
   codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listIds),
-  codeReviewGetPRInfo: (projectPath: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_PR_INFO, projectPath, prNumber),
-  codeReviewRun: (projectPath: string, taskId: string, prNumber: number) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RUN, projectPath, taskId, prNumber),
-  codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle),
-  codeReviewForceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE, projectPath, taskId, prNumber, prTitle),
+  codeReviewGetPRInfo: (projectPath: string, prNumber: number, prRepo?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_PR_INFO, projectPath, prNumber, prRepo),
+  codeReviewRun: (projectPath: string, taskId: string, prNumber: number, prRepo?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RUN, projectPath, taskId, prNumber, prRepo),
+  codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string, prRepo?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle, prRepo),
+  codeReviewForceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string, prRepo?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE, projectPath, taskId, prNumber, prTitle, prRepo),
   codeReviewAddPR: (projectPath: string, prInput: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_ADD_PR, projectPath, prInput),
-  codeReviewMerge: (projectPath: string, taskId: string, prNumber: number, options?: { reviewedHeadSha?: string; auto?: boolean }) =>
+  codeReviewMerge: (projectPath: string, taskId: string, prNumber: number, options?: { reviewedHeadSha?: string; auto?: boolean; prRepo?: string }) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_MERGE, projectPath, taskId, prNumber, options),
+  codeReviewMergeTask: (projectPath: string, taskId: string, prs: Array<{ prNumber: number; prRepo?: string; reviewedHeadSha?: string }>, auto?: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_MERGE_TASK, projectPath, taskId, prs, auto),
   codeReviewReleaseBranch: (projectPath: string, refresh?: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RELEASE_BRANCH, projectPath, refresh),
   codeReviewStop: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_STOP, taskId),

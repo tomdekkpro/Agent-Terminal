@@ -1129,6 +1129,9 @@ export interface CodeReviewReleaseBranch {
   /** `pinned` = set in settings, `detected` = newest release branch on GitHub. */
   source: 'pinned' | 'detected' | 'none';
   prefix: string;
+  /** `owner/name` of the selected project's repo — PRs from any other repo
+   *  merge into that repo's integration branch instead. */
+  repo?: string;
 }
 
 export interface CodeReviewFinding {
@@ -1141,6 +1144,9 @@ export interface CodeReviewFinding {
 
 export interface CodeReviewPR {
   prNumber: number;
+  /** `owner/name` of the repo the PR lives in. A task can have PRs in several
+   *  repos (e.g. wp and customerweb), and PR numbers are only unique per repo. */
+  prRepo?: string;
   prUrl?: string;
   /** Head branch — the source branch the PR is built from */
   prBranch?: string;
@@ -1159,6 +1165,8 @@ export interface CodeReviewPR {
   mergeStatus?: CodeReviewMergeStatus;
   /** Why the merge was refused, when `mergeStatus` is `blocked`. */
   mergeError?: string;
+  /** Passed by the Approve override, not by the AI — never auto-merged. */
+  overridden?: boolean;
 }
 
 export interface CodeReviewItem {
@@ -1189,6 +1197,8 @@ export interface CodeReviewEvent {
   taskId: string;
   /** `merge` events only — the PR the merge outcome is for. */
   prNumber?: number;
+  /** `merge` events only — the repo of `prNumber`. */
+  prRepo?: string;
   /** `merge` events only. `message` carries the block reason. */
   mergeStatus?: CodeReviewMergeStatus;
   message?: string;
