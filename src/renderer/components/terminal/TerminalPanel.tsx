@@ -13,6 +13,8 @@ import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
 import { cn, isLocalTaskId } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
+import { isMac, isModKey } from '../../lib/platform';
+import { terminalFontFamily, terminalFontSize } from '../../lib/terminal-font';
 
 /** Compact token formatter — 12345 → "12.3K", 1500000 → "1.5M" */
 function formatTokens(n: number): string {
@@ -486,6 +488,13 @@ function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: bo
   );
 }
 
+/** macOS Terminal.app-style line editing: Cmd+key → readline control code */
+const MAC_LINE_EDIT_KEYS = new Map<string, string>([
+  ['Backspace', '\x15'], // Ctrl+U — kill to start of line
+  ['ArrowLeft', '\x01'], // Ctrl+A — start of line
+  ['ArrowRight', '\x05'], // Ctrl+E — end of line
+]);
+
 const TERMINAL_THEME = {
   background: '#0f0f23',
   foreground: '#e2e8f0',
@@ -811,11 +820,12 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
         initObserverRef.current = null;
       }
 
+      const fontSettings = useSettingsStore.getState().settings;
       const xterm = new XTerm({
         cursorBlink: true,
         cursorStyle: 'block',
-        fontSize: 14,
-        fontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
+        fontSize: terminalFontSize(fontSettings),
+        fontFamily: terminalFontFamily(fontSettings),
         lineHeight: 1.2,
         theme: TERMINAL_THEME,
         allowProposedApi: true,
@@ -917,6 +927,42 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           return false;
         }
 
+        // macOS: Cmd copies/pastes and Ctrl belongs to the shell — Ctrl+C is
+        // always SIGINT and Ctrl+V reaches the pty, selection or not. Every
+        // other Cmd combo returns true so it bubbles up to the app shortcuts.
+        if (isMac) {
+          if (event.type !== 'keydown' || !isModKey(event) || event.altKey) return true;
+          const key = event.key;
+
+          if (key === 'c' || key === 'C') {
+            if (xterm.hasSelection()) {
+              const selection = xterm.getSelection();
+              if (selection) navigator.clipboard.writeText(selection);
+              event.preventDefault();
+              return false;
+            }
+            return true;
+          }
+
+          if (key === 'v' || key === 'V') {
+            // Let the native paste (the Edit menu's Paste role) through —
+            // xterm takes it from its textarea's paste event. Pasting here too
+            // would race the menu and paste twice.
+            return false;
+          }
+
+          // Terminal.app line editing: Cmd+Backspace kills to line start,
+          // Cmd+Left/Right jump to start/end of line
+          const lineEdit = event.shiftKey ? undefined : MAC_LINE_EDIT_KEYS.get(key);
+          if (lineEdit) {
+            event.preventDefault();
+            xterm.input(lineEdit);
+            return false;
+          }
+
+          return true;
+        }
+
         if (isMod && (event.key === 'c' || event.key === 'C') && event.type === 'keydown') {
           if (xterm.hasSelection()) {
             const selection = xterm.getSelection();
@@ -966,6 +1012,21 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
     };
   }, [terminal.id, terminal.needsRestore]);
+
+  // Apply font changes from Settings to the live terminal, then re-fit since
+  // the cell size (and so cols/rows) changes with it
+  const fontFamily = useSettingsStore((s) => terminalFontFamily(s.settings));
+  const fontSize = useSettingsStore((s) => terminalFontSize(s.settings));
+  useEffect(() => {
+    const xterm = xtermRef.current;
+    if (!xterm) return;
+    if (xterm.options.fontFamily === fontFamily && xterm.options.fontSize === fontSize) return;
+    xterm.options.fontFamily = fontFamily;
+    xterm.options.fontSize = fontSize;
+    try {
+      if (readyRef.current) fitAddonRef.current?.fit();
+    } catch { /* xterm renderer not ready yet */ }
+  }, [fontFamily, fontSize]);
 
   // Fit on visibility change
   useEffect(() => {

@@ -11,12 +11,12 @@ import { track } from '../analytics/analytics-service';
 import { sessionUsageTracker } from '../usage/session-usage-tracker';
 
 /** Encode a project path to match Claude Code's project directory naming.
- *  Claude maps `:`, `/`, `\`, AND `.` all to `-` — so e.g.
- *  `D:\proj\.task-worktrees\T-1` becomes `D--proj--task-worktrees-T-1`
- *  (not `D--proj-.task-worktrees-T-1`). Missing the dot mapping previously
- *  caused worktree session lookups to point at a non-existent project dir. */
+ *  Claude maps every non-alphanumeric character to `-` — so e.g.
+ *  `D:\proj\.task-worktrees\T-1` becomes `D--proj--task-worktrees-T-1`,
+ *  `D:\Dekkpro Test` becomes `D--Dekkpro-Test` and `/Users/x/my_app`
+ *  becomes `-Users-x-my-app`. */
 function encodeProjectPath(cwd: string): string {
-  return cwd.replace(/[:/\\.]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /** Get Claude Code's project data directory for a given cwd */
@@ -34,6 +34,11 @@ function buildShellCommand(
   }
   if (shellType === 'bash') {
     return { cdCmd: `cd "${dir}"`, clearCmd: 'clear', separator: ' && ' };
+  }
+  if (process.platform !== 'win32') {
+    // mac/Linux login shell (zsh, bash, fish). Single quotes so `$`, backticks
+    // and spaces in the path are taken literally.
+    return { cdCmd: `cd '${dir.replace(/'/g, `'\\''`)}'`, clearCmd: 'clear', separator: ' && ' };
   }
   return { cdCmd: `cd /d "${dir}"`, clearCmd: 'cls', separator: ' && ' };
 }

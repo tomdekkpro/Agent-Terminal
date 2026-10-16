@@ -17,6 +17,7 @@ import { TaskPickerModal } from '../terminal/TerminalView';
 import type { AgentProviderId, AgentProviderMeta, InsightsModel, InsightsMessage, Persona, SharedSessionInfo, TaskManagerTask } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { useTeamStore, onSessionMessage, onSessionParticipants } from '../../stores/team-store';
+import { isModKey } from '../../lib/platform';
 
 const QUICK_PROMPTS = [
   { label: 'Explain codebase', prompt: 'Give me a high-level overview of this codebase. What are the main components, how are they organized, and what does the application do?' },
@@ -220,10 +221,10 @@ export function InsightsView() {
     if (activeSession?.model) setSelectedModel(activeSession.copilotModel || activeSession.model);
   }, [activeSession?.model, activeSession?.copilotModel]);
 
-  // Ctrl+I focus
+  // Ctrl+I (Cmd+I on mac) focus
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === 'i' && !e.shiftKey && !e.altKey && !e.metaKey) {
+      if (isModKey(e) && e.key === 'i' && !e.shiftKey && !e.altKey) {
         if (textareaRef.current) { e.preventDefault(); textareaRef.current.focus(); }
       }
     };

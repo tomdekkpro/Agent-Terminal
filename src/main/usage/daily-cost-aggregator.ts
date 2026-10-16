@@ -20,12 +20,12 @@ import { computeCost, normalizeModelId, modelDisplayLabel, type RawUsage } from 
 import { debugError } from '../../shared/utils';
 
 /** Mirrors `terminal-manager.ts` — Claude encodes project paths by replacing
- *  `:`, `/`, `\`, `.` with `-`. Worktrees nest under `.claude/worktrees/<id>`
+ *  every non-alphanumeric character with `-`. Worktrees nest under `.claude/worktrees/<id>`
  *  so the session is stored under the worktree's encoded path, not the
  *  project root. The KanbanTask records its `agentCwd` exactly so we can
  *  reproduce the encoding here. */
 function encodeProjectPath(cwd: string): string {
-  return cwd.replace(/[:/\\.]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 function getClaudeProjectDir(cwd: string): string {

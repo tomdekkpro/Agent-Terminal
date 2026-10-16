@@ -1319,7 +1319,7 @@ export interface SystemMonitorData {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  terminalFontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
+  terminalFontFamily: "'Cascadia Code', Consolas, Menlo, 'SF Mono', Monaco, 'Courier New', monospace",
   terminalFontSize: 14,
   terminalLineHeight: 1.2,
   terminalCursorStyle: 'block',

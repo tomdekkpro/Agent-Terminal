@@ -59,9 +59,11 @@ function safeProjectDir(p?: string): string | undefined {
   return t;
 }
 
-/** Quote a (already-validated, metachar-free) path for a shell:true command line. */
+/** Quote a (already-validated, metachar-free) path for the Windows shell:true
+ *  command line. Elsewhere claude is spawned without a shell, so argv is passed
+ *  verbatim and quotes would become part of the path. */
 function shellQuote(p: string): string {
-  return process.platform === 'win32' ? `"${p}"` : `'${p}'`;
+  return process.platform === 'win32' ? `"${p}"` : p;
 }
 
 /**
@@ -206,7 +208,7 @@ function runClaude(prompt: string, cwd: string, addDir?: string, allowedTools?: 
     const env = { ...process.env };
     delete env.CLAUDECODE;
 
-    const child = spawn('claude', args, { env, cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', args, { env, cwd, shell: process.platform === 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin?.write(prompt);
     child.stdin?.end();
 

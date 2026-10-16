@@ -1194,7 +1194,7 @@ function runClaudeReviewProcess(
     const child = spawn('claude', args, {
       env,
       cwd: projectPath,
-      shell: true,
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

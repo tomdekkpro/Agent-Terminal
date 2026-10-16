@@ -18,6 +18,7 @@ import { useActivityStore, subscribeActivityEvents } from './stores/activity-sto
 import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
+import { isMac, isModKey } from './lib/platform';
 
 /** How often the channel list is re-read while a conversation is on screen
  *  (the Chat page or the dock) — the sidebar has to feel live. */
@@ -113,15 +114,22 @@ export default function App() {
       s: 'settings',
     };
     const handler = (e: KeyboardEvent) => {
+      // Shortcuts ride the platform modifier — Ctrl on Windows, Cmd on mac. On
+      // mac Ctrl+letter never gets here: those are native text-editing keys.
+      if (!isModKey(e) || e.altKey) return;
+      const key = e.key.toLowerCase();
+
       // Ctrl+Shift+M — toggle the message dock. Checked before the guard below,
       // which rejects every Shift combination.
-      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'm') {
+      if (e.shiftKey && key === 'm') {
         e.preventDefault();
         useChatStore.getState().toggleDock();
         return;
       }
-      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
-      const key = e.key.toLowerCase();
+      if (e.shiftKey) return;
+
+      // Cmd+Q quits on mac (app menu) — QC has no shortcut there
+      if (isMac && key === 'q') return;
 
       // Ctrl+B — toggle the notifications popover
       if (key === 'b') {
@@ -234,36 +242,44 @@ export default function App() {
   }, [loadProjects, loadSettings, restoreState]);
 
   return (
-    <div className="flex h-screen bg-[var(--bg-primary)]">
-      <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      <main className="flex-1 flex flex-col overflow-hidden">
-        {activeView === 'dashboard' && <DashboardView />}
-        {activeView === 'terminals' && (
-          <>
-            <ProjectTabBar />
-            <TerminalView projectId={activeProjectId ?? undefined} />
-            <DevServerLogPanel />
-          </>
-        )}
-        {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
-        {activeView === 'qc' && <QCView />}
-        {activeView === 'insights' && <ChatView />}
-        {activeView === 'code-review' && <CodeReviewView />}
-        {activeView === 'settings' && <SettingsView />}
-      </main>
-
-      {/* Chat rides along beside every page except the Chat page itself, where
-          it would only duplicate what is already on screen. */}
-      {chatConfigured && activeView !== 'insights' && (
-        dockOpen ? (
-          <ChatDock onOpenFullPage={() => setActiveView('insights')} />
-        ) : (
-          <ChatDockHandle onOpen={() => setDockOpen(true)} unread={chatUnread} />
-        )
+    <div className="flex flex-col h-screen bg-[var(--bg-primary)]">
+      {/* macOS: the window has no title bar (hiddenInset), so the traffic
+          lights get a band of their own that also drags the window. Keep it
+          empty — a drag region swallows clicks. */}
+      {isMac && (
+        <div className="h-8 shrink-0 drag-region bg-[var(--bg-secondary)] border-b border-[var(--border)]" />
       )}
+      <div className="flex flex-1 min-h-0">
+        <Sidebar activeView={activeView} onViewChange={setActiveView} />
+        <main className="flex-1 flex flex-col overflow-hidden">
+          {activeView === 'dashboard' && <DashboardView />}
+          {activeView === 'terminals' && (
+            <>
+              <ProjectTabBar />
+              <TerminalView projectId={activeProjectId ?? undefined} />
+              <DevServerLogPanel />
+            </>
+          )}
+          {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
+          {activeView === 'qc' && <QCView />}
+          {activeView === 'insights' && <ChatView />}
+          {activeView === 'code-review' && <CodeReviewView />}
+          {activeView === 'settings' && <SettingsView />}
+        </main>
 
-      <UpdateNotification />
-      {/* <TeamPanel /> */}
+        {/* Chat rides along beside every page except the Chat page itself, where
+            it would only duplicate what is already on screen. */}
+        {chatConfigured && activeView !== 'insights' && (
+          dockOpen ? (
+            <ChatDock onOpenFullPage={() => setActiveView('insights')} />
+          ) : (
+            <ChatDockHandle onOpen={() => setDockOpen(true)} unread={chatUnread} />
+          )
+        )}
+
+        <UpdateNotification />
+        {/* <TeamPanel /> */}
+      </div>
     </div>
   );
 }

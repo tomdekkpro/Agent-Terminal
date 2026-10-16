@@ -14,6 +14,7 @@ import {
 import type { ActivityEvent, ActivitySource, ActivityLevel } from '../../../shared/types';
 import { useActivityStore } from '../../stores/activity-store';
 import { cn } from '../../../shared/utils';
+import { modLabel } from '../../lib/platform';
 
 const SOURCE_ICON: Record<ActivitySource, typeof Wrench> = {
   'auto-code': Wrench,
@@ -178,7 +179,7 @@ export function NotificationBell() {
     <div className="relative shrink-0" ref={containerRef}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title="Notifications  (Ctrl+B)"
+        title={`Notifications  (${modLabel}B)`}
         className={cn(
           'relative w-8 h-8 rounded-lg flex items-center justify-center transition-colors',
           open

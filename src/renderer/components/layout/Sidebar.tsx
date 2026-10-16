@@ -3,20 +3,22 @@ import type { ViewType } from '../../App';
 import { useChatStore } from '../../stores/chat-store';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
+import { isMac, modLabel } from '../../lib/platform';
 
 interface SidebarProps {
   activeView: ViewType;
   onViewChange: (view: ViewType) => void;
 }
 
-const navItems: { id: ViewType; icon: typeof Terminal; label: string; shortcut: string }[] = [
-  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', shortcut: 'Ctrl+D' },
-  { id: 'terminals', icon: Terminal, label: 'Terminals', shortcut: 'Ctrl+T' },
-  { id: 'kanban', icon: Kanban, label: 'Kanban Board', shortcut: 'Ctrl+K' },
-  { id: 'qc', icon: ShieldCheck, label: 'QC Testing', shortcut: 'Ctrl+Q' },
-  { id: 'insights', icon: Sparkles, label: 'Chat', shortcut: 'Ctrl+I' },
-  { id: 'code-review', icon: GitPullRequestDraft, label: 'Code Review', shortcut: 'Ctrl+R' },
-  { id: 'settings', icon: Settings, label: 'Settings', shortcut: 'Ctrl+S' },
+const navItems: { id: ViewType; icon: typeof Terminal; label: string; shortcut?: string }[] = [
+  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', shortcut: `${modLabel}D` },
+  { id: 'terminals', icon: Terminal, label: 'Terminals', shortcut: `${modLabel}T` },
+  { id: 'kanban', icon: Kanban, label: 'Kanban Board', shortcut: `${modLabel}K` },
+  // Cmd+Q quits on mac, so QC has no shortcut there
+  { id: 'qc', icon: ShieldCheck, label: 'QC Testing', shortcut: isMac ? undefined : `${modLabel}Q` },
+  { id: 'insights', icon: Sparkles, label: 'Chat', shortcut: `${modLabel}I` },
+  { id: 'code-review', icon: GitPullRequestDraft, label: 'Code Review', shortcut: `${modLabel}R` },
+  { id: 'settings', icon: Settings, label: 'Settings', shortcut: `${modLabel}S` },
 ];
 
 /** Compact app logo — terminal prompt + AI nodes */
@@ -70,7 +72,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
         <button
           key={id}
           onClick={() => onViewChange(id)}
-          title={`${label}  (${shortcut})`}
+          title={shortcut ? `${label}  (${shortcut})` : label}
           className={cn(
             'w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 relative',
             'hover:bg-[var(--bg-tertiary)]',

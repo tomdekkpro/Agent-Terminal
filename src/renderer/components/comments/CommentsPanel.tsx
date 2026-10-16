@@ -24,6 +24,7 @@ import {
 import type { TaskComment, TaskCommentBlock } from '../../../shared/types';
 import { useCommentsStore } from '../../stores/comments-store';
 import { cn } from '../../../shared/utils';
+import { isMac } from '../../lib/platform';
 
 const WIDTH_STORAGE_KEY = 'comments-panel-width';
 const MIN_WIDTH = 320;
@@ -744,7 +745,7 @@ export function CommentsPanel({
             Summarize
           </button>
           <div className="flex-1" />
-          <span className="text-[9px] text-[var(--text-muted)]">Ctrl+Enter posts</span>
+          <span className="text-[9px] text-[var(--text-muted)]">{isMac ? '⌘↩' : 'Ctrl+Enter'} posts</span>
         </div>
 
         {replyTo && (

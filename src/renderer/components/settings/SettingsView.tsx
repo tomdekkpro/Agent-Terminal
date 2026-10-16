@@ -31,7 +31,7 @@ export function SettingsView() {
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'checking' | 'connected' | 'error'>('idle');
   const [connectionMessage, setConnectionMessage] = useState('');
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'up-to-date' | 'error'>('idle');
-  const [updateInfo, setUpdateInfo] = useState<{ version?: string; percent?: number; error?: string }>({});
+  const [updateInfo, setUpdateInfo] = useState<{ version?: string; percent?: number; error?: string; manual?: boolean }>({});
 
   const [agentProviders, setAgentProviders] = useState<AgentProviderMeta[]>([]);
   const [visibleCredValues, setVisibleCredValues] = useState<Record<number, boolean>>({});
@@ -57,6 +57,7 @@ export function SettingsView() {
         version: data.version,
         percent: data.percent,
         error: data.error,
+        manual: data.manual,
       });
     });
     return () => { cleanup(); };
@@ -309,7 +310,7 @@ export function SettingsView() {
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
                       >
                         <Download className="w-3.5 h-3.5" />
-                        Download v{updateInfo.version}
+                        {updateInfo.manual ? `Get v${updateInfo.version} from GitHub` : `Download v${updateInfo.version}`}
                       </button>
                     </div>
                   )}

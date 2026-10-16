@@ -3,6 +3,7 @@ import { X, Save, FolderOpen, Bot, Zap, Plus, Trash2, ChevronDown, Server, Searc
 import type { Project, ProjectSkill, AgentProviderMeta, AgentProviderId, DevServerConfig, DetectResult } from '../../../shared/types';
 import { useProjectStore } from '../../stores/project-store';
 import { cn } from '../../../shared/utils';
+import { isMac } from '../../lib/platform';
 import { v4 as uuid } from 'uuid';
 
 const SKILL_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7', '#f97316', '#ec4899'];
@@ -181,12 +182,11 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
     } else {
       if (!project.path) return;
       const skillFileName = skill.id.replace('claude-skill:', '');
+      // Forward slashes work for fs on Windows too, and are the only kind on mac
       const base = project.path.replace(/\\/g, '/');
       paths.push(
-        ...[
-          `${base}/.claude/skills/${skillFileName}/SKILL.md`,
-          `${base}/.claude/skills/${skillFileName}.md`,
-        ].map((p) => p.replace(/\//g, '\\')),
+        `${base}/.claude/skills/${skillFileName}/SKILL.md`,
+        `${base}/.claude/skills/${skillFileName}.md`,
       );
     }
     for (const p of paths) {
@@ -298,7 +298,7 @@ export function ProjectSettingsModal({ project, agentProviders, onClose }: Proje
                   <input
                     value={docsPath}
                     onChange={(e) => setDocsPath(e.target.value)}
-                    placeholder="D:\DpProject\dekkpro-docs"
+                    placeholder={isMac ? '~/Projects/dekkpro-docs' : 'D:\\DpProject\\dekkpro-docs'}
                     className="flex-1 text-sm bg-[var(--bg-primary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-3 py-2 outline-none focus:border-[var(--accent)]"
                   />
                   <button

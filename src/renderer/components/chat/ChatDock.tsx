@@ -17,6 +17,7 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { useChatSurface } from '../../hooks/useChatSurface';
 import { sendAgentPrompt } from '../../lib/send-agent-prompt';
+import { isMac, modLabel } from '../../lib/platform';
 import { cn } from '../../../shared/utils';
 import { Avatar } from './Avatar';
 import { AssistPanel } from './AssistPanel';
@@ -29,6 +30,8 @@ const WIDTH_STORAGE_KEY = 'chat-dock-width';
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 640;
 const DEFAULT_WIDTH = 380;
+/** Toggle shortcut as shown in tooltips — handled in App */
+const DOCK_SHORTCUT = `${modLabel}${isMac ? '⇧' : 'Shift+'}M`;
 
 function loadWidth(): number {
   try {
@@ -336,7 +339,7 @@ export function ChatDock({ onOpenFullPage }: { onOpenFullPage: () => void }) {
             </button>
             <button
               onClick={() => setDockOpen(false)}
-              title="Close the message dock  (Ctrl+Shift+M)"
+              title={`Close the message dock  (${DOCK_SHORTCUT})`}
               className="p-1.5 rounded-md text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
             >
               <X className="w-3.5 h-3.5" />
@@ -472,7 +475,7 @@ export function ChatDockHandle({ onOpen, unread }: { onOpen: () => void; unread:
   return (
     <button
       onClick={onOpen}
-      title="Messages  (Ctrl+Shift+M)"
+      title={`Messages  (${DOCK_SHORTCUT})`}
       className={cn(
         'fixed right-0 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-1 py-3 px-1.5',
         'rounded-l-lg border border-r-0 border-[var(--border)] bg-[var(--bg-card)]/90 backdrop-blur',

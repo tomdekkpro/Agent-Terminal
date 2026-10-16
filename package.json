@@ -1,6 +1,6 @@
 {
   "name": "agent-terminal",
-  "version": "1.42.1",
+  "version": "1.43.0",
   "description": "Agent Terminal - AI-powered terminal with ClickUp integration",
   "author": {
     "name": "tomdekkpro",
@@ -73,6 +73,13 @@
       "target": [
         {
           "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
           "arch": [
             "x64",
             "arm64"

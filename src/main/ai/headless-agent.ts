@@ -94,7 +94,7 @@ function runHeadless(
     const child = spawn(agent.command, args, {
       env,
       cwd,
-      shell: true,
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

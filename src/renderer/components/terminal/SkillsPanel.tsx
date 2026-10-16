@@ -24,11 +24,12 @@ function resolveSkillPaths(projectPath: string | undefined, skill: ProjectSkill)
   if (skill.filePath) return [skill.filePath];
   if (!projectPath) return [];
   const name = skill.id.replace('claude-skill:', '');
+  // Forward slashes work for fs on Windows too, and are the only kind on mac
   const base = projectPath.replace(/\\/g, '/');
   return [
     `${base}/.claude/skills/${name}/SKILL.md`,
     `${base}/.claude/skills/${name}.md`,
-  ].map((p) => p.replace(/\//g, '\\'));
+  ];
 }
 
 export function SkillsPanel({ skills, onInvokeSkill, projectPath, onClose }: SkillsPanelProps) {
