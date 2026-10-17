@@ -27,6 +27,8 @@ export interface Terminal {
   id: string;
   groupId: string;
   title: string;
+  /** True once the user renamed the terminal — auto-titles (agent name) no longer overwrite it */
+  customTitle?: boolean;
   status: TerminalStatus;
   cwd: string;
   createdAt: Date;
@@ -118,6 +120,7 @@ function buildSaveableState(state: TerminalState) {
       id: t.id,
       groupId: t.groupId,
       title: t.title,
+      customTitle: t.customTitle,
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
@@ -164,6 +167,7 @@ export function flushTerminalStateSync(): void {
       id: t.id,
       groupId: t.groupId,
       title: t.title,
+      customTitle: t.customTitle,
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
@@ -615,6 +619,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             id: t.id,
             groupId: t.groupId,
             title: t.title,
+            customTitle: t.customTitle,
             status: 'idle' as TerminalStatus,
             cwd: t.cwd || '',
             createdAt: new Date(),

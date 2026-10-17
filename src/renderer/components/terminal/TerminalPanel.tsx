@@ -1221,7 +1221,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   const trimmed = editTitle.trim();
-                  if (trimmed) updateTerminal(terminal.id, { title: trimmed });
+                  if (trimmed) updateTerminal(terminal.id, { title: trimmed, customTitle: true });
                   setIsEditingTitle(false);
                 } else if (e.key === 'Escape') {
                   setIsEditingTitle(false);
@@ -1229,7 +1229,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               }}
               onBlur={() => {
                 const trimmed = editTitle.trim();
-                if (trimmed) updateTerminal(terminal.id, { title: trimmed });
+                if (trimmed) updateTerminal(terminal.id, { title: trimmed, customTitle: true });
                 setIsEditingTitle(false);
               }}
               autoFocus

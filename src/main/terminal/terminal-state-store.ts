@@ -7,6 +7,7 @@ export interface SavedTerminal {
   id: string;
   groupId: string;
   title: string;
+  customTitle?: boolean;
   cwd: string;
   projectId?: string;
   isClaudeMode: boolean;

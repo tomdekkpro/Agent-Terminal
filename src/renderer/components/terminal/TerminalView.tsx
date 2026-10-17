@@ -1876,7 +1876,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
                                 const trimmed = editingTitle.trim();
-                                if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
+                                if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed, customTitle: true });
                                 setEditingGroupId(null);
                               } else if (e.key === 'Escape') {
                                 setEditingGroupId(null);
@@ -1884,7 +1884,7 @@ export function TerminalView({ projectId }: TerminalViewProps) {
                             }}
                             onBlur={() => {
                               const trimmed = editingTitle.trim();
-                              if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed });
+                              if (trimmed) updateTerminal(firstTerminal.id, { title: trimmed, customTitle: true });
                               setEditingGroupId(null);
                             }}
                             autoFocus
