@@ -8,7 +8,8 @@ import { useProjectStore } from './stores/project-store';
 import { useSettingsStore } from './stores/settings-store';
 import { useTerminalStore } from './stores/terminal-store';
 import { useKanbanStore } from './stores/kanban-store';
-import { InsightsView } from './components/insights';
+import { ChatView, ChatDock, ChatDockHandle } from './components/chat';
+import { useChatStore } from './stores/chat-store';
 import { QCView } from './components/qc';
 import { CodeReviewView } from './components/code-review';
 import { KanbanView } from './components/kanban';
@@ -17,6 +18,14 @@ import { useActivityStore, subscribeActivityEvents } from './stores/activity-sto
 import { UpdateNotification } from './components/updates/UpdateNotification';
 // import { TeamPanel } from './components/team/TeamPanel';
 import { DevServerLogPanel } from './components/dev-server/DevServerLogPanel';
+import { isMac, isModKey } from './lib/platform';
+
+/** How often the channel list is re-read while a conversation is on screen
+ *  (the Chat page or the dock) — the sidebar has to feel live. */
+const CHAT_POLL_ACTIVE_MS = 45_000;
+/** …and while none is: this only feeds unread badges, and it shares ClickUp's
+ *  per-token budget with the Kanban, dashboard and code-review pollers. */
+const CHAT_POLL_IDLE_MS = 90_000;
 
 export type ViewType = 'dashboard' | 'terminals' | 'kanban' | 'qc' | 'insights' | 'code-review' | 'settings';
 
@@ -35,6 +44,48 @@ export default function App() {
     void useActivityStore.getState().load();
     return subscribeActivityEvents();
   }, []);
+
+  // Chat. The channel list is polled here and nowhere else, so unread badges
+  // are right on every page — the rail, the dock handle and the Chat sidebar
+  // all read the same state whether or not a transcript is open.
+  const chatConfigured = useSettingsStore(
+    (s) =>
+      s.settings.taskManagerProvider === 'clickup' &&
+      !!s.settings.clickupApiKey &&
+      !!s.settings.clickupWorkspaceId,
+  );
+  const chatOnScreen = useChatStore((s) => s.viewing.page || s.viewing.dock);
+  const dockOpen = useChatStore((s) => s.dockOpen);
+  const setDockOpen = useChatStore((s) => s.setDockOpen);
+  // Muted conversations are excluded everywhere a badge is shown, which is the
+  // whole point of muting one.
+  const chatUnread = useChatStore((s) =>
+    Object.entries(s.unread).reduce(
+      (total, [id, entry]) => (s.muted[id] ? total : total + entry.count),
+      0,
+    ),
+  );
+
+  useEffect(() => {
+    if (!chatConfigured) return;
+    let cancelled = false;
+    const tick = async () => {
+      await useChatStore.getState().bootstrap();
+      // A workspace without Chat (or a token that can't see it) answers once
+      // and is never asked again — no point retrying on a timer.
+      if (cancelled || useChatStore.getState().bootstrapError) return;
+      await useChatStore.getState().loadChannels({ force: true, background: true });
+    };
+    void tick();
+    const timer = setInterval(
+      () => { void tick(); },
+      chatOnScreen ? CHAT_POLL_ACTIVE_MS : CHAT_POLL_IDLE_MS,
+    );
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [chatConfigured, chatOnScreen]);
 
   // Keyboard shortcuts
   const openProjectIds = useProjectStore((s) => s.openProjectIds);
@@ -63,8 +114,22 @@ export default function App() {
       s: 'settings',
     };
     const handler = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+      // Shortcuts ride the platform modifier — Ctrl on Windows, Cmd on mac. On
+      // mac Ctrl+letter never gets here: those are native text-editing keys.
+      if (!isModKey(e) || e.altKey) return;
       const key = e.key.toLowerCase();
+
+      // Ctrl+Shift+M — toggle the message dock. Checked before the guard below,
+      // which rejects every Shift combination.
+      if (e.shiftKey && key === 'm') {
+        e.preventDefault();
+        useChatStore.getState().toggleDock();
+        return;
+      }
+      if (e.shiftKey) return;
+
+      // Cmd+Q quits on mac (app menu) — QC has no shortcut there
+      if (isMac && key === 'q') return;
 
       // Ctrl+B — toggle the notifications popover
       if (key === 'b') {
@@ -177,25 +242,44 @@ export default function App() {
   }, [loadProjects, loadSettings, restoreState]);
 
   return (
-    <div className="flex h-screen bg-[var(--bg-primary)]">
-      <Sidebar activeView={activeView} onViewChange={setActiveView} />
-      <main className="flex-1 flex flex-col overflow-hidden">
-        {activeView === 'dashboard' && <DashboardView />}
-        {activeView === 'terminals' && (
-          <>
-            <ProjectTabBar />
-            <TerminalView projectId={activeProjectId ?? undefined} />
-            <DevServerLogPanel />
-          </>
+    <div className="flex flex-col h-screen bg-[var(--bg-primary)]">
+      {/* macOS: the window has no title bar (hiddenInset), so the traffic
+          lights get a band of their own that also drags the window. Keep it
+          empty — a drag region swallows clicks. */}
+      {isMac && (
+        <div className="h-8 shrink-0 drag-region bg-[var(--bg-secondary)] border-b border-[var(--border)]" />
+      )}
+      <div className="flex flex-1 min-h-0">
+        <Sidebar activeView={activeView} onViewChange={setActiveView} />
+        <main className="flex-1 flex flex-col overflow-hidden">
+          {activeView === 'dashboard' && <DashboardView />}
+          {activeView === 'terminals' && (
+            <>
+              <ProjectTabBar />
+              <TerminalView projectId={activeProjectId ?? undefined} />
+              <DevServerLogPanel />
+            </>
+          )}
+          {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
+          {activeView === 'qc' && <QCView />}
+          {activeView === 'insights' && <ChatView />}
+          {activeView === 'code-review' && <CodeReviewView />}
+          {activeView === 'settings' && <SettingsView />}
+        </main>
+
+        {/* Chat rides along beside every page except the Chat page itself, where
+            it would only duplicate what is already on screen. */}
+        {chatConfigured && activeView !== 'insights' && (
+          dockOpen ? (
+            <ChatDock onOpenFullPage={() => setActiveView('insights')} />
+          ) : (
+            <ChatDockHandle onOpen={() => setDockOpen(true)} unread={chatUnread} />
+          )
         )}
-        {activeView === 'kanban' && <KanbanView onNavigateToTerminal={() => setActiveView('terminals')} />}
-        {activeView === 'qc' && <QCView />}
-        {activeView === 'insights' && <InsightsView />}
-        {activeView === 'code-review' && <CodeReviewView />}
-        {activeView === 'settings' && <SettingsView />}
-      </main>
-      <UpdateNotification />
-      {/* <TeamPanel /> */}
+
+        <UpdateNotification />
+        {/* <TeamPanel /> */}
+      </div>
     </div>
   );
 }

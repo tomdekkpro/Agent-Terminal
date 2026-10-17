@@ -52,6 +52,15 @@ function scheduleSave(): void {
   }, 300);
 }
 
+/** Local "HH:mm" — matches the scheduler's format so comparisons line up. */
+function currentHHmm(d: Date = new Date()): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+/** Local "YYYY-MM-DD" — matches the scheduler's lastRunDate format. */
+function currentDate(d: Date = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export function listNotices(): DashboardNotice[] {
   return load().notices.slice();
 }
@@ -70,6 +79,9 @@ export interface SaveNoticeInput {
   listId?: string;
   sources?: NoticeSource[];
   urls?: string[];
+  orderIndex?: number;
+  width?: number;
+  height?: number;
 }
 
 /** Create a new notice or update an existing one (when `id` is provided). */
@@ -91,6 +103,9 @@ export function saveNotice(input: SaveNoticeInput): DashboardNotice {
         listId: input.listId ?? existing.listId,
         sources: input.sources ?? existing.sources,
         urls: input.urls ?? existing.urls,
+        orderIndex: input.orderIndex ?? existing.orderIndex,
+        width: input.width ?? existing.width,
+        height: input.height ?? existing.height,
         updatedAt: now,
       };
       data.notices[idx] = updated;
@@ -99,17 +114,25 @@ export function saveNotice(input: SaveNoticeInput): DashboardNotice {
     }
   }
 
+  const scheduleTime = input.scheduleTime || '';
   const notice: DashboardNotice = {
     id: randomUUID(),
     title: input.title,
     prompt: input.prompt,
-    scheduleTime: input.scheduleTime || '',
+    scheduleTime,
     enabled: input.enabled ?? true,
     projectPath: input.projectPath,
     listId: input.listId,
     sources: input.sources ?? ['clickup'],
     urls: input.urls,
+    orderIndex: input.orderIndex ?? Date.now(),
+    width: input.width,
+    height: input.height,
     status: 'idle',
+    // If the scheduled time has already passed today, stamp lastRunDate so the
+    // scheduler's catch-up doesn't fire it immediately on creation — it starts
+    // on its next scheduled day instead.
+    lastRunDate: scheduleTime && scheduleTime <= currentHHmm() ? currentDate() : undefined,
     createdAt: now,
     updatedAt: now,
   };

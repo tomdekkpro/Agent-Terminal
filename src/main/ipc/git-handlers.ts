@@ -1,5 +1,5 @@
 import { type IpcMain } from 'electron';
-import { exec, execSync } from 'child_process';
+import { exec, execFile, execSync } from 'child_process';
 import { existsSync, readFileSync, statSync, appendFileSync, cpSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -85,6 +85,23 @@ async function resolveOriginHead(projectPath: string): Promise<string | null> {
 function gitExec(command: string, cwd: string, timeout = GIT_TIMEOUT): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(command, { cwd, encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const err = error as any;
+        err.stderr = stderr;
+        reject(err);
+      } else {
+        resolve(stdout.trim());
+      }
+    });
+  });
+}
+
+/** Run git/gh with an argv array and no shell, for commands that carry free
+ *  text (commit messages, PR titles/bodies). Through a shell, `$`, backticks
+ *  and newlines in that text get expanded or cut off. */
+function gitExecFile(file: 'git' | 'gh', args: string[], cwd: string, timeout = GIT_TIMEOUT): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { cwd, encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
         const err = error as any;
         err.stderr = stderr;
@@ -422,7 +439,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
 
         // Stage all changes and commit
         await gitExec('git add -A', cwd);
-        await gitExec(`git commit -m "${message.replace(/"/g, '\\"')}"`, cwd);
+        await gitExecFile('git', ['commit', '-m', message], cwd);
 
         debugLog('[Git] Committed:', message);
         return { success: true, message };
@@ -533,11 +550,10 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         }
 
         // Create PR using gh CLI
-        const escapedTitle = title.replace(/"/g, '\\"');
-        const escapedBody = body.replace(/"/g, '\\"');
         try {
-          const prOutput = await gitExec(
-            `gh pr create --base "${targetBranch}" --head "${taskBranch}" --title "${escapedTitle}" --body "${escapedBody}"`,
+          const prOutput = await gitExecFile(
+            'gh',
+            ['pr', 'create', '--base', targetBranch, '--head', taskBranch, '--title', title, '--body', body],
             projectPath,
             NETWORK_TIMEOUT,
           );
@@ -603,8 +619,7 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
         // 2. Stage and commit all file changes on the new branch
         try {
           await gitExec('git add -A', cwd);
-          const escapedCommitMsg = title.replace(/"/g, '\\"');
-          await gitExec(`git commit -m "${escapedCommitMsg}"`, cwd);
+          await gitExecFile('git', ['commit', '-m', title], cwd);
           debugLog('[Git] Committed changes on:', newBranch);
         } catch (commitErr: any) {
           const msg = commitErr.stderr?.toString() || commitErr.message || '';
@@ -636,11 +651,10 @@ export function registerGitHandlers(ipcMain: IpcMain): void {
 
         let prUrl = '';
         let existing = false;
-        const escapedTitle = title.replace(/"/g, '\\"');
-        const escapedBody = body.replace(/"/g, '\\"');
         try {
-          prUrl = await gitExec(
-            `gh pr create --base "${targetBranch}" --head "${newBranch}" --title "${escapedTitle}" --body "${escapedBody}"`,
+          prUrl = await gitExecFile(
+            'gh',
+            ['pr', 'create', '--base', targetBranch, '--head', newBranch, '--title', title, '--body', body],
             cwd,
             NETWORK_TIMEOUT,
           );

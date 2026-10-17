@@ -5,6 +5,7 @@ import { useProjectStore } from '../../stores/project-store';
 import { useTerminalStore } from '../../stores/terminal-store';
 import { SkillsPanel } from '../terminal/SkillsPanel';
 import { cn } from '../../../shared/utils';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 
 /** Skills toggle button that opens the SkillsPanel as a fixed-position right drawer.
  *  When invoked from a context where there's an active terminal, sends the skill prompt to it.
@@ -33,7 +34,9 @@ export function ProjectSkillsAction() {
     const active = useTerminalStore.getState().getActiveTerminal();
     if (active) {
       try {
-        await window.electronAPI.sendTerminalInput(active.id, skill.prompt);
+        // Bracketed paste (no auto-submit) so multi-line skill prompts aren't
+        // truncated at the first newline; user reviews then presses Enter.
+        sendAgentPrompt(active.id, skill.prompt, { submit: false });
         setToast(`Sent "${skill.name}" to active terminal`);
       } catch {
         setToast('Failed to send skill to terminal');

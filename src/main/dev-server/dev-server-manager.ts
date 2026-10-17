@@ -72,7 +72,9 @@ export function startDevServer(
       shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
-      detached: false,
+      // Own process group on mac/Linux so stop can signal the shell AND the
+      // ng/vite/dotnet server it started (see killServer)
+      detached: process.platform !== 'win32',
     });
 
     const server: RunningServer = {
@@ -131,17 +133,26 @@ export function stopDevServer(projectId: string, type: DevServerType): { success
   debugLog(`[DevServer] Stopping ${type} for project ${projectId}`);
 
   try {
-    // On Windows, we need to kill the whole process tree since shell: true creates a cmd wrapper
-    if (process.platform === 'win32' && server.process.pid) {
-      spawn('taskkill', ['/pid', String(server.process.pid), '/f', '/t'], { stdio: 'ignore' });
-    } else {
-      server.process.kill('SIGTERM');
-    }
+    killServer(server);
     servers.delete(k);
     return { success: true };
   } catch (err: any) {
     debugError(`[DevServer] Failed to stop ${type} for ${projectId}:`, err);
     return { success: false, error: err.message };
+  }
+}
+
+/** Kill the server's whole process tree. shell:true wraps the command in
+ *  cmd/sh, and killing only that wrapper leaves the real server holding the port. */
+function killServer(server: RunningServer): void {
+  const pid = server.process.pid;
+  if (process.platform === 'win32' && pid) {
+    spawn('taskkill', ['/pid', String(pid), '/f', '/t'], { stdio: 'ignore' });
+  } else if (pid) {
+    // Negative pid = the process group created by detached:true
+    try { process.kill(-pid, 'SIGTERM'); } catch { server.process.kill('SIGTERM'); }
+  } else {
+    server.process.kill('SIGTERM');
   }
 }
 
@@ -158,11 +169,7 @@ export function stopAllDevServers(): void {
   for (const [k, server] of servers) {
     debugLog(`[DevServer] Shutting down ${k}`);
     try {
-      if (process.platform === 'win32' && server.process.pid) {
-        spawn('taskkill', ['/pid', String(server.process.pid), '/f', '/t'], { stdio: 'ignore' });
-      } else {
-        server.process.kill('SIGTERM');
-      }
+      killServer(server);
     } catch {
       // ignore cleanup errors
     }

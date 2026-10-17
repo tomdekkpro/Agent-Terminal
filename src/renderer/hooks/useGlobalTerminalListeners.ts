@@ -64,8 +64,9 @@ export function useGlobalTerminalListeners() {
     cleanups.push(
       window.electronAPI.onTerminalTitleChange((id, title) => {
         const terminal = useTerminalStore.getState().terminals.find(t => t.id === id);
-        // Skip if terminal has a linked task — task title takes priority, agent shown via icon
-        if (!terminal?.task) {
+        // Skip if terminal has a linked task — task title takes priority, agent shown via icon.
+        // Skip user-renamed terminals too, or Restore/Start would wipe the custom name.
+        if (terminal && !terminal.task && !terminal.customTitle) {
           updateTerminal(id, { title });
         }
       })

@@ -6,6 +6,7 @@ import { useInsightsStore } from '../../stores/insights-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useTerminalStore } from '../../stores/terminal-store';
+import { sendAgentPrompt } from '../../lib/send-agent-prompt';
 import { ChatMessage } from './ChatMessage';
 import { ModelSelector } from './ModelSelector';
 import { SessionSidebar } from './SessionSidebar';
@@ -16,6 +17,7 @@ import { TaskPickerModal } from '../terminal/TerminalView';
 import type { AgentProviderId, AgentProviderMeta, InsightsModel, InsightsMessage, Persona, SharedSessionInfo, TaskManagerTask } from '../../../shared/types';
 import { cn } from '../../../shared/utils';
 import { useTeamStore, onSessionMessage, onSessionParticipants } from '../../stores/team-store';
+import { isModKey } from '../../lib/platform';
 
 const QUICK_PROMPTS = [
   { label: 'Explain codebase', prompt: 'Give me a high-level overview of this codebase. What are the main components, how are they organized, and what does the application do?' },
@@ -219,10 +221,10 @@ export function InsightsView() {
     if (activeSession?.model) setSelectedModel(activeSession.copilotModel || activeSession.model);
   }, [activeSession?.model, activeSession?.copilotModel]);
 
-  // Ctrl+I focus
+  // Ctrl+I (Cmd+I on mac) focus
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === 'i' && !e.shiftKey && !e.altKey && !e.metaKey) {
+      if (isModKey(e) && e.key === 'i' && !e.shiftKey && !e.altKey) {
         if (textareaRef.current) { e.preventDefault(); textareaRef.current.focus(); }
       }
     };
@@ -489,7 +491,7 @@ export function InsightsView() {
     // Send the spec as the first prompt after a brief delay
     setTimeout(() => {
       const prompt = `Please implement the following specification:\n\n${specContent}`;
-      window.electronAPI.sendTerminalInput(terminalId, prompt + '\n');
+      sendAgentPrompt(terminalId, prompt);
     }, 2000);
   };
 

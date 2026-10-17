@@ -1,21 +1,24 @@
 import { Terminal, Kanban, ShieldCheck, Sparkles, GitPullRequestDraft, Settings, LayoutDashboard } from 'lucide-react';
 import type { ViewType } from '../../App';
+import { useChatStore } from '../../stores/chat-store';
 import { cn } from '../../../shared/utils';
 import { APP_VERSION } from '../../lib/version';
+import { isMac, modLabel } from '../../lib/platform';
 
 interface SidebarProps {
   activeView: ViewType;
   onViewChange: (view: ViewType) => void;
 }
 
-const navItems: { id: ViewType; icon: typeof Terminal; label: string; shortcut: string }[] = [
-  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', shortcut: 'Ctrl+D' },
-  { id: 'terminals', icon: Terminal, label: 'Terminals', shortcut: 'Ctrl+T' },
-  { id: 'kanban', icon: Kanban, label: 'Kanban Board', shortcut: 'Ctrl+K' },
-  { id: 'qc', icon: ShieldCheck, label: 'QC Testing', shortcut: 'Ctrl+Q' },
-  { id: 'insights', icon: Sparkles, label: 'Chat', shortcut: 'Ctrl+I' },
-  { id: 'code-review', icon: GitPullRequestDraft, label: 'Code Review', shortcut: 'Ctrl+R' },
-  { id: 'settings', icon: Settings, label: 'Settings', shortcut: 'Ctrl+S' },
+const navItems: { id: ViewType; icon: typeof Terminal; label: string; shortcut?: string }[] = [
+  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', shortcut: `${modLabel}D` },
+  { id: 'terminals', icon: Terminal, label: 'Terminals', shortcut: `${modLabel}T` },
+  { id: 'kanban', icon: Kanban, label: 'Kanban Board', shortcut: `${modLabel}K` },
+  // Cmd+Q quits on mac, so QC has no shortcut there
+  { id: 'qc', icon: ShieldCheck, label: 'QC Testing', shortcut: isMac ? undefined : `${modLabel}Q` },
+  { id: 'insights', icon: Sparkles, label: 'Chat', shortcut: `${modLabel}I` },
+  { id: 'code-review', icon: GitPullRequestDraft, label: 'Code Review', shortcut: `${modLabel}R` },
+  { id: 'settings', icon: Settings, label: 'Settings', shortcut: `${modLabel}S` },
 ];
 
 /** Compact app logo — terminal prompt + AI nodes */
@@ -47,6 +50,16 @@ function AppLogo({ className }: { className?: string }) {
 }
 
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
+  // Unread ClickUp Chat messages, kept current by the poller in App even while
+  // the Chat page is closed — otherwise a DM sits unseen until you happen to
+  // click through to it.
+  const chatUnread = useChatStore((s) =>
+    Object.entries(s.unread).reduce(
+      (total, [id, entry]) => (s.muted[id] ? total : total + entry.count),
+      0,
+    ),
+  );
+
   return (
     <div className="w-16 bg-[var(--bg-secondary)] border-r border-[var(--border)] flex flex-col items-center py-4 gap-2">
       {/* App icon */}
@@ -59,7 +72,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
         <button
           key={id}
           onClick={() => onViewChange(id)}
-          title={`${label}  (${shortcut})`}
+          title={shortcut ? `${label}  (${shortcut})` : label}
           className={cn(
             'w-10 h-10 rounded-lg flex items-center justify-center transition-all duration-200 relative',
             'hover:bg-[var(--bg-tertiary)]',
@@ -69,6 +82,14 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           )}
         >
           <Icon className="w-5 h-5" />
+          {id === 'insights' && chatUnread > 0 && (
+            <span
+              title={`${chatUnread} unread message${chatUnread === 1 ? '' : 's'}`}
+              className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[var(--accent)] text-white text-[9px] font-semibold flex items-center justify-center tabular-nums ring-2 ring-[var(--bg-secondary)]"
+            >
+              {chatUnread > 99 ? '99+' : chatUnread}
+            </span>
+          )}
         </button>
       ))}
 
