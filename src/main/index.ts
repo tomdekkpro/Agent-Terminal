@@ -16,6 +16,7 @@ import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handle
 import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
+import { stopPostMergeQc } from './qc/post-merge-qc';
 import { registerAutoCodeHandlers, stopAutoCodeOrchestrator } from './ipc/auto-code-handlers';
 import { registerKanbanHandlers } from './ipc/kanban-handlers';
 import { registerActivityHandlers } from './ipc/activity-handlers';
@@ -238,6 +239,7 @@ app.on('before-quit', () => {
   stopServiceStatusPolling();
   stopSystemMonitorPolling();
   stopAutoCodeOrchestrator();
+  stopPostMergeQc();
   stopDashboardScheduler();
   flushKanbanTasks();
   flushNotices();

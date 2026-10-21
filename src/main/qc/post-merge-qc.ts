@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { execFile, spawn, type ChildProcess } from 'child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, createWriteStream } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -17,10 +17,11 @@ import { debugLog, debugError } from '../../shared/utils';
 // `/dp:qc-demo-auto <task> --unattended`, which posts one report and one round
 // comment and hands the task back in "ready for testing" for the human tester.
 //
-// Always on for every merge Agent Terminal makes, the Merge button included —
-// there is no setting to turn it off. A gate that stops it is reported on the
-// task as "AI QC not run: <reason>" and leaves the status alone, the same
-// contract as the skill's own gates.
+// On for every merge Agent Terminal makes, the Merge button included, unless
+// "AI QC after merge" (postMergeQcEnabled) is turned off — for a machine that
+// can't run it, which would otherwise post "AI QC not run" on every merge. A
+// gate that stops it is reported on the task as "AI QC not run: <reason>" and
+// leaves the status alone, the same contract as the skill's own gates.
 //
 // Spec: "Unattended" in dekkpro-docs plugins/dp/skills/qc-demo-auto/SKILL.md.
 
@@ -73,6 +74,10 @@ let ticking = false;
  *  from the moment a round starts its gates, before the process exists. */
 let qcBusy = false;
 let activeRun: ChildProcess | null = null;
+/** Set while the app quits: the round being killed is left in the store as
+ *  `running`, for the next start to report and put back. Reporting it now
+ *  would race the exit and could leave the task in "in testing" unexplained. */
+let shuttingDown = false;
 
 // ─── Store ───────────────────────────────────────────────────
 
@@ -121,6 +126,22 @@ function run(cmd: string, args: string[], cwd: string, timeout = GH_TIMEOUT): Pr
       }
     });
   });
+}
+
+/** Kill a process and everything it started. On Windows the round runs under
+ *  `cmd.exe` (shell: true), and `child.kill()` would stop only that, leaving
+ *  Claude running the QC round. Synchronous, so it completes during quit. */
+function killTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  try {
+    if (process.platform === 'win32') {
+      execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } else {
+      child.kill('SIGTERM');
+    }
+  } catch {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -415,13 +436,14 @@ async function startQc(job: PostMergeQcJob): Promise<void> {
       resolvePromise({ code, error });
     };
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
+      killTree(child);
       finish(null, `timed out after ${QC_RUN_TIMEOUT_MS / 3_600_000} hours`);
     }, QC_RUN_TIMEOUT_MS);
     child.on('close', (code) => finish(code));
     child.on('error', (err) => finish(null, err.message));
   });
   log.end(`\n\nexit ${outcome.code ?? 'none'}${outcome.error ? ` — ${outcome.error}` : ''}\n`);
+  if (shuttingDown) return; // startPostMergeQc reports it on the next start
   removeJob(job);
   await afterRun(job, taskLabel, taskName, sessionId, outcome);
 }
@@ -525,6 +547,10 @@ async function tick(): Promise<void> {
  */
 export function queuePostMergeQc(taskId: string, projectPath: string, merged: Array<{ repo: string | null; prNumber: number; baseBranch?: string }>): void {
   if (merged.length === 0) return;
+  if (!getSettings().postMergeQcEnabled) {
+    debugLog(`[PostMergeQC] Task ${taskId}: AI QC after merge is turned off — not queued`);
+    return;
+  }
   const queue = load();
   let job = queue.find((j) => j.taskId === taskId && j.state === 'waiting');
   if (!job) {
@@ -553,9 +579,11 @@ export function startPostMergeQc(): void {
   void tick();
 }
 
+/** On quit: stop polling and kill a running round with its whole process tree. */
 export function stopPostMergeQc(): void {
+  shuttingDown = true;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
-  activeRun?.kill('SIGTERM');
+  if (activeRun) killTree(activeRun);
   activeRun = null;
 }

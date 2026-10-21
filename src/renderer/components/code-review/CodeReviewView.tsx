@@ -927,6 +927,28 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
                 Other repos searched for an open PR whose branch names the task, so the customerweb or webshop half of a fix is reviewed and merged with the rest. PRs linked on the task are found in any repo. They merge into that repo's release branch, or its develop branch.
               </p>
             </div>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs text-[var(--text-secondary)]">AI QC after merge</div>
+                <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                  Once a merge's demo deploy is green, set the task to "ready for testing" and run <code className="text-[10px]">/dp:qc-demo-auto --unattended</code> on this machine. Needs dp plugin 0.56.0+ for the review project.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateSettings({ postMergeQcEnabled: !settings.postMergeQcEnabled })}
+                title={settings.postMergeQcEnabled ? 'On — turn off to merge without queuing an AI QC round' : 'Off — turn on to QC every merge on demo'}
+                className={cn(
+                  'relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 mt-0.5',
+                  settings.postMergeQcEnabled ? 'bg-green-500' : 'bg-[var(--bg-tertiary)]',
+                )}
+              >
+                <div className={cn(
+                  'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 shadow-sm',
+                  settings.postMergeQcEnabled ? 'translate-x-5' : 'translate-x-0.5',
+                )} />
+              </button>
+            </div>
           </div>
 
           {/* Status info */}

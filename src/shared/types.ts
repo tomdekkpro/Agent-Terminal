@@ -512,6 +512,9 @@ export interface AppSettings {
    *  branch names the task — the customerweb or webshop half of a wp fix.
    *  PRs linked on the task are found in any repo regardless. */
   codeReviewLinkedRepos: string;
+  /** After Agent Terminal merges a task's PRs, run `/dp:qc-demo-auto --unattended`
+   *  on demo once the merge commit's demo deploy is green. */
+  postMergeQcEnabled: boolean;
   /** How Code Review merges a PR, from the Merge button or auto-merge. */
   codeReviewMergeMethod: CodeReviewMergeMethod;
   /** Branch-name prefix that marks release branches, e.g. `Releases/` for `Releases/26.9.1`. */
@@ -1375,6 +1378,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewAutoMerge: false,
   codeReviewRequireTestEvidence: true,
   codeReviewLinkedRepos: 'Dekkpro/customerweb, Dekkpro/dekkpro-webshop',
+  postMergeQcEnabled: true,
   codeReviewMergeMethod: 'squash',
   codeReviewReleaseBranchPrefix: 'Releases/',
   codeReviewReleaseBranch: '',
