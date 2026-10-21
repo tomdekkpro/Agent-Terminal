@@ -180,21 +180,23 @@ async function loadTestEvidence(taskId: string): Promise<TestEvidence[]> {
   return evidence.sort((a, b) => a.postedAt - b.postedAt);
 }
 
-/** When the PR's head commit was committed, epoch ms; null if GitHub won't say.
- *  The commit date, not the push date: code committed at 10:00, tested at
- *  11:00 and pushed at 12:00 was tested. */
-async function headCommittedAt(target: RepoTarget, sha: string): Promise<number | null> {
-  if (!sha) return null;
+/** The PR's head commit: when it was committed (epoch ms; null if GitHub won't
+ *  say) and its parents. The commit date, not the push date: code committed at
+ *  10:00, tested at 11:00 and pushed at 12:00 was tested. The parents let a
+ *  tester-local run of `<parent> + uncommitted` cover the commit made from it. */
+async function headCommit(target: RepoTarget, sha: string): Promise<{ committedAt: number | null; parentShas: string[] }> {
+  if (!sha) return { committedAt: null, parentShas: [] };
   try {
     const out = await ghRun(
-      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/commits/${sha}`, '--jq', '.commit.committer.date'],
+      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/commits/${sha}`, '--jq', '{date: .commit.committer.date, parents: [.parents[].sha]}'],
       target.cwd,
     );
-    const ms = Date.parse(out.trim());
-    return Number.isFinite(ms) ? ms : null;
+    const parsed = JSON.parse(out);
+    const ms = Date.parse(parsed.date);
+    return { committedAt: Number.isFinite(ms) ? ms : null, parentShas: parsed.parents ?? [] };
   } catch (err) {
-    debugError(`[CodeReview] Couldn't read the date of ${target.repo ?? ''}@${sha}:`, err);
-    return null;
+    debugError(`[CodeReview] Couldn't read ${target.repo ?? ''}@${sha}:`, err);
+    return { committedAt: null, parentShas: [] };
   }
 }
 
@@ -219,12 +221,12 @@ async function checkTestEvidence(
 ): Promise<TestEvidenceCheck> {
   if (!getSettings().codeReviewRequireTestEvidence) return { evidence: null, finding: null };
 
-  const [evidence, committedAt, task] = await Promise.all([
+  const [evidence, head, task] = await Promise.all([
     loadTestEvidence(taskId),
-    headCommittedAt(target, headSha),
+    headCommit(target, headSha),
     clickUpProvider.getTask(getSettings(), taskId).catch(() => null),
   ]);
-  const covering = findCoveringEvidence(evidence, { sha: headSha, committedAt });
+  const covering = findCoveringEvidence(evidence, { sha: headSha, ...head });
   const label = prLabel(target, prNumber);
   const short = headSha.slice(0, 7);
   const ticket = (task?.success && task.data?.customId) || 'DP2-XXXXX';

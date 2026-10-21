@@ -20,6 +20,9 @@ export interface ParsedTestEvidence {
   source: TestEvidenceSource;
   /** Commit the run names — tester-local's `Branch: x @ <sha>`, or a dp-evidence line. */
   sha?: string;
+  /** The run tested `sha` plus uncommitted changes — tester-local's
+   *  `@ <sha> + uncommitted …`, the usual state before the PR exists. */
+  uncommitted?: boolean;
   /** The run reported at least one failing case. */
   failed: boolean;
 }
@@ -111,8 +114,15 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
 
   // Skill report headers (dp plugin 0.55). `[\s*_]*` tolerates markdown bold.
   if (/^[\s*_]*LOCAL VERIFICATION\b/im.test(text)) {
-    const sha = text.match(/Branch:\s*\S+\s*@\s*([0-9a-f]{7,40})\b/i)?.[1];
-    return { source: 'tester-local', sha: sha?.toLowerCase(), failed: reportFailed(text) };
+    // "Branch:   fix @ a17912e (+ uncommitted: yes)" per the template, or as
+    // written in practice: "branch Releases/26.9.1 @ bc8ef1013c + uncommitted CSS change".
+    const at = text.match(/\bbranch:?\s+\S+\s*@\s*([0-9a-f]{7,40})\b([^\n]*)/i);
+    return {
+      source: 'tester-local',
+      sha: at?.[1].toLowerCase(),
+      uncommitted: !!at && /\+\s*uncommitted(?!:\s*no\b)/i.test(at[2]),
+      failed: reportFailed(text),
+    };
   }
   if (/^[\s*_]*VERIFICATION ON\b/im.test(text)) {
     return { source: 'tester', failed: reportFailed(text) };
@@ -137,22 +147,37 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
 
 /**
  * The evidence that covers a PR's head: the newest comment that names the head
- * commit, or was posted after it was committed. Null when nothing covers it.
- * `headCommittedAt` null means the commit date couldn't be read — then any
+ * commit, or was posted after it was committed, or tested the head's parent
+ * plus uncommitted changes. Null when nothing covers it.
+ *
+ * The last case is how /dp:tester-local runs before a PR exists: it tests
+ * `<parent> + uncommitted`, then the developer commits that work as the head
+ * and opens the PR, so the report predates the commit it covers. Only the
+ * parent counts — a second commit after the run is untested code.
+ *
+ * `head.committedAt` null means the commit date couldn't be read — then any
  * evidence counts, since freshness can't be judged.
  */
 export function findCoveringEvidence(
   evidence: TestEvidence[],
-  head: { sha: string; committedAt: number | null },
+  head: { sha: string; committedAt: number | null; parentShas?: string[] },
 ): TestEvidence | null {
-  const headSha = head.sha.toLowerCase();
   let best: TestEvidence | null = null;
   for (const e of evidence) {
-    const namesHead = !!e.sha && !!headSha && (headSha.startsWith(e.sha) || e.sha.startsWith(headSha));
+    const namesHead = sameCommit(e.sha, head.sha);
     const postedAfter = head.committedAt === null || e.postedAt > head.committedAt;
-    if ((namesHead || postedAfter) && (!best || e.postedAt > best.postedAt)) best = e;
+    const testedBeforeCommit = !!e.uncommitted && (head.parentShas ?? []).some((p) => sameCommit(e.sha, p));
+    if ((namesHead || postedAfter || testedBeforeCommit) && (!best || e.postedAt > best.postedAt)) best = e;
   }
   return best;
+}
+
+/** Same commit, either sha possibly abbreviated. */
+function sameCommit(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x.startsWith(y) || y.startsWith(x);
 }
 
 /**
