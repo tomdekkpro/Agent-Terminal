@@ -914,6 +914,19 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
                 A PR only merges when it targets this branch and the task's Release version is set and matches it. Leave empty to use the newest active release branch.
               </p>
             </div>
+            <div>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Linked Repos</label>
+              <input
+                type="text"
+                value={settings.codeReviewLinkedRepos ?? ''}
+                onChange={(e) => updateSettings({ codeReviewLinkedRepos: e.target.value })}
+                placeholder="Dekkpro/customerweb, Dekkpro/dekkpro-webshop"
+                className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)]"
+              />
+              <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                Other repos searched for an open PR whose branch names the task, so the customerweb or webshop half of a fix is reviewed and merged with the rest. PRs linked on the task are found in any repo. They merge into that repo's release branch, or its develop branch.
+              </p>
+            </div>
           </div>
 
           {/* Status info */}

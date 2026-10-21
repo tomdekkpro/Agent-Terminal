@@ -508,6 +508,10 @@ export interface AppSettings {
    *  a /dp:tester-local, /dp:tester or /dp:qc-demo report, or a `test:manual`
    *  note. Without it the review fails and the task goes to "review failed". */
   codeReviewRequireTestEvidence: boolean;
+  /** Other repos (`owner/name`, comma-separated) searched for open PRs whose
+   *  branch names the task — the customerweb or webshop half of a wp fix.
+   *  PRs linked on the task are found in any repo regardless. */
+  codeReviewLinkedRepos: string;
   /** How Code Review merges a PR, from the Merge button or auto-merge. */
   codeReviewMergeMethod: CodeReviewMergeMethod;
   /** Branch-name prefix that marks release branches, e.g. `Releases/` for `Releases/26.9.1`. */
@@ -1370,6 +1374,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewTagName: 'reviewpass',
   codeReviewAutoMerge: false,
   codeReviewRequireTestEvidence: true,
+  codeReviewLinkedRepos: 'Dekkpro/customerweb, Dekkpro/dekkpro-webshop',
   codeReviewMergeMethod: 'squash',
   codeReviewReleaseBranchPrefix: 'Releases/',
   codeReviewReleaseBranch: '',

@@ -472,9 +472,26 @@ function createPRLookup(projectPath: string | undefined): PRLookup {
   };
 }
 
+/** Other repos a task's PRs can live in (`owner/name`), from settings. */
+function linkedRepos(): string[] {
+  return (getSettings().codeReviewLinkedRepos || '')
+    .split(/[\s,]+/)
+    .map((r) => r.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$|\/$/g, ''))
+    .filter((r) => /^[^/\s]+\/[^/\s]+$/.test(r));
+}
+
+/** `text` names the ticket `id` as a whole id: DP2-2657 is not in a branch
+ *  for DP2-26572. Case-insensitive. */
+function mentionsId(text: string | undefined, id: string): boolean {
+  if (!text) return false;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![a-z0-9])${escaped}(?![0-9])`, 'i').test(text);
+}
+
 /**
  * Try all methods to find PRs: task fields, branch/title matching against the
- * selected repo's open-PR list, and the task's comment thread.
+ * selected repo's open-PR list, branch matching in the linked repos, and the
+ * task's comment thread.
  *
  * The comment thread is always read. It used to be skipped once a PR had been
  * found by branch, but a task fixed in two repos usually has its second PR
@@ -509,25 +526,28 @@ async function findPRsForTask(
   // 1. Check task name + description — already in memory, costs nothing.
   addPRs(extractPRsFromTask(task));
 
-  // 2. Match the custom ID (e.g. DP2-1234) against open PR titles and branch
-  //    names, and the internal task id against branches (e.g. task/86d28ttjq).
-  //    Only in the selected repo: other repos' PRs come from explicit links,
-  //    since a docs or tooling PR that merely mentions the ticket id must not
-  //    be pulled into the review and merged.
-  const openPRs = await lookup.openPRs(null);
-  if (openPRs) {
-    const customLower = task.customId?.toLowerCase();
-    const sanitizedId = task.customId?.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    const internalLower = task.id.toLowerCase();
+  // 2. Match the custom ID (e.g. DP2-1234) against open PR branch names, and
+  //    the internal task id against branches (e.g. task/86d28ttjq):
+  //    - in the selected repo, PR titles too;
+  //    - in the linked repos (customerweb, webshop), branch names only. A
+  //      task's PR there is usually linked in a comment, but when nobody
+  //      posted the link it was never reviewed or merged — and the wp half of
+  //      the fix merged alone. Branch only, and only in listed repos, so a
+  //      docs or tooling PR that merely mentions the ticket id is never
+  //      pulled into the review and merged.
+  const ids = [task.customId, task.customId?.replace(/[^a-zA-Z0-9_-]/g, '-'), task.id].filter((id): id is string => !!id);
+  const searches: Array<{ repo: string | null; titles: boolean }> = [
+    { repo: null, titles: true },
+    ...linkedRepos().filter((repo) => !sameRepo(repo, mainRepo)).map((repo) => ({ repo, titles: false })),
+  ];
+  for (const search of searches) {
+    const openPRs = await lookup.openPRs(search.repo);
+    if (!openPRs) continue;
     for (const [prNumber, meta] of openPRs.byNumber) {
-      const branch = (meta.branch || '').toLowerCase();
-      const title = (meta.title || '').toLowerCase();
-      const matchesCustomId =
-        !!customLower && !!sanitizedId &&
-        (branch.includes(customLower) || branch.includes(sanitizedId) ||
-          title.includes(customLower) || title.includes(sanitizedId));
-      if (matchesCustomId || branch.includes(internalLower)) {
-        addPRs([{ prNumber, prUrl: meta.url ?? null, repo: mainRepo }]);
+      const branchMatch = ids.some((id) => mentionsId(meta.branch, id));
+      const titleMatch = search.titles && !!task.customId && mentionsId(meta.title, task.customId);
+      if (branchMatch || titleMatch) {
+        addPRs([{ prNumber, prUrl: meta.url ?? null, repo: search.repo ?? mainRepo }]);
       }
     }
   }
@@ -788,9 +808,38 @@ async function getReleaseBranch(projectPath: string, refresh = false): Promise<C
   return { branch, source: branch ? 'detected' : 'none', prefix, repo: target.repo ?? undefined };
 }
 
-/** Where PRs in a repo with no release branches merge. customerweb is
- *  trunk-based: everything lands in Develop and is cherry-picked to production. */
-const TRUNK_INTEGRATION_BRANCH = 'Develop';
+const INTEGRATION_REFS_QUERY = `query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    refs(refPrefix: "refs/heads/", query: "develop", first: 100, orderBy: { field: ALPHABETICAL, direction: ASC }) { nodes { name } }
+  }
+}`;
+const integrationBranchCache = new Map<string, { branch: string | null; timestamp: number }>();
+
+/**
+ * Where PRs merge in a repo with no release branches: its develop branch.
+ * customerweb lands in `Develop`, dekkpro-webshop in `develop` — branch names
+ * are case-sensitive, so the real name is read from GitHub rather than
+ * assumed. Null when there is none; the default branch is never used instead,
+ * since in these repos it is production (`main`).
+ */
+async function detectIntegrationBranch(target: RepoTarget): Promise<string | null> {
+  const slug = target.repo ?? await repoOfPath(target.cwd);
+  if (!slug) throw new Error(`Couldn't tell which GitHub repo ${target.cwd} is`);
+  const hit = integrationBranchCache.get(slug.toLowerCase());
+  if (hit && Date.now() - hit.timestamp < RELEASE_BRANCH_TTL) return hit.branch;
+
+  const [owner, name] = slug.split('/');
+  const out = await ghRun(
+    ['api', 'graphql', '-f', `query=${INTEGRATION_REFS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`],
+    target.cwd,
+  );
+  const names: string[] = (JSON.parse(out)?.data?.repository?.refs?.nodes ?? []).map((n: { name: string }) => n.name);
+  const matches = names.filter((n) => n.toLowerCase() === 'develop');
+  const branch = matches.includes('Develop') ? 'Develop' : matches[0] ?? null;
+  debugLog(`[CodeReview] Integration branch for ${slug}: ${branch ?? '(none)'}`);
+  integrationBranchCache.set(slug.toLowerCase(), { branch, timestamp: Date.now() });
+  return branch;
+}
 
 const FAILING_CHECK_STATES = new Set(['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE']);
 
@@ -821,7 +870,7 @@ function summarizeChecks(rollup: any[]): { failing: string[]; pending: string[] 
  * planned at all, must not land in 26.9.1 — and the PR must target:
  *  - in the selected repo: that release branch;
  *  - in another repo (a task fixed in both wp and customerweb): that repo's
- *    own current release branch, or Develop if it has none.
+ *    own current release branch, or its develop branch if it has none.
  *
  * Returns a human-readable reason when it may not merge, null when it may.
  */
@@ -841,7 +890,10 @@ async function checkMergeReadiness(
   }
   const expectedBase = target.isMain
     ? release.branch
-    : (await detectReleaseBranch(target, release.prefix)) ?? TRUNK_INTEGRATION_BRANCH;
+    : (await detectReleaseBranch(target, release.prefix)) ?? await detectIntegrationBranch(target);
+  if (!expectedBase) {
+    return `${target.repo} has no release branch and no develop branch, so there is no branch to merge into from here. Merge ${prLabel(target, pr.number)} by hand.`;
+  }
   if (pr.baseRefName !== expectedBase) {
     const where = target.isMain ? 'the current release branch is' : `${target.repo} merges into`;
     return `PR targets "${pr.baseRefName}", but ${where} "${expectedBase}". Retarget the PR before merging.`;
