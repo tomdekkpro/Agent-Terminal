@@ -29,6 +29,7 @@
 - **Multi-agent support** — Plug-in architecture for AI agents: Claude, GitHub Copilot, Gemini, Aider, and Qwen — each with model selection and usage tracking
 - **Insights (AI Chat)** — Chat with any supported agent from a dedicated view with session history and model selection
 - **Code Review** — Automated PR code review across multiple lists with severity ratings, findings grouped by file, and configurable review intervals
+- **AI QC after every merge** — Every PR Agent Terminal merges (auto-merge or the Merge button) is QC'd on demo without anyone present: once the demo deploy of the merge commit is green it runs `dp-cu release-version`, sets "ready for testing" and runs `/dp:qc-demo-auto <task> --unattended` (dp plugin 0.56.0+). A gate that stops it posts `AI QC not run: <reason>` on the task. Always on; there is no setting to turn it off
 - **QC Testing** — Quality check view for running and tracking test results
 - **Task management** — Unified provider system supporting **ClickUp** and **Jira** — pick tasks, create branches, track status, and post comments
 - **Time tracking** — Start/stop timer per terminal, automatically synced to your task manager

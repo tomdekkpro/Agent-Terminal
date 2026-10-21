@@ -11,6 +11,7 @@ import { ClickUpProvider } from './providers/clickup';
 import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from './providers/agent-registry';
 import { getProjects } from '../project/project-store';
+import { queuePostMergeQc, startPostMergeQc } from '../qc/post-merge-qc';
 
 const clickUpProvider = new ClickUpProvider();
 
@@ -879,6 +880,12 @@ async function mergeTaskPullRequests(
       sendReviewEvent(getWindow, { type: 'merge', taskId, prNumber: e.req.prNumber, prRepo, mergeStatus: 'blocked', message: outcome.message });
       if (options.auto) blockedAuto.push(e);
     }
+  }
+  // Nobody runs /dp:ship's QC step for a merge made here, so queue the AI QC
+  // round now; it starts once demo has deployed the merge commit.
+  const merged = entries.filter((e) => e.outcome!.merged);
+  if (merged.length > 0) {
+    queuePostMergeQc(taskId, projectPath, merged.map((e) => ({ repo: e.target.repo, prNumber: e.req.prNumber, baseBranch: e.outcome!.baseBranch })));
   }
   if (blockedAuto.length > 0) {
     // One comment for the task, not one per PR — the held-back PRs only make
@@ -1798,6 +1805,9 @@ export function registerCodeReviewHandlers(
 ): void {
   // Auto-start scheduler if enabled in settings
   setTimeout(() => {
+    // Always, not behind the scheduler toggle: a Merge-button merge queues
+    // the AI QC round too, and a queued round must survive a restart.
+    startPostMergeQc();
     const settings = getSettings();
     if (settings.codeReviewEnabled && settings.codeReviewProjectPath) {
       debugLog('[CodeReview] Auto-starting scheduler from settings');
