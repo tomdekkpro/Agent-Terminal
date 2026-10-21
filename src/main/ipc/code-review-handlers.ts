@@ -12,6 +12,15 @@ import { debugLog, debugError } from '../../shared/utils';
 import { agentRegistry } from './providers/agent-registry';
 import { getProjects } from '../project/project-store';
 import { queuePostMergeQc, startPostMergeQc } from '../qc/post-merge-qc';
+import {
+  type TestEvidence,
+  MIN_MANUAL_NOTE_LENGTH,
+  TEST_EVIDENCE_FINDING_FILE,
+  TEST_EVIDENCE_FINDING_MARKER,
+  describeTestEvidence,
+  findCoveringEvidence,
+  parseTestEvidence,
+} from '../../shared/test-evidence';
 
 const clickUpProvider = new ClickUpProvider();
 
@@ -139,6 +148,136 @@ async function hasApprovalComment(taskId: string): Promise<boolean> {
     debugError('[CodeReview] Failed to check approval comments:', err);
   }
   return false;
+}
+
+// ─── Test evidence gate ──────────────────────────────────────
+// A review only passes code the developer has tested. The proof is a ClickUp
+// comment — a /dp:tester-local (or tester / qc-demo) report, or a
+// `test:manual` note — that names the PR's head commit or came after it. See
+// shared/test-evidence.ts for what is recognised.
+
+/** Test evidence among the task's human comments, oldest first. Throws when the
+ *  comments can't be read, so a ClickUp hiccup errors the review instead of
+ *  failing the task. */
+async function loadTestEvidence(taskId: string): Promise<TestEvidence[]> {
+  const result = await clickUpProvider.getComments(getSettings(), taskId);
+  if (!result.success) {
+    throw new Error(`Couldn't read the task's comments to check test evidence: ${result.error}`);
+  }
+  const evidence: TestEvidence[] = [];
+  for (const comment of result.data) {
+    const text = extractCommentText(comment).trim();
+    if (!text || isBotComment(text)) continue;
+    const parsed = parseTestEvidence(text);
+    if (!parsed) continue;
+    evidence.push({
+      ...parsed,
+      commentId: String(comment.id),
+      author: comment.user?.username || 'unknown',
+      postedAt: Number(comment.date) || 0,
+    });
+  }
+  return evidence.sort((a, b) => a.postedAt - b.postedAt);
+}
+
+/** When the PR's head commit was committed, epoch ms; null if GitHub won't say.
+ *  The commit date, not the push date: code committed at 10:00, tested at
+ *  11:00 and pushed at 12:00 was tested. */
+async function headCommittedAt(target: RepoTarget, sha: string): Promise<number | null> {
+  if (!sha) return null;
+  try {
+    const out = await ghRun(
+      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/commits/${sha}`, '--jq', '.commit.committer.date'],
+      target.cwd,
+    );
+    const ms = Date.parse(out.trim());
+    return Number.isFinite(ms) ? ms : null;
+  } catch (err) {
+    debugError(`[CodeReview] Couldn't read the date of ${target.repo ?? ''}@${sha}:`, err);
+    return null;
+  }
+}
+
+type TestEvidenceCheck = {
+  /** The evidence that covers the PR's head, when there is passing evidence. */
+  evidence: TestEvidence | null;
+  /** The finding to fail the review with, when there is none (or it failed). */
+  finding: CodeReviewFinding | null;
+};
+
+/**
+ * Does the task have passing test evidence for this PR's head? Returns a
+ * critical finding when it doesn't, which fails the review like any other
+ * critical finding: failure comment, "review failed", no pass tag, no merge.
+ * Always passes when the gate is turned off in settings.
+ */
+async function checkTestEvidence(
+  taskId: string,
+  target: RepoTarget,
+  prNumber: number,
+  headSha: string,
+): Promise<TestEvidenceCheck> {
+  if (!getSettings().codeReviewRequireTestEvidence) return { evidence: null, finding: null };
+
+  const [evidence, committedAt, task] = await Promise.all([
+    loadTestEvidence(taskId),
+    headCommittedAt(target, headSha),
+    clickUpProvider.getTask(getSettings(), taskId).catch(() => null),
+  ]);
+  const covering = findCoveringEvidence(evidence, { sha: headSha, committedAt });
+  const label = prLabel(target, prNumber);
+  const short = headSha.slice(0, 7);
+  const ticket = (task?.success && task.data?.customId) || 'DP2-XXXXX';
+  const howToTest = `Run \`/dp:tester-local ${ticket}\` on the branch, or post a comment on this task that starts with \`test:manual\` followed by what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters). Then move the task back to review.`;
+
+  if (covering && !covering.failed) {
+    debugLog(`[CodeReview] Task ${taskId} ${label} tested: ${describeTestEvidence(covering)}`);
+    return { evidence: covering, finding: null };
+  }
+
+  if (covering?.failed) {
+    return {
+      evidence: null,
+      finding: {
+        severity: 'critical',
+        file: TEST_EVIDENCE_FINDING_FILE,
+        description: `${label}: the latest test run (${describeTestEvidence(covering)}) reported failing cases. ${TEST_EVIDENCE_FINDING_MARKER}, and these tests did not pass.`,
+        suggestion: `Fix the failing cases and test again. ${howToTest}`,
+      },
+    };
+  }
+
+  const stale = evidence.length > 0
+    ? ` The task has older test evidence (latest: ${describeTestEvidence(evidence[evidence.length - 1])}), but it predates the last commit, so it doesn't cover the code under review.`
+    : '';
+  return {
+    evidence: null,
+    finding: {
+      severity: 'critical',
+      file: TEST_EVIDENCE_FINDING_FILE,
+      description: `${label}: no test evidence for the head commit ${short}. ${TEST_EVIDENCE_FINDING_MARKER}.${stale}`,
+      suggestion: howToTest,
+    },
+  };
+}
+
+/** Test findings for each open PR of a task that a developer approved by
+ *  comment — empty when every one is tested. */
+async function approvalTestGaps(projectPath: string, taskId: string, prs: PRInfo[]): Promise<CodeReviewFinding[]> {
+  const findings: CodeReviewFinding[] = [];
+  for (const pr of prs) {
+    const target = await resolveTarget(projectPath, pr.repo);
+    const info = await fetchPRInfo(target, pr.prNumber);
+    if (info.state !== 'OPEN') continue;
+    const { finding } = await checkTestEvidence(taskId, target, pr.prNumber, info.headSha);
+    if (finding) findings.push(finding);
+  }
+  return findings;
+}
+
+/** The "Tested: …" line of a pass comment, so QC can see how the code was verified. */
+function testedLine(testedBy: string | null | undefined): string {
+  return testedBy ? `\nTested: ${testedBy}.` : '';
 }
 
 function sendReviewEvent(getWindow: () => BrowserWindow | null, event: CodeReviewEvent) {
@@ -1608,23 +1747,38 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
         continue;
       }
 
-      // Check if a developer posted an approval comment (e.g. "review:approve")
-      const approved = await hasApprovalComment(task.id);
-      if (approved) {
-        debugLog(`[CodeReview] Scheduler: task ${task.id} has developer approval comment — auto-approving`);
-        await clickUpProvider.addTag(settings, task.id, tagName);
-        await clickUpProvider.postComment(
-          settings,
-          task.id,
-          `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
-        );
-        clearAllSessionsForTask(task.id);
-        sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'passed' });
-        continue;
-      }
-
       // Find all PRs for this task
       const prs = await findPRsForTask(task, lookup);
+
+      // A developer approval comment (e.g. "review:approve") overrides the AI
+      // findings, but not the test requirement — approved code must still be
+      // tested. A task with no PR has no head to test, so it is approved as before.
+      if (await hasApprovalComment(task.id)) {
+        let untested: CodeReviewFinding[] = [];
+        try {
+          untested = await approvalTestGaps(projectPath, task.id, prs);
+        } catch (err) {
+          debugError(`[CodeReview] Scheduler: test evidence check failed for task ${task.id}:`, err);
+          continue; // retried next cycle
+        }
+        if (untested.length === 0) {
+          debugLog(`[CodeReview] Scheduler: task ${task.id} has developer approval comment — auto-approving`);
+          await clickUpProvider.addTag(settings, task.id, tagName);
+          await clickUpProvider.postComment(
+            settings,
+            task.id,
+            `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+          );
+          clearAllSessionsForTask(task.id);
+          sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'passed' });
+        } else {
+          debugLog(`[CodeReview] Scheduler: task ${task.id} approved but untested — failing review`);
+          await clickUpProvider.postComment(settings, task.id, formatReviewComment(task.name, untested, false));
+          await clickUpProvider.updateStatus(settings, task.id, 'review failed').catch(() => {});
+          sendReviewEvent(getWindow, { type: 'done', taskId: task.id, status: 'failed', findings: untested });
+        }
+        continue;
+      }
 
       // No PR found — ask for it via comment
       if (prs.length === 0) {
@@ -1689,10 +1843,18 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
             result.passed = false;
           }
 
+          // Checked after the AI review, not instead of it, so the developer
+          // gets the code findings and the missing tests in one round.
+          const tested = await checkTestEvidence(task.id, target, prNumber, prInfo.headSha);
+          if (tested.finding) {
+            result.findings.push(tested.finding);
+            result.passed = false;
+          }
+
           const comment = formatReviewComment(prInfo.title, result.findings, result.passed);
 
           if (result.passed) {
-            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — ${prLabel(target, prNumber)} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
+            await clickUpProvider.postComment(settings, task.id, `✅ Code Review Passed — ${prLabel(target, prNumber)} reviewed automatically. No significant issues found.${testedLine(tested.evidence && describeTestEvidence(tested.evidence))}\n\n_Automated by Agent Terminal_`);
             passedPRs.push({ prNumber, repo: target.repo, reviewedHeadSha: prInfo.headSha });
             debugLog(`[CodeReview] Scheduler: task ${task.id} PR #${prNumber} PASSED`);
           } else {
@@ -1916,25 +2078,47 @@ export function registerCodeReviewHandlers(
         sendReviewEvent(getWindow, { type: 'progress', taskId, message: `Checking PR #${prNumber}...` });
         const target = await resolveTarget(projectPath, prRepo);
 
-        // Check if developer posted an approval comment — auto-pass if so
-        const approved = await hasApprovalComment(taskId);
-        if (approved) {
+        const prInfo = await fetchPRInfo(target, prNumber);
+
+        // Check if developer posted an approval comment — auto-pass if so. The
+        // approval overrides the AI findings, not the test requirement: an
+        // untested PR fails even when approved.
+        if (await hasApprovalComment(taskId)) {
+          const tested = prInfo.state === 'OPEN'
+            ? await checkTestEvidence(taskId, target, prNumber, prInfo.headSha)
+            : { evidence: null, finding: null };
+          if (tested.finding) {
+            debugLog(`[CodeReview] Task ${taskId} has developer approval but no test evidence — failing`);
+            sendReviewEvent(getWindow, { type: 'done', taskId, status: 'failed', findings: [tested.finding] });
+            return {
+              success: true,
+              data: {
+                passed: false,
+                findings: [tested.finding],
+                prTitle: prInfo.title,
+                prUrl: prInfo.url,
+                prBranch: prInfo.branch,
+                prBaseBranch: prInfo.baseBranch,
+                prAuthor: prInfo.author,
+                prHeadSha: prInfo.headSha,
+              },
+            };
+          }
           debugLog(`[CodeReview] Task ${taskId} has developer approval — auto-passing`);
           sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
           // Submit the approval
           const settings = getSettings();
           const tagName = settings.codeReviewTagName || 'reviewpass';
+          const testedBy = tested.evidence ? describeTestEvidence(tested.evidence) : undefined;
           await clickUpProvider.addTag(settings, taskId, tagName);
           await clickUpProvider.postComment(
             settings,
             taskId,
-            `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.\n\n_Automated by Agent Terminal_`,
+            `✅ Code Review Approved — Developer confirmed the code is correct via approval comment.${testedLine(testedBy)}\n\n_Automated by Agent Terminal_`,
           );
           clearReviewSession(taskId, prNumber, target.repo);
-          return { success: true, data: { passed: true, findings: [], prTitle: '', prUrl: '', prBranch: '', approved: true } };
+          return { success: true, data: { passed: true, findings: [], prTitle: '', prUrl: '', prBranch: '', approved: true, testedBy } };
         }
-
-        const prInfo = await fetchPRInfo(target, prNumber);
 
         // Only review open PRs
         if (prInfo.state !== 'OPEN') {
@@ -1965,6 +2149,14 @@ export function registerCodeReviewHandlers(
           result.passed = false;
         }
 
+        // After the AI review, so the developer gets code findings and missing
+        // tests in one round.
+        const tested = await checkTestEvidence(taskId, target, prNumber, prInfo.headSha);
+        if (tested.finding) {
+          result.findings.push(tested.finding);
+          result.passed = false;
+        }
+
         for (const finding of result.findings) {
           sendReviewEvent(getWindow, { type: 'finding', taskId, finding });
         }
@@ -1987,6 +2179,7 @@ export function registerCodeReviewHandlers(
             prBaseBranch: prInfo.baseBranch,
             prAuthor: prInfo.author,
             prHeadSha: prInfo.headSha,
+            testedBy: tested.evidence ? describeTestEvidence(tested.evidence) : undefined,
           },
         };
       } catch (error) {
@@ -2000,7 +2193,7 @@ export function registerCodeReviewHandlers(
   // ─── Submit results ─────────────────────────────────────────
   ipcMain.handle(
     IPC_CHANNELS.CODE_REVIEW_SUBMIT,
-    async (_event, projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string, prRepo?: string) => {
+    async (_event, projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string, prRepo?: string, testedBy?: string) => {
       try {
         const settings = getSettings();
         const target = await resolveTarget(projectPath, prRepo);
@@ -2012,7 +2205,7 @@ export function registerCodeReviewHandlers(
           if (!tagResult.success) {
             debugError('[CodeReview] Failed to add tag:', tagResult.error);
           }
-          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — ${prLabel(target, prNumber)} reviewed automatically. No significant issues found.\n\n_Automated by Agent Terminal_`);
+          await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — ${prLabel(target, prNumber)} reviewed automatically. No significant issues found.${testedLine(testedBy)}\n\n_Automated by Agent Terminal_`);
           // Clear the review session — no longer needed
           clearReviewSession(taskId, prNumber, target.repo);
           debugLog('[CodeReview] Review passed, tag added for task:', taskId);
@@ -2084,6 +2277,23 @@ export function registerCodeReviewHandlers(
       }
     },
   );
+
+  // ─── Manual test note ───────────────────────────────────────
+  // Posts the `test:manual` comment the test evidence gate looks for, for a
+  // developer who tested by hand. It is posted as whoever is signed in, so it
+  // stays their word, with their name and the time on it.
+  ipcMain.handle(IPC_CHANNELS.CODE_REVIEW_MARK_TESTED, async (_event, taskId: string, note: string) => {
+    try {
+      const text = (note || '').trim();
+      if (text.length < MIN_MANUAL_NOTE_LENGTH) {
+        return { success: false, error: `Describe what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters).` };
+      }
+      const result = await clickUpProvider.postComment(getSettings(), taskId, `test:manual\n${text}`);
+      return result.success ? { success: true } : { success: false, error: result.error };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to post the test note' };
+    }
+  });
 
   // ─── Add PR manually ────────────────────────────────────────
   ipcMain.handle(

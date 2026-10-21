@@ -165,6 +165,7 @@ export const IPC_CHANNELS = {
   CODE_REVIEW_STOP_ALL: 'code-review:stop-all',
   CODE_REVIEW_SCHEDULER_STATUS: 'code-review:scheduler-status',
   CODE_REVIEW_FORCE_APPROVE: 'code-review:force-approve',
+  CODE_REVIEW_MARK_TESTED: 'code-review:mark-tested',
   CODE_REVIEW_ADD_PR: 'code-review:add-pr',
   CODE_REVIEW_MERGE: 'code-review:merge',
   CODE_REVIEW_MERGE_TASK: 'code-review:merge-task',

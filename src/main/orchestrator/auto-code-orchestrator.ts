@@ -19,6 +19,7 @@ import {
 } from '../kanban/kanban-task-store';
 import { broadcastKanbanEvent } from '../ipc/kanban-handlers';
 import { mapClickupStatusToKanban, statusMatchesAny, primaryStatus } from '../../shared/kanban-status-mapper';
+import { isTestEvidenceOnlyFailure } from '../../shared/test-evidence';
 import { recordActivity } from '../activity/activity-store';
 import type { ActivityLevel, CodeReviewFinding } from '../../shared/types';
 
@@ -836,6 +837,17 @@ class AutoCodeOrchestrator {
     } else if (mode === 'review-fix') {
       if (!reviewFindings) {
         throw new Error('Task is Review Failed but has no Code Review findings comment to act on');
+      }
+      // Failed only because the developer hasn't tested — no code change
+      // fixes that, and a new commit would only void any test evidence.
+      if (isTestEvidenceOnlyFailure(reviewFindings.text)) {
+        this.emitLog({
+          taskId: task.id,
+          message: 'Code Review failed only for missing test evidence — waiting for the developer to test',
+          level: 'info',
+        });
+        this.patch(task.id, { autoCodeState: 'awaiting-review', kanbanStatus: 'review' });
+        return;
       }
     }
 

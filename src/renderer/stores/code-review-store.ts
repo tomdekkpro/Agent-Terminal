@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { TEST_EVIDENCE_FINDING_FILE } from '../../shared/test-evidence';
 import type { CodeReviewEvent, CodeReviewFinding, CodeReviewItem, CodeReviewPR, CodeReviewStatus } from '../../shared/types';
 import { useSettingsStore } from './settings-store';
 
@@ -14,8 +15,11 @@ interface CodeReviewState {
   runAllReviews: (projectPath: string) => Promise<void>;
   stopReview: (taskId: string, prNumber?: number, prRepo?: string) => Promise<void>;
   stopAllReviews: () => Promise<void>;
-  submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string, prRepo?: string) => Promise<void>;
+  submitResult: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: CodeReviewFinding[], prTitle: string, prRepo?: string, testedBy?: string) => Promise<void>;
   forceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string, prRepo?: string) => Promise<void>;
+  /** Post a `test:manual` note for a developer who tested by hand. PRs that
+   *  failed only for missing tests go back to pending, ready to re-review. */
+  markTested: (taskId: string, note: string) => Promise<{ success: boolean; error?: string }>;
   addPR: (projectPath: string, taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
   /** Approve + merge one PR on GitHub after the release-branch checks. */
   mergePR: (projectPath: string, taskId: string, prNumber: number, prRepo?: string) => Promise<void>;
@@ -75,7 +79,7 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     try {
       const result = await window.electronAPI.codeReviewRun(projectPath, taskId, prNumber, prRepo);
       if (result.success) {
-        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, prHeadSha, skipped, approved } = result.data;
+        const { passed, findings, prTitle, prUrl, prBranch, prBaseBranch, prAuthor, prHeadSha, skipped, approved, testedBy } = result.data;
         if (skipped) {
           get().updatePR(taskId, prNumber, { status: 'skipped', prUrl, prBranch, prBaseBranch, prAuthor, prTitle }, prRepo);
           return;
@@ -94,7 +98,7 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
           mergeError: undefined,
         }, prRepo);
         // Auto-submit result
-        await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo);
+        await get().submitResult(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo, testedBy);
         // Not after a `review:approve` override — the AI never passed that
         // code, so it waits for someone to press Merge. And only once EVERY
         // PR of the task has passed: a fix in wp and customerweb merges as a
@@ -149,9 +153,9 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
     }
   },
 
-  submitResult: async (projectPath, taskId, prNumber, passed, findings, prTitle, prRepo) => {
+  submitResult: async (projectPath, taskId, prNumber, passed, findings, prTitle, prRepo, testedBy) => {
     try {
-      await window.electronAPI.codeReviewSubmit(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo);
+      await window.electronAPI.codeReviewSubmit(projectPath, taskId, prNumber, passed, findings, prTitle, prRepo, testedBy);
     } catch (err) {
       // Non-critical — review result is already shown in UI
       console.error('[CodeReview] Failed to submit result:', err);
@@ -167,6 +171,23 @@ export const useCodeReviewStore = create<CodeReviewState>((set, get) => ({
       // Revert on failure
       get().updatePR(taskId, prNumber, { status: 'failed', overridden: undefined }, prRepo);
       console.error('[CodeReview] Failed to force approve:', err);
+    }
+  },
+
+  markTested: async (taskId, note) => {
+    try {
+      const result = await window.electronAPI.codeReviewMarkTested(taskId, note);
+      if (!result.success) return { success: false, error: result.error };
+      const item = get().items.find((i) => i.taskId === taskId);
+      for (const pr of item?.prs ?? []) {
+        const onlyUntested = pr.status === 'failed'
+          && pr.findings.length > 0
+          && pr.findings.every((f) => f.file === TEST_EVIDENCE_FINDING_FILE);
+        if (onlyUntested) get().updatePR(taskId, pr.prNumber, { status: 'pending', findings: [] }, pr.prRepo);
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Failed to post the test note' };
     }
   },
 

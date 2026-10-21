@@ -504,6 +504,10 @@ export interface AppSettings {
   codeReviewTagName: string;
   /** Merge a PR as soon as its AI review passes — still subject to the release-branch check. */
   codeReviewAutoMerge: boolean;
+  /** A review only passes when the task has test evidence for the PR's head —
+   *  a /dp:tester-local, /dp:tester or /dp:qc-demo report, or a `test:manual`
+   *  note. Without it the review fails and the task goes to "review failed". */
+  codeReviewRequireTestEvidence: boolean;
   /** How Code Review merges a PR, from the Merge button or auto-merge. */
   codeReviewMergeMethod: CodeReviewMergeMethod;
   /** Branch-name prefix that marks release branches, e.g. `Releases/` for `Releases/26.9.1`. */
@@ -1365,6 +1369,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
   codeReviewAutoMerge: false,
+  codeReviewRequireTestEvidence: true,
   codeReviewMergeMethod: 'squash',
   codeReviewReleaseBranchPrefix: 'Releases/',
   codeReviewReleaseBranch: '',

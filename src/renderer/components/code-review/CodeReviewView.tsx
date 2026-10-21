@@ -3,12 +3,13 @@ import {
   GitPullRequestDraft, RefreshCw, Play, CheckCircle2, XCircle,
   AlertTriangle, Loader2, ExternalLink, ChevronDown, ChevronRight,
   FolderOpen, Lightbulb, Bug, ShieldAlert, Info, Clock, Timer, Square, List, ThumbsUp, Plus,
-  GitBranch, ArrowRight, User, Check, GitMerge,
+  GitBranch, ArrowRight, User, Check, GitMerge, FlaskConical,
 } from 'lucide-react';
 import { useCodeReviewStore } from '../../stores/code-review-store';
 import { useProjectStore } from '../../stores/project-store';
 import { useSettingsStore } from '../../stores/settings-store';
 import type { CodeReviewItem, CodeReviewPR, CodeReviewFinding, CodeReviewMergeMethod, CodeReviewReleaseBranch, CodeReviewSeverity, TaskManagerList } from '../../../shared/types';
+import { MIN_MANUAL_NOTE_LENGTH, TEST_EVIDENCE_FINDING_FILE } from '../../../shared/test-evidence';
 import { cn } from '../../../shared/utils';
 
 const SEVERITY_CONFIG: Record<CodeReviewSeverity, { icon: typeof Bug; color: string; bg: string; label: string }> = {
@@ -453,6 +454,106 @@ function AddPRInput({
   );
 }
 
+/** Posts a `test:manual` note for a developer who tested by hand — the test
+ *  evidence a review needs when no /dp:tester-local report is on the task. */
+function MarkTestedInput({
+  taskId,
+  untested,
+  onMarkTested,
+}: {
+  taskId: string;
+  /** A review already failed this task for missing tests — open by default. */
+  untested: boolean;
+  onMarkTested: (taskId: string, note: string) => Promise<{ success: boolean; error?: string }>;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [posted, setPosted] = useState(false);
+  const [open, setOpen] = useState(untested);
+
+  useEffect(() => {
+    if (untested) setOpen(true);
+  }, [untested]);
+
+  const submit = async () => {
+    if (busy) return;
+    if (note.trim().length < MIN_MANUAL_NOTE_LENGTH) {
+      setError(`Say what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters).`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await onMarkTested(taskId, note.trim());
+    setBusy(false);
+    if (result.success) {
+      setNote('');
+      setOpen(false);
+      setPosted(true);
+    } else {
+      setError(result.error || 'Failed to post the test note');
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => { setOpen(true); setPosted(false); }}
+        className="mt-2 flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+      >
+        <FlaskConical className="w-3 h-3" />
+        {posted ? 'Test note posted — review again to pass' : 'Mark as tested manually'}
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      {untested && (
+        <div className="flex items-start gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>
+            No test evidence for the latest commit. Run <code className="text-[10px]">/dp:tester-local</code> on the branch, or describe your manual test below. It is posted to ClickUp as a <code className="text-[10px]">test:manual</code> comment under your name.
+          </span>
+        </div>
+      )}
+      <textarea
+        value={note}
+        onChange={(e) => { setNote(e.target.value); setError(null); }}
+        rows={3}
+        placeholder={'What did you test, where, and what happened?\ne.g. Re-import on localhost keeps stock on the original location ✔'}
+        disabled={busy}
+        className="w-full text-xs bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)] disabled:opacity-50 resize-y"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy || !note.trim()}
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium bg-green-500/10 text-green-400 hover:bg-green-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <FlaskConical className="w-3 h-3" />}
+          Post test note
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setNote(''); setError(null); }}
+          className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+      {error && (
+        <div className="flex items-center gap-1.5 text-[11px] text-red-400">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewItemCard({
   item,
   projectPath,
@@ -463,6 +564,8 @@ function ReviewItemCard({
   onMerge,
   onMergeAll,
   onAddPR,
+  requireTests,
+  onMarkTested,
 }: {
   item: CodeReviewItem;
   projectPath: string;
@@ -473,6 +576,8 @@ function ReviewItemCard({
   onMerge: (taskId: string, pr: CodeReviewPR) => void;
   onMergeAll: (taskId: string) => void;
   onAddPR: (taskId: string, prInput: string) => Promise<{ success: boolean; error?: string }>;
+  requireTests: boolean;
+  onMarkTested: (taskId: string, note: string) => Promise<{ success: boolean; error?: string }>;
 }) {
   const status = STATUS_CONFIG[item.status] || STATUS_CONFIG.pending;
   const StatusIcon = status.icon;
@@ -563,6 +668,13 @@ function ReviewItemCard({
               />
             ))}
             <AddPRInput taskId={item.taskId} projectPath={projectPath} onAddPR={onAddPR} compact />
+            {requireTests && (
+              <MarkTestedInput
+                taskId={item.taskId}
+                untested={item.prs.some((p) => p.findings.some((f) => f.file === TEST_EVIDENCE_FINDING_FILE))}
+                onMarkTested={onMarkTested}
+              />
+            )}
           </div>
         )}
       </div>
@@ -828,12 +940,13 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
 // ─── Main View ────────────────────────────────────────────────
 export function CodeReviewView() {
   const store = useCodeReviewStore();
-  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR, mergePR, mergeTask } = store;
+  const { items, loading, error, reviewingAll, loadTasks, runReview, runAllReviews, stopReview, stopAllReviews, forceApprove, addPR, mergePR, mergeTask, markTested } = store;
 
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const taskManagerProvider = useSettingsStore((s) => s.settings.taskManagerProvider);
   const autoMerge = useSettingsStore((s) => s.settings.codeReviewAutoMerge);
+  const requireTests = useSettingsStore((s) => s.settings.codeReviewRequireTestEvidence);
   const releasePrefix = useSettingsStore((s) => s.settings.codeReviewReleaseBranchPrefix);
   const pinnedRelease = useSettingsStore((s) => s.settings.codeReviewReleaseBranch);
   const updateSettings = useSettingsStore((s) => s.updateSettings);
@@ -1018,6 +1131,28 @@ export function CodeReviewView() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => updateSettings({ codeReviewRequireTestEvidence: !requireTests })}
+              title={requireTests
+                ? 'A review only passes when the task has test evidence for the PR\'s latest commit — a /dp:tester-local, /dp:tester or /dp:qc-demo report, or a "test:manual" comment. Without it the task goes to "review failed".'
+                : 'Turn on to fail reviews of PRs the developer has not tested'}
+              className={cn(
+                'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-colors',
+                requireTests
+                  ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                  : 'bg-[var(--bg-tertiary)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+              )}
+            >
+              <FlaskConical className="w-4 h-4" />
+              Require tests
+              <span className={cn('relative w-7 h-4 rounded-full transition-colors', requireTests ? 'bg-green-500' : 'bg-[var(--bg-primary)]')}>
+                <span className={cn(
+                  'absolute top-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-transform',
+                  requireTests ? 'translate-x-3.5' : 'translate-x-0.5',
+                )} />
+              </span>
+            </button>
             <button
               onClick={() => updateSettings({ codeReviewAutoMerge: !autoMerge })}
               title={autoMerge
@@ -1263,6 +1398,8 @@ export function CodeReviewView() {
               onMerge={handleMerge}
               onMergeAll={handleMergeAll}
               onAddPR={handleAddPR}
+              requireTests={requireTests}
+              onMarkTested={markTested}
             />
           ))}
         </div>

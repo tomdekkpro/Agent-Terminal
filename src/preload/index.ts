@@ -293,10 +293,12 @@ const electronAPI = {
   codeReviewGetTasks: (reviewStatuses?: string[], projectPath?: string, listIds?: string[]) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_TASKS, reviewStatuses, projectPath, listIds),
   codeReviewGetPRInfo: (projectPath: string, prNumber: number, prRepo?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_GET_PR_INFO, projectPath, prNumber, prRepo),
   codeReviewRun: (projectPath: string, taskId: string, prNumber: number, prRepo?: string) => ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_RUN, projectPath, taskId, prNumber, prRepo),
-  codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string, prRepo?: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle, prRepo),
+  codeReviewSubmit: (projectPath: string, taskId: string, prNumber: number, passed: boolean, findings: any[], prTitle: string, prRepo?: string, testedBy?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_SUBMIT, projectPath, taskId, prNumber, passed, findings, prTitle, prRepo, testedBy),
   codeReviewForceApprove: (projectPath: string, taskId: string, prNumber: number, prTitle: string, prRepo?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_FORCE_APPROVE, projectPath, taskId, prNumber, prTitle, prRepo),
+  codeReviewMarkTested: (taskId: string, note: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_MARK_TESTED, taskId, note),
   codeReviewAddPR: (projectPath: string, prInput: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.CODE_REVIEW_ADD_PR, projectPath, prInput),
   codeReviewMerge: (projectPath: string, taskId: string, prNumber: number, options?: { reviewedHeadSha?: string; auto?: boolean; prRepo?: string }) =>
