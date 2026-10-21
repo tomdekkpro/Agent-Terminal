@@ -14,6 +14,8 @@ const NOTIFY_KINDS = new Set<string>([
   'qc-failed',
   'review-rejected',
   'review-failed',
+  'post-merge-qc-not-run',
+  'post-merge-qc-failed',
 ]);
 
 /** Fire a native OS notification for an activity event when appropriate.
