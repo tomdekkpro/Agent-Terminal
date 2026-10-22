@@ -3,9 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      img-src carries two ClickUp hosts: attachments.clickup.com serves member
+      profile pictures (avatars in Chat, comments and the board), and
+      *.clickup-attachments.com serves images pasted into messages and comments.
+      The wildcard is required, not lazy — that host is per-workspace
+      (t2197293.p.clickup-attachments.com), so it differs for every install.
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://avatars.githubusercontent.com https://cdn.jsdelivr.net; frame-src http://localhost:* http://127.0.0.1:* https://localhost:*;"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://avatars.githubusercontent.com https://cdn.jsdelivr.net https://attachments.clickup.com https://*.clickup-attachments.com; frame-src http://localhost:* http://127.0.0.1:* https://localhost:*;"
     />
     <!-- Display + body + mono fonts (graceful fallback to system stack when offline) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

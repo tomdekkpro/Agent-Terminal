@@ -5,6 +5,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { useDevServerStore } from '../../stores/dev-server-store';
 import { registerOutputCallback, unregisterOutputCallback } from '../../stores/terminal-store';
+import { useSettingsStore } from '../../stores/settings-store';
+import { terminalFontFamily, terminalFontSize } from '../../lib/terminal-font';
 import { cn } from '../../../shared/utils';
 import type { DevServerType } from '../../../shared/types';
 
@@ -105,11 +107,13 @@ export function DevServerLogPanel() {
     // Register output callback early to buffer data
     registerOutputCallback(tid, (data) => safeWrite(data));
 
+    // Log panel runs one point smaller than the main terminals
+    const fontSettings = useSettingsStore.getState().settings;
     const xterm = new XTerm({
       cursorBlink: true,
       cursorStyle: 'block',
-      fontSize: 13,
-      fontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
+      fontSize: Math.max(8, terminalFontSize(fontSettings) - 1),
+      fontFamily: terminalFontFamily(fontSettings),
       lineHeight: 1.2,
       theme: TERMINAL_THEME,
       allowProposedApi: true,

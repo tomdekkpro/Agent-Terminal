@@ -59,9 +59,11 @@ function safeProjectDir(p?: string): string | undefined {
   return t;
 }
 
-/** Quote a (already-validated, metachar-free) path for a shell:true command line. */
+/** Quote a (already-validated, metachar-free) path for the Windows shell:true
+ *  command line. Elsewhere claude is spawned without a shell, so argv is passed
+ *  verbatim and quotes would become part of the path. */
 function shellQuote(p: string): string {
-  return process.platform === 'win32' ? `"${p}"` : `'${p}'`;
+  return process.platform === 'win32' ? `"${p}"` : p;
 }
 
 /**
@@ -206,7 +208,7 @@ function runClaude(prompt: string, cwd: string, addDir?: string, allowedTools?: 
     const env = { ...process.env };
     delete env.CLAUDECODE;
 
-    const child = spawn('claude', args, { env, cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', args, { env, cwd, shell: process.platform === 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin?.write(prompt);
     child.stdin?.end();
 
@@ -296,10 +298,13 @@ function tick(getWindow: () => BrowserWindow | null): void {
   const today = localDate(now);
   for (const notice of listNotices()) {
     if (!notice.enabled || !notice.scheduleTime) continue;
-    if (notice.scheduleTime !== hhmm) continue;
-    if (notice.lastRunDate === today) continue;
+    if (notice.lastRunDate === today) continue;   // already ran today
+    // Catch-up: fire once the scheduled minute has passed today, even if the
+    // exact minute was missed (app closed/asleep, poll drift). HH:mm strings are
+    // zero-padded, so lexicographic compare matches time-of-day ordering.
+    if (notice.scheduleTime > hhmm) continue;     // not due yet today
     if (runningIds.has(notice.id)) continue;
-    debugLog(`[Dashboard] Scheduler firing notice "${notice.title}" at ${hhmm}`);
+    debugLog(`[Dashboard] Scheduler firing notice "${notice.title}" (scheduled ${notice.scheduleTime}, now ${hhmm})`);
     void runNotice(notice.id, getWindow);
   }
 }
@@ -308,6 +313,9 @@ function startScheduler(getWindow: () => BrowserWindow | null): void {
   if (schedulerInterval) clearInterval(schedulerInterval);
   // Poll every minute — cheap, and time-of-day granularity is per-minute.
   schedulerInterval = setInterval(() => tick(getWindow), 60_000);
+  // Run once now so a notice already overdue at launch (app was closed/asleep at
+  // its scheduled time) fires immediately instead of waiting up to a minute.
+  tick(getWindow);
   debugLog('[Dashboard] Notice scheduler started');
 }
 

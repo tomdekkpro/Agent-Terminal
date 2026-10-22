@@ -4,6 +4,7 @@ import { TerminalManager } from './terminal/terminal-manager';
 import { saveOutputBuffers } from './terminal/terminal-state-store';
 import { registerTerminalHandlers } from './ipc/terminal-handlers';
 import { registerTaskManagerHandlers } from './ipc/task-manager-handlers';
+import { registerChatHandlers } from './ipc/chat-handlers';
 import { registerSettingsHandlers } from './ipc/settings-handlers';
 import { registerUsageHandlers, stopUsagePolling } from './ipc/usage-handlers';
 import { sessionUsageTracker } from './usage/session-usage-tracker';
@@ -15,6 +16,7 @@ import { registerInsightsHandlers, cleanupInsights } from './ipc/insights-handle
 import { registerTeamHandlers, cleanupTeam } from './ipc/team-handlers';
 import { registerQCHandlers } from './ipc/qc-handlers';
 import { registerCodeReviewHandlers } from './ipc/code-review-handlers';
+import { stopPostMergeQc } from './qc/post-merge-qc';
 import { registerAutoCodeHandlers, stopAutoCodeOrchestrator } from './ipc/auto-code-handlers';
 import { registerKanbanHandlers } from './ipc/kanban-handlers';
 import { registerActivityHandlers } from './ipc/activity-handlers';
@@ -27,13 +29,21 @@ import { registerFilesHandlers } from './ipc/files-handlers';
 import { stopAllDevServers } from './dev-server/dev-server-manager';
 import { cleanupAllQC } from './qc/qc-executor';
 import { initAutoUpdater } from './updater';
+import { setApiLogFile, flush as flushApiLog, getApiLogFile } from './logging/api-log';
 import { IPC_CHANNELS } from '../shared/constants';
 import { registerAllAgents } from './ipc/providers/agents';
 import { initAnalytics, trackAppStarted, trackShutdown } from './analytics/analytics-service';
+import { loadShellPath } from './shell-path';
+
+// Before anything can spawn claude/gh/git/npm — a Finder-launched mac app
+// otherwise has none of the user's PATH.
+loadShellPath();
 
 let mainWindow: BrowserWindow | null = null;
 let terminalManager: TerminalManager | null = null;
 let tray: Tray | null = null;
+/** Set once a real quit starts, so the mac close-to-hide handler lets it through */
+let isQuitting = false;
 
 /** Resolve path to a resource file (works in both dev and packaged) */
 function getResourcePath(filename: string): string {
@@ -43,9 +53,57 @@ function getResourcePath(filename: string): string {
   return join(__dirname, '../../resources', filename);
 }
 
+function setApplicationMenu() {
+  if (process.platform !== 'darwin') {
+    // Remove default menu bar
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  // macOS routes Cmd+C/V/X/A/Z, Cmd+Q/H/M/W through menu roles — with no menu
+  // none of them work. No reload role: Cmd+R would wipe the renderer's state.
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    { role: 'windowMenu' },
+  ]));
+}
+
+function showWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  const trayIcon = nativeImage.createFromPath(getResourcePath('tray-icon.png'));
+  // The 32px icon would render at 32pt in the 22pt mac menu bar
+  tray = new Tray(process.platform === 'darwin' ? trayIcon.resize({ width: 18, height: 18 }) : trayIcon);
+  tray.setToolTip('Agent Terminal');
+  tray.on('click', showWindow);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show', click: showWindow },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+}
+
 function createWindow() {
-  // Remove default menu bar
-  Menu.setApplicationMenu(null);
 
   const iconPath = getResourcePath('icon.png');
 
@@ -57,6 +115,7 @@ function createWindow() {
     backgroundColor: '#1a1a2e',
     icon: iconPath,
     titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 10 },
     frame: process.platform === 'darwin' ? false : true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -78,27 +137,18 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   }
 
+  // On mac the red button hides the window like other mac apps do; terminals,
+  // Auto Code and the renderer's state keep running. Dock click brings it back.
+  mainWindow.on('close', (e) => {
+    if (process.platform === 'darwin' && !isQuitting) {
+      e.preventDefault();
+      mainWindow?.hide();
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
-
-  // Create tray icon
-  const trayIconPath = getResourcePath('tray-icon.png');
-  const trayIcon = nativeImage.createFromPath(trayIconPath);
-  tray = new Tray(trayIcon);
-  tray.setToolTip('Agent Terminal');
-  tray.on('click', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
-    { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() },
-  ]));
 }
 
 function getWindow(): BrowserWindow | null {
@@ -109,6 +159,13 @@ function getWindow(): BrowserWindow | null {
 initAnalytics();
 
 app.whenReady().then(() => {
+  // Point the outbound-API log at userData before anything can issue a request,
+  // so the very first call of the session is recorded.
+  const apiLogPath = join(app.getPath('userData'), 'logs', 'api-requests.log');
+  setApiLogFile(apiLogPath);
+  // eslint-disable-next-line no-console
+  console.log(`[api] request log: ${apiLogPath}`);
+
   // Register all agent providers before anything else
   registerAllAgents();
 
@@ -120,6 +177,7 @@ app.whenReady().then(() => {
 
   registerTerminalHandlers(ipcMain, terminalManager, getWindow);
   registerTaskManagerHandlers(ipcMain);
+  registerChatHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerUsageHandlers(ipcMain, getWindow);
   registerProjectHandlers(ipcMain, getWindow);
@@ -149,8 +207,20 @@ app.whenReady().then(() => {
     await shell.openPath(filePath);
   });
 
+  // Where the outbound-API request log lives, so Settings can offer to open it.
+  ipcMain.handle(IPC_CHANNELS.API_LOG_PATH, async () => {
+    // Flush first — the newest lines are the ones being investigated.
+    await flushApiLog();
+    return getApiLogFile();
+  });
+
+  setApplicationMenu();
   createWindow();
+  createTray();
 });
+
+// Dock icon click on mac
+app.on('activate', showWindow);
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -159,6 +229,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   trackShutdown();
   cleanupInsights();
   cleanupTeam();
@@ -168,9 +239,11 @@ app.on('before-quit', () => {
   stopServiceStatusPolling();
   stopSystemMonitorPolling();
   stopAutoCodeOrchestrator();
+  stopPostMergeQc();
   stopDashboardScheduler();
   flushKanbanTasks();
   flushNotices();
+  void flushApiLog();
   if (terminalManager) {
     // Save output buffers while terminals are still alive
     // (terminals are killed later in will-quit, after renderer has saved state)

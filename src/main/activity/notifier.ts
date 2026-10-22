@@ -10,9 +10,12 @@ const NOTIFY_KINDS = new Set<string>([
   'fix-escalated',
   'fix-failed',
   'pr-auto-merged',
+  'merge-blocked',
   'qc-failed',
   'review-rejected',
   'review-failed',
+  'post-merge-qc-not-run',
+  'post-merge-qc-failed',
 ]);
 
 /** Fire a native OS notification for an activity event when appropriate.

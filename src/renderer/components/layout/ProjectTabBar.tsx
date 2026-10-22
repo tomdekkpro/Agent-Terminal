@@ -8,6 +8,7 @@ import type { AgentProviderMeta, DevServerType } from '../../../shared/types';
 import { ProjectSettingsModal } from '../project/ProjectSettingsModal';
 import { ProjectDevServerActions } from '../shared/ProjectDevServerActions';
 import { NotificationBell } from '../activity/NotificationBell';
+import { modLabel } from '../../lib/platform';
 
 export function ProjectTabBar() {
   const projects = useProjectStore((s) => s.projects);
@@ -174,7 +175,7 @@ export function ProjectTabBar() {
           onDrop={(e) => handleDrop(e, index)}
           onDragEnd={handleDragEnd}
           onClick={() => setActiveProject(project.id)}
-          title={index < 9 ? `${project.name}  (Ctrl+${index + 1})` : project.name}
+          title={index < 9 ? `${project.name}  (${modLabel}${index + 1})` : project.name}
           className={cn(
             'group flex items-center gap-1 px-2 h-7 rounded-md text-xs transition-all min-w-0 shrink-0 cursor-pointer',
             'hover:bg-[var(--bg-tertiary)]',

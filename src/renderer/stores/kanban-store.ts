@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { KanbanTask, KanbanTaskStatus, TaskManagerTask, TaskSearchFilters } from '../../shared/types';
 import { BACKLOG_SORT_API_PARAMS } from '../../shared/types';
+import { isLocalTaskId } from '../../shared/utils';
 import { useSettingsStore } from './settings-store';
 import { useTerminalStore } from './terminal-store';
 import { useProjectStore } from './project-store';
@@ -256,7 +257,13 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     if (settings.taskManagerProvider !== 'clickup') return 0;
 
     const terminals = useTerminalStore.getState().terminals;
-    const taskLinkedTerminals = terminals.filter((term) => term.task?.id);
+    // Local-only tasks have no ClickUp counterpart, so the import path below
+    // cannot resolve them — it would spend a request per boot to be told 401.
+    // A terminal whose local task was deleted from the board stays unlinked;
+    // silently recreating a card the user removed would be worse.
+    const taskLinkedTerminals = terminals.filter(
+      (term) => term.task?.id && !isLocalTaskId(term.task.id),
+    );
     if (taskLinkedTerminals.length === 0) return 0;
 
     const projects = useProjectStore.getState().projects;
@@ -331,18 +338,36 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
 
     set({ backlogLoading: true, backlogError: null });
     try {
+      // Every page 0..depth-1 has been scrolled through already, so all of
+      // them are known to exist — fetch them together rather than one
+      // round-trip at a time. Reloading after scrolling to page 5 used to be
+      // six sequential requests, which is seconds of waiting for pages we
+      // already knew the shape of.
+      const results = await Promise.all(
+        Array.from({ length: depth }, (_, p) =>
+          window.electronAPI
+            .searchTaskManagerTasks('', q.filters, q.listId, p)
+            .catch((err: unknown) => ({
+              success: false as const,
+              error: err instanceof Error ? err.message : 'Failed to load backlog',
+            })),
+        ),
+      );
+
+      if (!results[0].success) {
+        set({ backlogLoading: false, backlogError: results[0].error || 'Failed to load backlog' });
+        return;
+      }
+
+      // Keep the longest run of pages that came back cleanly. Stopping at the
+      // first gap preserves the contiguous ordering the list relies on; the
+      // rest re-load on scroll.
       const all: TaskManagerTask[] = [];
       let lastFetched = 0;
       let hasMore = false;
-      for (let p = 0; p < depth; p++) {
-        const result = await window.electronAPI.searchTaskManagerTasks('', q.filters, q.listId, p);
-        if (!result.success) {
-          if (p === 0) {
-            set({ backlogLoading: false, backlogError: result.error || 'Failed to load backlog' });
-            return;
-          }
-          break; // keep the pages we got — the rest can re-load on scroll
-        }
+      for (let p = 0; p < results.length; p++) {
+        const result = results[p];
+        if (!result.success) break;
         const pageTasks = result.data || [];
         all.push(...pageTasks);
         lastFetched = p;

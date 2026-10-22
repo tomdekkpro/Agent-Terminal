@@ -8,6 +8,8 @@ interface UpdateStatus {
   percent?: number;
   error?: string;
   releaseNotes?: string;
+  /** mac: no in-app install — Download opens the GitHub release page */
+  manual?: boolean;
 }
 
 export function UpdateNotification() {
@@ -25,7 +27,8 @@ export function UpdateNotification() {
   }, []);
 
   const handleDownload = useCallback(async () => {
-    await window.electronAPI.downloadUpdate();
+    const result = await window.electronAPI.downloadUpdate();
+    if (result?.manual) setDismissed(true);
   }, []);
 
   const handleInstall = useCallback(() => {
@@ -79,7 +82,7 @@ export function UpdateNotification() {
               className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
             >
               <Download className="w-3.5 h-3.5" />
-              Download Update
+              {update.manual ? 'Open Download Page' : 'Download Update'}
             </button>
           </>
         )}

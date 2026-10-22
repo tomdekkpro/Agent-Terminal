@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Search, Loader2, AlertTriangle, Check, FolderOpen, List, ChevronDown, User, Users, GitBranch, GitFork } from 'lucide-react';
+import { X, Search, Loader2, AlertTriangle, Check, FolderOpen, List, ChevronDown, User, Users } from 'lucide-react';
 import type { TaskManagerTask, TaskManagerList } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settings-store';
 import { useProjectStore } from '../../stores/project-store';
@@ -36,7 +36,6 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
 
   const [selectedProjectPath, setSelectedProjectPath] = useState<string>('');
   const [baseBranch, setBaseBranch] = useState<string>('');
-  const [useWorktree, setUseWorktree] = useState<boolean>(true);
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TaskManagerTask[]>([]);
@@ -138,7 +137,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
   const handleImport = useCallback(
     async (task: TaskManagerTask) => {
       if (!selectedProjectPath) {
-        setError('Pick a project first — worktrees live inside the project directory.');
+        setError('Pick a project first — tasks live inside a project directory.');
         return;
       }
       setImporting((prev) => new Set(prev).add(task.id));
@@ -148,8 +147,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
           clickupTask: task,
           projectPath: selectedProjectPath,
           projectId: matchedProject?.id,
-          baseBranch: useWorktree ? (baseBranch || undefined) : undefined,
-          useWorktree,
+          baseBranch: baseBranch || undefined,
         });
       } finally {
         setImporting((prev) => {
@@ -159,7 +157,7 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
         });
       }
     },
-    [importTask, selectedProjectPath, projects, baseBranch, useWorktree],
+    [importTask, selectedProjectPath, projects, baseBranch],
   );
 
   if (!open) return null;
@@ -327,54 +325,20 @@ export function ImportTaskModal({ open, onClose }: ImportTaskModalProps) {
             </div>
           </div>
 
-          {/* Workspace mode + (when applicable) base branch — applies to next import */}
+          {/* Base branch — the fork point / merge target used when a task is
+              started in worktree mode. Whether to use a worktree (vs the
+              current branch) is now chosen on the Start button, per launch. */}
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="inline-flex rounded-lg border border-[var(--border)] bg-[var(--bg-tertiary)] p-0.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => setUseWorktree(true)}
-                className={cn(
-                  'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] transition-colors',
-                  useWorktree
-                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]',
-                )}
-                title="Create a dedicated worktree forked from the base branch (recommended)"
-              >
-                <GitFork className="w-3 h-3" />
-                Worktree
-              </button>
-              <button
-                type="button"
-                onClick={() => setUseWorktree(false)}
-                className={cn(
-                  'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] transition-colors',
-                  !useWorktree
-                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]',
-                )}
-                title="Run on the project's currently checked-out branch — no worktree, shares uncommitted state"
-              >
-                <GitBranch className="w-3 h-3" />
-                Current branch
-              </button>
+            <span className="text-[11px] text-[var(--text-muted)] shrink-0" title="Worktrees fork from this branch and PRs merge back into it">
+              Base branch:
+            </span>
+            <div className="flex-1 max-w-xs">
+              <BaseBranchPicker
+                projectPath={selectedProjectPath || undefined}
+                value={baseBranch}
+                onChange={setBaseBranch}
+              />
             </div>
-            {useWorktree ? (
-              <>
-                <span className="text-[11px] text-[var(--text-muted)] shrink-0">Fork from:</span>
-                <div className="flex-1 max-w-xs">
-                  <BaseBranchPicker
-                    projectPath={selectedProjectPath || undefined}
-                    value={baseBranch}
-                    onChange={setBaseBranch}
-                  />
-                </div>
-              </>
-            ) : (
-              <span className="text-[11px] text-[var(--text-muted)] italic">
-                Agent will run in the project's checked-out branch.
-              </span>
-            )}
           </div>
 
           {/* Search */}

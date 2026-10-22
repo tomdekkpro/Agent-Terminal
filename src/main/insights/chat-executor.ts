@@ -116,7 +116,7 @@ function spawnAgentChat(
     const child = spawn(command, finalArgs, {
       env,
       cwd: cwd || undefined,
-      shell: true,
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

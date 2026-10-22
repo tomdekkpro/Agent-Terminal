@@ -90,6 +90,42 @@ async function queryNvidiaGpu(): Promise<GpuInfo[] | null> {
   return gpus.length > 0 ? gpus : null;
 }
 
+/** Query the GPU on macOS via IOAccelerator's PerformanceStatistics — works for
+ *  Apple Silicon and Intel-Mac AMD/Intel GPUs without root. No temperature
+ *  (needs root), which the UI already hides at 0. Apple Silicon memory is
+ *  unified, so total is system RAM unless the GPU reports its own VRAM. */
+async function queryMacGpu(): Promise<GpuInfo[] | null> {
+  const output = await execCommand('ioreg', ['-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator']);
+  if (!output) return null;
+
+  const gpus: GpuInfo[] = [];
+  // One "+-o" block per accelerator
+  for (const block of output.split(/\n(?=\+-o )/)) {
+    const num = (key: string) => {
+      const m = block.match(new RegExp(`"${key}"=(\\d+)`));
+      return m ? Number(m[1]) : undefined;
+    };
+    const utilization = num('Device Utilization %');
+    if (utilization === undefined) continue;
+    const name = block.match(/"model" = <?"?([^">\n]+)"?>?/)?.[1]
+      || block.match(/"IOClass" = "([^"]+)"/)?.[1]
+      || 'GPU';
+    const usedBytes = num('In use system memory') ?? num('vramUsedBytes') ?? 0;
+    const vramMB = num('VRAM,totalMB');
+    const memoryTotal = vramMB ?? Math.round(os.totalmem() / 1024 / 1024);
+    const memoryUsed = Math.round(usedBytes / 1024 / 1024);
+    gpus.push({
+      name,
+      utilization,
+      memoryUsed,
+      memoryTotal,
+      memoryPercent: memoryTotal ? Math.round((memoryUsed / memoryTotal) * 100) : 0,
+      temperature: 0,
+    });
+  }
+  return gpus.length > 0 ? gpus : null;
+}
+
 /** Query GPU info — tries nvidia-smi, caches result and availability */
 async function getGpuInfo(): Promise<GpuInfo[] | null> {
   const now = Date.now();
@@ -104,7 +140,7 @@ async function getGpuInfo(): Promise<GpuInfo[] | null> {
 
   lastGpuPoll = now;
 
-  const result = await queryNvidiaGpu();
+  const result = process.platform === 'darwin' ? await queryMacGpu() : await queryNvidiaGpu();
   if (result) {
     gpuAvailable = true;
     cachedGpuInfo = result;
@@ -118,6 +154,18 @@ async function getGpuInfo(): Promise<GpuInfo[] | null> {
   }
 
   return null;
+}
+
+/** macOS: os.freemem() only counts completely unused pages, so the meter sat
+ *  at 95-99%. Count inactive + speculative pages (reclaimable cache) as free,
+ *  which is close to what Activity Monitor shows. Null → use os.freemem(). */
+async function getMacFreeMem(): Promise<number | null> {
+  const out = await execCommand('vm_stat', []);
+  if (!out) return null;
+  const pageSize = Number(out.match(/page size of (\d+) bytes/)?.[1] ?? 0);
+  const pages = (label: string) => Number(out.match(new RegExp(`${label}:\\s+(\\d+)`))?.[1] ?? 0);
+  if (!pageSize) return null;
+  return (pages('Pages free') + pages('Pages inactive') + pages('Pages speculative')) * pageSize;
 }
 
 /** Collect current system stats */
@@ -139,7 +187,7 @@ async function collectStats(): Promise<SystemMonitorData> {
       : 0;
 
   const totalMem = os.totalmem();
-  const freeMem = os.freemem();
+  const freeMem = (process.platform === 'darwin' && (await getMacFreeMem())) || os.freemem();
   const usedMem = totalMem - freeMem;
 
   const gpu = await getGpuInfo();

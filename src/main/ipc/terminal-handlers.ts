@@ -39,7 +39,7 @@ export function registerTerminalHandlers(
   });
 
   ipcMain.handle(IPC_CHANNELS.TERMINAL_AGENT_LIST, async () => {
-    return { success: true, data: agentRegistry.getAllMeta() };
+    return { success: true, data: await agentRegistry.getAllMetaLive() };
   });
 
   // ─── Legacy Per-Agent Handlers (delegate to unified) ─────────
