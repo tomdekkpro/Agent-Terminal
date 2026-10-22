@@ -13,12 +13,13 @@ import { agentRegistry } from './providers/agent-registry';
 import { getProjects } from '../project/project-store';
 import { queuePostMergeQc, startPostMergeQc } from '../qc/post-merge-qc';
 import {
+  type EvidenceCommit,
   type TestEvidence,
   MIN_MANUAL_NOTE_LENGTH,
   TEST_EVIDENCE_FINDING_FILE,
   TEST_EVIDENCE_FINDING_MARKER,
   describeTestEvidence,
-  findCoveringEvidence,
+  findCoveringEvidenceThroughBaseMerges,
   parseTestEvidence,
 } from '../../shared/test-evidence';
 
@@ -153,7 +154,8 @@ async function hasApprovalComment(taskId: string): Promise<boolean> {
 // ─── Test evidence gate ──────────────────────────────────────
 // A review only passes code the developer has tested. The proof is a ClickUp
 // comment — a /dp:tester-local (or tester / qc-demo) report, or a
-// `test:manual` note — that names the PR's head commit or came after it. See
+// `test:manual` note — that names the PR's head commit or came after it. A
+// merge of the PR's base branch (resolving a conflict) needs no new test. See
 // shared/test-evidence.ts for what is recognised.
 
 /** Test evidence among the task's human comments, oldest first. Throws when the
@@ -180,12 +182,12 @@ async function loadTestEvidence(taskId: string): Promise<TestEvidence[]> {
   return evidence.sort((a, b) => a.postedAt - b.postedAt);
 }
 
-/** The PR's head commit: when it was committed (epoch ms; null if GitHub won't
+/** A commit on the PR: when it was committed (epoch ms; null if GitHub won't
  *  say) and its parents. The commit date, not the push date: code committed at
  *  10:00, tested at 11:00 and pushed at 12:00 was tested. The parents let a
  *  tester-local run of `<parent> + uncommitted` cover the commit made from it. */
-async function headCommit(target: RepoTarget, sha: string): Promise<{ committedAt: number | null; parentShas: string[] }> {
-  if (!sha) return { committedAt: null, parentShas: [] };
+async function readCommit(target: RepoTarget, sha: string): Promise<EvidenceCommit & { parentShas: string[] }> {
+  if (!sha) return { sha, committedAt: null, parentShas: [] };
   try {
     const out = await ghRun(
       ['api', `repos/${target.repo ?? '{owner}/{repo}'}/commits/${sha}`, '--jq', '{date: .commit.committer.date, parents: [.parents[].sha]}'],
@@ -193,11 +195,44 @@ async function headCommit(target: RepoTarget, sha: string): Promise<{ committedA
     );
     const parsed = JSON.parse(out);
     const ms = Date.parse(parsed.date);
-    return { committedAt: Number.isFinite(ms) ? ms : null, parentShas: parsed.parents ?? [] };
+    return { sha, committedAt: Number.isFinite(ms) ? ms : null, parentShas: parsed.parents ?? [] };
   } catch (err) {
     debugError(`[CodeReview] Couldn't read ${target.repo ?? ''}@${sha}:`, err);
-    return { committedAt: null, parentShas: [] };
+    return { sha, committedAt: null, parentShas: [] };
   }
+}
+
+/** True when `sha` is in `branch`'s history. False when GitHub won't say, so
+ *  an unreadable merge is treated as new code. */
+async function isOnBranch(target: RepoTarget, sha: string, branch: string): Promise<boolean> {
+  try {
+    const status = await ghRun(
+      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/compare/${sha}...${encodeURIComponent(branch)}?per_page=1`, '--jq', '.status'],
+      target.cwd,
+    );
+    return ['ahead', 'identical'].includes(status.trim());
+  } catch (err) {
+    debugError(`[CodeReview] Couldn't compare ${target.repo ?? ''}@${sha} with ${branch}:`, err);
+    return false;
+  }
+}
+
+/** Base merges walked back from the head at most. */
+const MAX_BASE_MERGES = 5;
+
+/** The PR's head, then — while it is a merge of the PR's base branch (second
+ *  parent on the base) — the commit the merge was made on, newest first. */
+async function evidenceChain(target: RepoTarget, headSha: string, baseBranch: string): Promise<EvidenceCommit[]> {
+  const chain: EvidenceCommit[] = [];
+  let sha = headSha;
+  while (sha) {
+    const commit = await readCommit(target, sha);
+    chain.push(commit);
+    if (!baseBranch || commit.parentShas.length !== 2 || chain.length > MAX_BASE_MERGES) break;
+    if (!(await isOnBranch(target, commit.parentShas[1], baseBranch))) break;
+    sha = commit.parentShas[0];
+  }
+  return chain;
 }
 
 type TestEvidenceCheck = {
@@ -217,16 +252,17 @@ async function checkTestEvidence(
   taskId: string,
   target: RepoTarget,
   prNumber: number,
-  headSha: string,
+  pr: { headSha: string; baseBranch: string },
 ): Promise<TestEvidenceCheck> {
   if (!getSettings().codeReviewRequireTestEvidence) return { evidence: null, finding: null };
 
-  const [evidence, head, task] = await Promise.all([
+  const { headSha, baseBranch } = pr;
+  const [evidence, chain, task] = await Promise.all([
     loadTestEvidence(taskId),
-    headCommit(target, headSha),
+    evidenceChain(target, headSha, baseBranch),
     clickUpProvider.getTask(getSettings(), taskId).catch(() => null),
   ]);
-  const covering = findCoveringEvidence(evidence, { sha: headSha, ...head });
+  const covering = findCoveringEvidenceThroughBaseMerges(evidence, chain, baseBranch);
   const label = prLabel(target, prNumber);
   const short = headSha.slice(0, 7);
   const ticket = (task?.success && task.data?.customId) || 'DP2-XXXXX';
@@ -271,7 +307,7 @@ async function approvalTestGaps(projectPath: string, taskId: string, prs: PRInfo
     const target = await resolveTarget(projectPath, pr.repo);
     const info = await fetchPRInfo(target, pr.prNumber);
     if (info.state !== 'OPEN') continue;
-    const { finding } = await checkTestEvidence(taskId, target, pr.prNumber, info.headSha);
+    const { finding } = await checkTestEvidence(taskId, target, pr.prNumber, info);
     if (finding) findings.push(finding);
   }
   return findings;
@@ -1899,7 +1935,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
           // Checked after the AI review, not instead of it, so the developer
           // gets the code findings and the missing tests in one round.
-          const tested = await checkTestEvidence(task.id, target, prNumber, prInfo.headSha);
+          const tested = await checkTestEvidence(task.id, target, prNumber, prInfo);
           if (tested.finding) {
             result.findings.push(tested.finding);
             result.passed = false;
@@ -2139,7 +2175,7 @@ export function registerCodeReviewHandlers(
         // untested PR fails even when approved.
         if (await hasApprovalComment(taskId)) {
           const tested = prInfo.state === 'OPEN'
-            ? await checkTestEvidence(taskId, target, prNumber, prInfo.headSha)
+            ? await checkTestEvidence(taskId, target, prNumber, prInfo)
             : { evidence: null, finding: null };
           if (tested.finding) {
             debugLog(`[CodeReview] Task ${taskId} has developer approval but no test evidence — failing`);
@@ -2205,7 +2241,7 @@ export function registerCodeReviewHandlers(
 
         // After the AI review, so the developer gets code findings and missing
         // tests in one round.
-        const tested = await checkTestEvidence(taskId, target, prNumber, prInfo.headSha);
+        const tested = await checkTestEvidence(taskId, target, prNumber, prInfo);
         if (tested.finding) {
           result.findings.push(tested.finding);
           result.passed = false;

@@ -32,6 +32,17 @@ export interface TestEvidence extends ParsedTestEvidence {
   author: string;
   /** When the comment was posted, epoch ms. */
   postedAt: number;
+  /** Set when the evidence covers the commit before one or more merges of the
+   *  PR's base branch: the branch merged in since the run. */
+  baseMergedSince?: string;
+}
+
+/** A commit evidence is checked against. */
+export interface EvidenceCommit {
+  sha: string;
+  /** When it was committed, epoch ms; null if GitHub won't say. */
+  committedAt: number | null;
+  parentShas?: string[];
 }
 
 /** Keywords that open a manual test note. */
@@ -62,7 +73,8 @@ export function testEvidenceSourceLabel(source: TestEvidenceSource): string {
 /** "/dp:tester-local by Tom on 2026-10-21" */
 export function describeTestEvidence(evidence: TestEvidence): string {
   const date = new Date(evidence.postedAt).toISOString().split('T')[0];
-  return `${testEvidenceSourceLabel(evidence.source)} by ${evidence.author} on ${date}`;
+  const merged = evidence.baseMergedSince ? ` (${evidence.baseMergedSince} merged in since)` : '';
+  return `${testEvidenceSourceLabel(evidence.source)} by ${evidence.author} on ${date}${merged}`;
 }
 
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
@@ -160,7 +172,7 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
  */
 export function findCoveringEvidence(
   evidence: TestEvidence[],
-  head: { sha: string; committedAt: number | null; parentShas?: string[] },
+  head: EvidenceCommit,
 ): TestEvidence | null {
   let best: TestEvidence | null = null;
   for (const e of evidence) {
@@ -170,6 +182,31 @@ export function findCoveringEvidence(
     if ((namesHead || postedAfter || testedBeforeCommit) && (!best || e.postedAt > best.postedAt)) best = e;
   }
   return best;
+}
+
+/**
+ * findCoveringEvidence for a head that may be a merge of the PR's base branch.
+ * `chain` is the head, then the commit each base merge was made on (its first
+ * parent), newest first — so a developer who tests, then merges the base in to
+ * resolve a conflict, isn't asked to test again. The merge only brings in code
+ * that is already on the base. Returns the newest covering evidence, marked
+ * with `baseMergedSince` when it covers a commit before a base merge.
+ */
+export function findCoveringEvidenceThroughBaseMerges(
+  evidence: TestEvidence[],
+  chain: EvidenceCommit[],
+  baseBranch: string,
+): TestEvidence | null {
+  let best: TestEvidence | null = null;
+  let mergedSince = false;
+  for (let i = 0; i < chain.length; i++) {
+    const covering = findCoveringEvidence(evidence, chain[i]);
+    if (covering && (!best || covering.postedAt > best.postedAt)) {
+      best = covering;
+      mergedSince = i > 0;
+    }
+  }
+  return best && mergedSince ? { ...best, baseMergedSince: baseBranch } : best;
 }
 
 /** Same commit, either sha possibly abbreviated. */
