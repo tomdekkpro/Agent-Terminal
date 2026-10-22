@@ -7,14 +7,16 @@
  *  - a report posted by the dp plugin skills: /dp:tester-local (the one that
  *    tests unmerged code, so the usual one at review time), /dp:tester,
  *    /dp:qc-demo, /dp:qc-demo-auto;
- *  - a manual test note: a comment with `test:manual` and what was tested.
+ *  - a manual test note: a comment with `test:manual` and what was tested;
+ *  - the developer's hand-off summary, when it has a "Test cases & results"
+ *    section with PASS/FAIL verdicts.
  *
  * Evidence only counts for the code under review: it must name the PR's head
  * commit, or have been posted after that commit was made. A QC round from an
  * earlier attempt says nothing about the code pushed since.
  */
 
-export type TestEvidenceSource = 'tester-local' | 'tester' | 'qc-demo' | 'qc-demo-auto' | 'manual';
+export type TestEvidenceSource = 'tester-local' | 'tester' | 'qc-demo' | 'qc-demo-auto' | 'manual' | 'summary';
 
 export interface ParsedTestEvidence {
   source: TestEvidenceSource;
@@ -64,6 +66,7 @@ const SOURCE_LABELS: Record<TestEvidenceSource, string> = {
   'qc-demo': '/dp:qc-demo',
   'qc-demo-auto': '/dp:qc-demo-auto',
   manual: 'manual test',
+  summary: 'developer test summary',
 };
 
 export function testEvidenceSourceLabel(source: TestEvidenceSource): string {
@@ -111,6 +114,24 @@ function reportFailed(text: string): boolean {
     || /^[\s*_]*ROUND\s+\d+:.*\bFAILED\b/im.test(text);
 }
 
+/** "Test cases & results — LOCAL", "Test cases and results (pre-merge …)",
+ *  "## Test results": the section a developer's hand-off summary reports in. */
+const SUMMARY_HEADING = /^[\s*_#>]*Test (?:cases\s*(?:&|and)\s*)?results\b/im;
+
+/** A case line of a summary: "TC1 PASS — …", "TC13a FAIL …", "REG PASS — …". */
+const SUMMARY_CASE = /^[\s*_>•-]*(?:TC\s*\d+[a-z]*|REG\w*)\b[^\n]*?\b(?:PASS|FAIL)(?:ED)?\b/m;
+
+/** A case line whose verdict is FAIL. reportFailed misses it: "TC3 FAIL" has no
+ *  count, and no word boundary before the 3. */
+const SUMMARY_CASE_FAILED = /^[\s*_>•-]*(?:TC\s*\d+[a-z]*|REG\w*)\s*[:—–-]?\s*FAIL(?:ED)?\b/m;
+
+/** A developer's summary with a test section and at least one case verdict —
+ *  so a description that merely mentions "test results" doesn't count. */
+function isTestSummary(text: string): boolean {
+  const heading = text.search(SUMMARY_HEADING);
+  return heading >= 0 && SUMMARY_CASE.test(text.slice(heading));
+}
+
 /**
  * Recognise test evidence in one comment's text. Returns null for anything
  * else — including a `test:manual` note too short to say what was tested.
@@ -144,6 +165,10 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
       source: /auto-approved/i.test(text) ? 'qc-demo-auto' : 'qc-demo',
       failed: reportFailed(text),
     };
+  }
+
+  if (isTestSummary(text)) {
+    return { source: 'summary', failed: reportFailed(text) || SUMMARY_CASE_FAILED.test(text) };
   }
 
   // The keyword must open the comment, so "please comment test:manual with
