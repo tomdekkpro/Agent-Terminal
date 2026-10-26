@@ -19,7 +19,7 @@ import {
   TEST_EVIDENCE_FINDING_FILE,
   TEST_EVIDENCE_FINDING_MARKER,
   describeTestEvidence,
-  findCoveringEvidenceThroughBaseMerges,
+  findCoveringEvidenceThroughMerges,
   parseTestEvidence,
 } from '../../shared/test-evidence';
 
@@ -154,29 +154,35 @@ async function hasApprovalComment(taskId: string): Promise<boolean> {
 // ─── Test evidence gate ──────────────────────────────────────
 // A review only passes code the developer has tested. The proof is a ClickUp
 // comment — a /dp:tester-local (or tester / qc-demo) report, or a
-// `test:manual` note — that names the PR's head commit or came after it. A
-// merge of the PR's base branch (resolving a conflict) needs no new test. See
+// `test:manual` note, or the developer's write-up with test results — that
+// names the developer's last own commit or came after it. Merges after it
+// (the base, or the branch a stacked PR sits on) need no new test. See
 // shared/test-evidence.ts for what is recognised.
+
+/** Pages of 25 comments read for evidence. ClickUp returns the newest 25 per
+ *  call, and on a busy task — build notices, QC rounds, reviews — the test
+ *  report soon falls off the first page. */
+const EVIDENCE_COMMENT_PAGES = 8;
 
 /** Test evidence among the task's human comments, oldest first. Throws when the
  *  comments can't be read, so a ClickUp hiccup errors the review instead of
  *  failing the task. */
 async function loadTestEvidence(taskId: string): Promise<TestEvidence[]> {
-  const result = await clickUpProvider.getComments(getSettings(), taskId);
+  const result = await clickUpProvider.getTaskComments(getSettings(), taskId, { maxPages: EVIDENCE_COMMENT_PAGES });
   if (!result.success) {
     throw new Error(`Couldn't read the task's comments to check test evidence: ${result.error}`);
   }
   const evidence: TestEvidence[] = [];
-  for (const comment of result.data) {
-    const text = extractCommentText(comment).trim();
+  for (const comment of result.data.comments) {
+    const text = comment.text.trim();
     if (!text || isBotComment(text)) continue;
     const parsed = parseTestEvidence(text);
     if (!parsed) continue;
     evidence.push({
       ...parsed,
-      commentId: String(comment.id),
-      author: comment.user?.username || 'unknown',
-      postedAt: Number(comment.date) || 0,
+      commentId: comment.id,
+      author: comment.user.username,
+      postedAt: comment.createdAtMs,
     });
   }
   return evidence.sort((a, b) => a.postedAt - b.postedAt);
@@ -202,34 +208,18 @@ async function readCommit(target: RepoTarget, sha: string): Promise<EvidenceComm
   }
 }
 
-/** True when `sha` is in `branch`'s history. False when GitHub won't say, so
- *  an unreadable merge is treated as new code. */
-async function isOnBranch(target: RepoTarget, sha: string, branch: string): Promise<boolean> {
-  try {
-    const status = await ghRun(
-      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/compare/${sha}...${encodeURIComponent(branch)}?per_page=1`, '--jq', '.status'],
-      target.cwd,
-    );
-    return ['ahead', 'identical'].includes(status.trim());
-  } catch (err) {
-    debugError(`[CodeReview] Couldn't compare ${target.repo ?? ''}@${sha} with ${branch}:`, err);
-    return false;
-  }
-}
+/** Merges walked back from the head at most. */
+const MAX_MERGES = 20;
 
-/** Base merges walked back from the head at most. */
-const MAX_BASE_MERGES = 5;
-
-/** The PR's head, then — while it is a merge of the PR's base branch (second
- *  parent on the base) — the commit the merge was made on, newest first. */
-async function evidenceChain(target: RepoTarget, headSha: string, baseBranch: string): Promise<EvidenceCommit[]> {
+/** The PR's head, then — while the commit is a merge — its first parent,
+ *  newest first. The last entry is the developer's last own commit. */
+async function evidenceChain(target: RepoTarget, headSha: string): Promise<EvidenceCommit[]> {
   const chain: EvidenceCommit[] = [];
   let sha = headSha;
   while (sha) {
     const commit = await readCommit(target, sha);
     chain.push(commit);
-    if (!baseBranch || commit.parentShas.length !== 2 || chain.length > MAX_BASE_MERGES) break;
-    if (!(await isOnBranch(target, commit.parentShas[1], baseBranch))) break;
+    if (commit.parentShas.length < 2 || chain.length > MAX_MERGES) break;
     sha = commit.parentShas[0];
   }
   return chain;
@@ -252,21 +242,25 @@ async function checkTestEvidence(
   taskId: string,
   target: RepoTarget,
   prNumber: number,
-  pr: { headSha: string; baseBranch: string },
+  pr: { headSha: string },
 ): Promise<TestEvidenceCheck> {
   if (!getSettings().codeReviewRequireTestEvidence) return { evidence: null, finding: null };
 
-  const { headSha, baseBranch } = pr;
+  const { headSha } = pr;
   const [evidence, chain, task] = await Promise.all([
     loadTestEvidence(taskId),
-    evidenceChain(target, headSha, baseBranch),
+    evidenceChain(target, headSha),
     clickUpProvider.getTask(getSettings(), taskId).catch(() => null),
   ]);
-  const covering = findCoveringEvidenceThroughBaseMerges(evidence, chain, baseBranch);
+  const covering = findCoveringEvidenceThroughMerges(evidence, chain);
   const label = prLabel(target, prNumber);
   const short = headSha.slice(0, 7);
+  const ownSha = chain[chain.length - 1]?.sha || headSha;
+  const untested = ownSha === headSha
+    ? `the head commit ${short}`
+    : `commit ${ownSha.slice(0, 7)}, the last one before the merges up to the head ${short}`;
   const ticket = (task?.success && task.data?.customId) || 'DP2-XXXXX';
-  const howToTest = `Run \`/dp:tester-local ${ticket}\` on the branch, or post a comment on this task that starts with \`test:manual\` followed by what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters). Then move the task back to review.`;
+  const howToTest = `Run \`/dp:tester-local ${ticket}\` on the branch, or post a comment on this task with a test section and its results (for example "Test cases & results" with "TC1 PASS" lines, or "Tests: 4/4"), or one that starts with \`test:manual\` followed by what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters). Then move the task back to review.`;
 
   if (covering && !covering.failed) {
     debugLog(`[CodeReview] Task ${taskId} ${label} tested: ${describeTestEvidence(covering)}`);
@@ -293,7 +287,7 @@ async function checkTestEvidence(
     finding: {
       severity: 'critical',
       file: TEST_EVIDENCE_FINDING_FILE,
-      description: `${label}: no test evidence for the head commit ${short}. ${TEST_EVIDENCE_FINDING_MARKER}.${stale}`,
+      description: `${label}: no test evidence for ${untested}. ${TEST_EVIDENCE_FINDING_MARKER}.${stale}`,
       suggestion: howToTest,
     },
   };

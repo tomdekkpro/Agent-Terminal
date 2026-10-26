@@ -8,12 +8,13 @@
  *    tests unmerged code, so the usual one at review time), /dp:tester,
  *    /dp:qc-demo, /dp:qc-demo-auto;
  *  - a manual test note: a comment with `test:manual` and what was tested;
- *  - the developer's hand-off summary, when it has a "Test cases & results"
- *    section with PASS/FAIL verdicts.
+ *  - the developer's own write-up, when it has a test section ("TESTS
+ *    (local)", "Test cases & results", "Unit tests: …") with results in it.
  *
- * Evidence only counts for the code under review: it must name the PR's head
- * commit, or have been posted after that commit was made. A QC round from an
- * earlier attempt says nothing about the code pushed since.
+ * Evidence only counts for the code under review: it must name the developer's
+ * last own commit, or have been posted after it was made. Merge commits don't
+ * count as new code — merging the base, or a branch the PR is stacked on, is
+ * not something the developer is asked to test again.
  */
 
 export type TestEvidenceSource = 'tester-local' | 'tester' | 'qc-demo' | 'qc-demo-auto' | 'manual' | 'summary';
@@ -34,9 +35,8 @@ export interface TestEvidence extends ParsedTestEvidence {
   author: string;
   /** When the comment was posted, epoch ms. */
   postedAt: number;
-  /** Set when the evidence covers the commit before one or more merges of the
-   *  PR's base branch: the branch merged in since the run. */
-  baseMergedSince?: string;
+  /** The evidence covers a commit before one or more merges into the branch. */
+  mergedSince?: boolean;
 }
 
 /** A commit evidence is checked against. */
@@ -76,7 +76,7 @@ export function testEvidenceSourceLabel(source: TestEvidenceSource): string {
 /** "/dp:tester-local by Tom on 2026-10-21" */
 export function describeTestEvidence(evidence: TestEvidence): string {
   const date = new Date(evidence.postedAt).toISOString().split('T')[0];
-  const merged = evidence.baseMergedSince ? ` (${evidence.baseMergedSince} merged in since)` : '';
+  const merged = evidence.mergedSince ? ' (only merges since)' : '';
   return `${testEvidenceSourceLabel(evidence.source)} by ${evidence.author} on ${date}${merged}`;
 }
 
@@ -114,22 +114,23 @@ function reportFailed(text: string): boolean {
     || /^[\s*_]*ROUND\s+\d+:.*\bFAILED\b/im.test(text);
 }
 
-/** "Test cases & results — LOCAL", "Test cases and results (pre-merge …)",
- *  "## Test results": the section a developer's hand-off summary reports in. */
-const SUMMARY_HEADING = /^[\s*_#>]*Test (?:cases\s*(?:&|and)\s*)?results\b/im;
+/** A line that opens a test section of a developer's write-up: "TESTS (local)",
+ *  "Test cases & results — LOCAL", "**Unit tests**: …", "## Testing". */
+const TEST_SECTION = /^[\s*_#>•-]*(?:[\w-]+[ \t]+){0,2}(?:tests?|testing|test cases|test results)\b/im;
 
-/** A case line of a summary: "TC1 PASS — …", "TC13a FAIL …", "REG PASS — …". */
-const SUMMARY_CASE = /^[\s*_>•-]*(?:TC\s*\d+[a-z]*|REG\w*)\b[^\n]*?\b(?:PASS|FAIL)(?:ED)?\b/m;
+/** A result inside a test section: "TC1 PASS", "PASSED", "4/4", "36 / 36",
+ *  "2581 passed". */
+const TEST_RESULT = /\bPASS(?:ED)?\b|\b\d+\s*\/\s*\d+\b|\b\d+\s+[Pp]assed\b/;
 
 /** A case line whose verdict is FAIL. reportFailed misses it: "TC3 FAIL" has no
  *  count, and no word boundary before the 3. */
-const SUMMARY_CASE_FAILED = /^[\s*_>•-]*(?:TC\s*\d+[a-z]*|REG\w*)\s*[:—–-]?\s*FAIL(?:ED)?\b/m;
+const CASE_FAILED = /^[\s*_>•-]*(?:TC\s*\d+[a-z]*|REG\w*|[A-Z]\d+[a-z]?)\s*[:—–-]?\s*FAIL(?:ED)?\b/m;
 
-/** A developer's summary with a test section and at least one case verdict —
- *  so a description that merely mentions "test results" doesn't count. */
-function isTestSummary(text: string): boolean {
-  const heading = text.search(SUMMARY_HEADING);
-  return heading >= 0 && SUMMARY_CASE.test(text.slice(heading));
+/** A developer's write-up with a test section that holds at least one result —
+ *  so a comment that merely mentions testing doesn't count. */
+function isTestWriteUp(text: string): boolean {
+  const section = text.search(TEST_SECTION);
+  return section >= 0 && TEST_RESULT.test(text.slice(section));
 }
 
 /**
@@ -167,8 +168,10 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
     };
   }
 
-  if (isTestSummary(text)) {
-    return { source: 'summary', failed: reportFailed(text) || SUMMARY_CASE_FAILED.test(text) };
+  // Only a case line that says FAIL fails a write-up: its prose often holds a
+  // control run on the unfixed code ("Demo (unfixed): 10 of 10 FAIL").
+  if (isTestWriteUp(text)) {
+    return { source: 'summary', failed: CASE_FAILED.test(text) };
   }
 
   // The keyword must open the comment, so "please comment test:manual with
@@ -210,17 +213,16 @@ export function findCoveringEvidence(
 }
 
 /**
- * findCoveringEvidence for a head that may be a merge of the PR's base branch.
- * `chain` is the head, then the commit each base merge was made on (its first
- * parent), newest first — so a developer who tests, then merges the base in to
- * resolve a conflict, isn't asked to test again. The merge only brings in code
- * that is already on the base. Returns the newest covering evidence, marked
- * with `baseMergedSince` when it covers a commit before a base merge.
+ * findCoveringEvidence for a head that may be a merge. `chain` is the head,
+ * then — while the commit is a merge — its first parent, newest first, ending
+ * at the developer's last own commit. Evidence for any of them covers the PR:
+ * a merge brings in code tested and reviewed elsewhere (the base, or the PR
+ * this one is stacked on). Marked `mergedSince` when it covers a commit before
+ * a merge.
  */
-export function findCoveringEvidenceThroughBaseMerges(
+export function findCoveringEvidenceThroughMerges(
   evidence: TestEvidence[],
   chain: EvidenceCommit[],
-  baseBranch: string,
 ): TestEvidence | null {
   let best: TestEvidence | null = null;
   let mergedSince = false;
@@ -231,7 +233,7 @@ export function findCoveringEvidenceThroughBaseMerges(
       mergedSince = i > 0;
     }
   }
-  return best && mergedSince ? { ...best, baseMergedSince: baseBranch } : best;
+  return best && mergedSince ? { ...best, mergedSince: true } : best;
 }
 
 /** Same commit, either sha possibly abbreviated. */
