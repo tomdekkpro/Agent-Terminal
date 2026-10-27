@@ -592,9 +592,13 @@ async function findPRsForTask(
   //    listing truncated at OPEN_PR_LIMIT — there, a PR missing from
   //    `byNumber` may simply be past the cap, and dropping it would leave the
   //    task showing "No open PR found" even though the PR is open.
+  //    A PR into a side branch (`Releases/26.6.Angular21`) is dropped too: it
+  //    ports the change to a branch that isn't the release the task ships in,
+  //    so it is neither reviewed, tested for, nor merged from here.
   const open: PRInfo[] = [];
   for (const pr of results) {
     const list = await lookup.openPRs(pr.repo);
+    if (isSideBranch(list?.byNumber.get(pr.prNumber)?.baseBranch)) continue;
     if (!list?.complete || list.byNumber.has(pr.prNumber)) open.push(pr);
   }
 
@@ -603,6 +607,13 @@ async function findPRsForTask(
     debugLog(`[CodeReview] Found ${results.length} PR(s) for task ${task.customId || task.id} (${names(results)}), ${open.length} open: ${names(open)}`);
   }
   return open;
+}
+
+/** A release-prefixed branch that isn't a version: `Releases/26.6.Angular21`,
+ *  `Releases/test-master`. */
+function isSideBranch(base: string | undefined): boolean {
+  const prefix = getSettings().codeReviewReleaseBranchPrefix || 'Releases/';
+  return !!base && base.startsWith(prefix) && !parseVersion(base.slice(prefix.length));
 }
 
 /** Fetch PR metadata using gh CLI (no diff — Claude fetches that itself) */
