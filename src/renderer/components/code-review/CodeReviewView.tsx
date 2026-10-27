@@ -514,7 +514,7 @@ function MarkTestedInput({
         <div className="flex items-start gap-2 text-xs text-orange-400 bg-orange-500/10 rounded-lg px-3 py-2">
           <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <span>
-            No test evidence for the latest commit. Run <code className="text-[10px]">/dp:tester-local</code> on the branch, or describe your manual test below. It is posted to ClickUp as a <code className="text-[10px]">test:manual</code> comment under your name.
+            No test evidence on the task. Run <code className="text-[10px]">/dp:tester-local</code> on the branch, or describe your manual test below. It is posted to ClickUp as a <code className="text-[10px]">test:manual</code> comment under your name.
           </span>
         </div>
       )}
@@ -1170,7 +1170,7 @@ export function CodeReviewView() {
               type="button"
               onClick={() => updateSettings({ codeReviewRequireTestEvidence: !requireTests })}
               title={requireTests
-                ? 'A review only passes when the task has test evidence for the PR\'s latest commit — a /dp:tester-local, /dp:tester or /dp:qc-demo report, or a "test:manual" comment. Without it the task goes to "review failed".'
+                ? 'A review only passes when the task has been tested — a /dp:tester-local, /dp:tester or /dp:qc-demo report, or a "test:manual" comment. Without it the task goes to "review failed".'
                 : 'Turn on to fail reviews of PRs the developer has not tested'}
               className={cn(
                 'flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-colors',

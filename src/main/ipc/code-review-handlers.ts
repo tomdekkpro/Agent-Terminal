@@ -13,13 +13,11 @@ import { agentRegistry } from './providers/agent-registry';
 import { getProjects } from '../project/project-store';
 import { queuePostMergeQc, startPostMergeQc } from '../qc/post-merge-qc';
 import {
-  type EvidenceCommit,
   type TestEvidence,
   MIN_MANUAL_NOTE_LENGTH,
   TEST_EVIDENCE_FINDING_FILE,
   TEST_EVIDENCE_FINDING_MARKER,
   describeTestEvidence,
-  findCoveringEvidenceThroughMerges,
   parseTestEvidence,
 } from '../../shared/test-evidence';
 
@@ -188,123 +186,73 @@ async function loadTestEvidence(taskId: string): Promise<TestEvidence[]> {
   return evidence.sort((a, b) => a.postedAt - b.postedAt);
 }
 
-/** A commit on the PR: when it was committed (epoch ms; null if GitHub won't
- *  say) and its parents. The commit date, not the push date: code committed at
- *  10:00, tested at 11:00 and pushed at 12:00 was tested. The parents let a
- *  tester-local run of `<parent> + uncommitted` cover the commit made from it. */
-async function readCommit(target: RepoTarget, sha: string): Promise<EvidenceCommit & { parentShas: string[] }> {
-  if (!sha) return { sha, committedAt: null, parentShas: [] };
-  try {
-    const out = await ghRun(
-      ['api', `repos/${target.repo ?? '{owner}/{repo}'}/commits/${sha}`, '--jq', '{date: .commit.committer.date, parents: [.parents[].sha]}'],
-      target.cwd,
-    );
-    const parsed = JSON.parse(out);
-    const ms = Date.parse(parsed.date);
-    return { sha, committedAt: Number.isFinite(ms) ? ms : null, parentShas: parsed.parents ?? [] };
-  } catch (err) {
-    debugError(`[CodeReview] Couldn't read ${target.repo ?? ''}@${sha}:`, err);
-    return { sha, committedAt: null, parentShas: [] };
-  }
-}
-
-/** Merges walked back from the head at most. */
-const MAX_MERGES = 20;
-
-/** The PR's head, then — while the commit is a merge — its first parent,
- *  newest first. The last entry is the developer's last own commit. */
-async function evidenceChain(target: RepoTarget, headSha: string): Promise<EvidenceCommit[]> {
-  const chain: EvidenceCommit[] = [];
-  let sha = headSha;
-  while (sha) {
-    const commit = await readCommit(target, sha);
-    chain.push(commit);
-    if (commit.parentShas.length < 2 || chain.length > MAX_MERGES) break;
-    sha = commit.parentShas[0];
-  }
-  return chain;
-}
-
 type TestEvidenceCheck = {
-  /** The evidence that covers the PR's head, when there is passing evidence. */
+  /** The task's newest evidence, when it passed. */
   evidence: TestEvidence | null;
   /** The finding to fail the review with, when there is none (or it failed). */
   finding: CodeReviewFinding | null;
 };
 
 /**
- * Does the task have passing test evidence for this PR's head? Returns a
- * critical finding when it doesn't, which fails the review like any other
- * critical finding: failure comment, "review failed", no pass tag, no merge.
- * Always passes when the gate is turned off in settings.
+ * Has the task been tested? Only that, not which commit: the newest evidence
+ * on the task decides, and a fix pushed after it doesn't void it. Returns a
+ * critical finding when there is none, or the newest run failed, which fails
+ * the review like any other critical finding: failure comment, "review
+ * failed", no pass tag, no merge. Always passes when the gate is turned off in
+ * settings.
  */
-async function checkTestEvidence(
-  taskId: string,
-  target: RepoTarget,
-  prNumber: number,
-  pr: { headSha: string },
-): Promise<TestEvidenceCheck> {
+async function checkTestEvidence(taskId: string, target: RepoTarget, prNumber: number): Promise<TestEvidenceCheck> {
   if (!getSettings().codeReviewRequireTestEvidence) return { evidence: null, finding: null };
 
-  const { headSha } = pr;
-  const [evidence, chain, task] = await Promise.all([
+  const [evidence, task] = await Promise.all([
     loadTestEvidence(taskId),
-    evidenceChain(target, headSha),
     clickUpProvider.getTask(getSettings(), taskId).catch(() => null),
   ]);
-  const covering = findCoveringEvidenceThroughMerges(evidence, chain);
+  const latest = evidence[evidence.length - 1] ?? null;
   const label = prLabel(target, prNumber);
-  const short = headSha.slice(0, 7);
-  const ownSha = chain[chain.length - 1]?.sha || headSha;
-  const untested = ownSha === headSha
-    ? `the head commit ${short}`
-    : `commit ${ownSha.slice(0, 7)}, the last one before the merges up to the head ${short}`;
   const ticket = (task?.success && task.data?.customId) || 'DP2-XXXXX';
   const howToTest = `Run \`/dp:tester-local ${ticket}\` on the branch, or post a comment on this task with a test section and its results (for example "Test cases & results" with "TC1 PASS" lines, or "Tests: 4/4"), or one that starts with \`test:manual\` followed by what you tested and the result (at least ${MIN_MANUAL_NOTE_LENGTH} characters). Then move the task back to review.`;
 
-  if (covering && !covering.failed) {
-    debugLog(`[CodeReview] Task ${taskId} ${label} tested: ${describeTestEvidence(covering)}`);
-    return { evidence: covering, finding: null };
+  if (latest && !latest.failed) {
+    debugLog(`[CodeReview] Task ${taskId} ${label} tested: ${describeTestEvidence(latest)}`);
+    return { evidence: latest, finding: null };
   }
 
-  if (covering?.failed) {
+  if (latest?.failed) {
     return {
       evidence: null,
       finding: {
         severity: 'critical',
         file: TEST_EVIDENCE_FINDING_FILE,
-        description: `${label}: the latest test run (${describeTestEvidence(covering)}) reported failing cases. ${TEST_EVIDENCE_FINDING_MARKER}, and these tests did not pass.`,
+        description: `${label}: the latest test run (${describeTestEvidence(latest)}) reported failing cases. ${TEST_EVIDENCE_FINDING_MARKER}, and these tests did not pass.`,
         suggestion: `Fix the failing cases and test again. ${howToTest}`,
       },
     };
   }
 
-  const stale = evidence.length > 0
-    ? ` The task has older test evidence (latest: ${describeTestEvidence(evidence[evidence.length - 1])}), but it predates the last commit, so it doesn't cover the code under review.`
-    : '';
   return {
     evidence: null,
     finding: {
       severity: 'critical',
       file: TEST_EVIDENCE_FINDING_FILE,
-      description: `${label}: no test evidence for ${untested}. ${TEST_EVIDENCE_FINDING_MARKER}.${stale}`,
+      description: `${label}: the task has no test evidence. ${TEST_EVIDENCE_FINDING_MARKER}.`,
       suggestion: howToTest,
     },
   };
 }
 
-/** Test findings for each open PR of a task that a developer approved by
- *  comment — empty when every one is tested. */
+/** The test finding for a task a developer approved by comment, when it has
+ *  an open PR — empty when it is tested. Evidence is per task, so one check
+ *  answers for every PR. */
 async function approvalTestGaps(projectPath: string, taskId: string, prs: PRInfo[]): Promise<CodeReviewFinding[]> {
-  const findings: CodeReviewFinding[] = [];
   for (const pr of prs) {
     const target = await resolveTarget(projectPath, pr.repo);
     const info = await fetchPRInfo(target, pr.prNumber);
     if (info.state !== 'OPEN') continue;
-    const { finding } = await checkTestEvidence(taskId, target, pr.prNumber, info);
-    if (finding) findings.push(finding);
+    const { finding } = await checkTestEvidence(taskId, target, pr.prNumber);
+    return finding ? [finding] : [];
   }
-  return findings;
+  return [];
 }
 
 /** The "Tested: …" line of a pass comment, so QC can see how the code was verified. */
@@ -1940,7 +1888,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
           // Checked after the AI review, not instead of it, so the developer
           // gets the code findings and the missing tests in one round.
-          const tested = await checkTestEvidence(task.id, target, prNumber, prInfo);
+          const tested = await checkTestEvidence(task.id, target, prNumber);
           if (tested.finding) {
             result.findings.push(tested.finding);
             result.passed = false;
@@ -2180,7 +2128,7 @@ export function registerCodeReviewHandlers(
         // untested PR fails even when approved.
         if (await hasApprovalComment(taskId)) {
           const tested = prInfo.state === 'OPEN'
-            ? await checkTestEvidence(taskId, target, prNumber, prInfo)
+            ? await checkTestEvidence(taskId, target, prNumber)
             : { evidence: null, finding: null };
           if (tested.finding) {
             debugLog(`[CodeReview] Task ${taskId} has developer approval but no test evidence — failing`);
@@ -2246,7 +2194,7 @@ export function registerCodeReviewHandlers(
 
         // After the AI review, so the developer gets code findings and missing
         // tests in one round.
-        const tested = await checkTestEvidence(taskId, target, prNumber, prInfo);
+        const tested = await checkTestEvidence(taskId, target, prNumber);
         if (tested.finding) {
           result.findings.push(tested.finding);
           result.passed = false;

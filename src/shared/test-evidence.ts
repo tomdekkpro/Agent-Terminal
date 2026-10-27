@@ -11,10 +11,9 @@
  *  - the developer's own write-up, when it has a test section ("TESTS
  *    (local)", "Test cases & results", "Unit tests: …") with results in it.
  *
- * Evidence only counts for the code under review: it must name the developer's
- * last own commit, or have been posted after it was made. Merge commits don't
- * count as new code — merging the base, or a branch the PR is stacked on, is
- * not something the developer is asked to test again.
+ * Only whether the task was tested is checked, not which commit was: a fix
+ * pushed after the test run doesn't void it. The newest evidence decides — a
+ * run that reported failing cases fails the review until a passing one follows.
  */
 
 export type TestEvidenceSource = 'tester-local' | 'tester' | 'qc-demo' | 'qc-demo-auto' | 'manual' | 'summary';
@@ -35,16 +34,6 @@ export interface TestEvidence extends ParsedTestEvidence {
   author: string;
   /** When the comment was posted, epoch ms. */
   postedAt: number;
-  /** The evidence covers a commit before one or more merges into the branch. */
-  mergedSince?: boolean;
-}
-
-/** A commit evidence is checked against. */
-export interface EvidenceCommit {
-  sha: string;
-  /** When it was committed, epoch ms; null if GitHub won't say. */
-  committedAt: number | null;
-  parentShas?: string[];
 }
 
 /** Keywords that open a manual test note. */
@@ -76,8 +65,7 @@ export function testEvidenceSourceLabel(source: TestEvidenceSource): string {
 /** "/dp:tester-local by Tom on 2026-10-21" */
 export function describeTestEvidence(evidence: TestEvidence): string {
   const date = new Date(evidence.postedAt).toISOString().split('T')[0];
-  const merged = evidence.mergedSince ? ' (only merges since)' : '';
-  return `${testEvidenceSourceLabel(evidence.source)} by ${evidence.author} on ${date}${merged}`;
+  return `${testEvidenceSourceLabel(evidence.source)} by ${evidence.author} on ${date}`;
 }
 
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
@@ -183,65 +171,6 @@ export function parseTestEvidence(text: string): ParsedTestEvidence | null {
     return note.length >= MIN_MANUAL_NOTE_LENGTH ? { source: 'manual', failed: false } : null;
   }
   return null;
-}
-
-/**
- * The evidence that covers a PR's head: the newest comment that names the head
- * commit, or was posted after it was committed, or tested the head's parent
- * plus uncommitted changes. Null when nothing covers it.
- *
- * The last case is how /dp:tester-local runs before a PR exists: it tests
- * `<parent> + uncommitted`, then the developer commits that work as the head
- * and opens the PR, so the report predates the commit it covers. Only the
- * parent counts — a second commit after the run is untested code.
- *
- * `head.committedAt` null means the commit date couldn't be read — then any
- * evidence counts, since freshness can't be judged.
- */
-export function findCoveringEvidence(
-  evidence: TestEvidence[],
-  head: EvidenceCommit,
-): TestEvidence | null {
-  let best: TestEvidence | null = null;
-  for (const e of evidence) {
-    const namesHead = sameCommit(e.sha, head.sha);
-    const postedAfter = head.committedAt === null || e.postedAt > head.committedAt;
-    const testedBeforeCommit = !!e.uncommitted && (head.parentShas ?? []).some((p) => sameCommit(e.sha, p));
-    if ((namesHead || postedAfter || testedBeforeCommit) && (!best || e.postedAt > best.postedAt)) best = e;
-  }
-  return best;
-}
-
-/**
- * findCoveringEvidence for a head that may be a merge. `chain` is the head,
- * then — while the commit is a merge — its first parent, newest first, ending
- * at the developer's last own commit. Evidence for any of them covers the PR:
- * a merge brings in code tested and reviewed elsewhere (the base, or the PR
- * this one is stacked on). Marked `mergedSince` when it covers a commit before
- * a merge.
- */
-export function findCoveringEvidenceThroughMerges(
-  evidence: TestEvidence[],
-  chain: EvidenceCommit[],
-): TestEvidence | null {
-  let best: TestEvidence | null = null;
-  let mergedSince = false;
-  for (let i = 0; i < chain.length; i++) {
-    const covering = findCoveringEvidence(evidence, chain[i]);
-    if (covering && (!best || covering.postedAt > best.postedAt)) {
-      best = covering;
-      mergedSince = i > 0;
-    }
-  }
-  return best && mergedSince ? { ...best, mergedSince: true } : best;
-}
-
-/** Same commit, either sha possibly abbreviated. */
-function sameCommit(a: string | undefined, b: string | undefined): boolean {
-  if (!a || !b) return false;
-  const x = a.toLowerCase();
-  const y = b.toLowerCase();
-  return x.startsWith(y) || y.startsWith(x);
 }
 
 /**

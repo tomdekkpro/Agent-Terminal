@@ -839,7 +839,7 @@ class AutoCodeOrchestrator {
         throw new Error('Task is Review Failed but has no Code Review findings comment to act on');
       }
       // Failed only because the developer hasn't tested — no code change
-      // fixes that, and a new commit would only void any test evidence.
+      // fixes that.
       if (isTestEvidenceOnlyFailure(reviewFindings.text)) {
         this.emitLog({
           taskId: task.id,
