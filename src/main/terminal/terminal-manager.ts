@@ -11,12 +11,12 @@ import { track } from '../analytics/analytics-service';
 import { sessionUsageTracker } from '../usage/session-usage-tracker';
 
 /** Encode a project path to match Claude Code's project directory naming.
- *  Claude maps `:`, `/`, `\`, AND `.` all to `-` — so e.g.
- *  `D:\proj\.task-worktrees\T-1` becomes `D--proj--task-worktrees-T-1`
- *  (not `D--proj-.task-worktrees-T-1`). Missing the dot mapping previously
- *  caused worktree session lookups to point at a non-existent project dir. */
+ *  Claude maps every non-alphanumeric character to `-` — so e.g.
+ *  `D:\proj\.task-worktrees\T-1` becomes `D--proj--task-worktrees-T-1`,
+ *  `D:\Dekkpro Test` becomes `D--Dekkpro-Test` and `/Users/x/my_app`
+ *  becomes `-Users-x-my-app`. */
 function encodeProjectPath(cwd: string): string {
-  return cwd.replace(/[:/\\.]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /** Get Claude Code's project data directory for a given cwd */
@@ -34,6 +34,11 @@ function buildShellCommand(
   }
   if (shellType === 'bash') {
     return { cdCmd: `cd "${dir}"`, clearCmd: 'clear', separator: ' && ' };
+  }
+  if (process.platform !== 'win32') {
+    // mac/Linux login shell (zsh, bash, fish). Single quotes so `$`, backticks
+    // and spaces in the path are taken literally.
+    return { cdCmd: `cd '${dir.replace(/'/g, `'\\''`)}'`, clearCmd: 'clear', separator: ' && ' };
   }
   return { cdCmd: `cd /d "${dir}"`, clearCmd: 'cls', separator: ' && ' };
 }
@@ -90,17 +95,28 @@ function readClaudeSessionState(file: string): ClaudeSessionState | null {
 export class TerminalManager {
   private terminals: Map<string, TerminalProcess> = new Map();
   private getWindow: WindowGetter;
+  /** Sizes the renderer reported before the PTY existed. The panel mounts and
+   *  fits xterm while the caller is still awaiting branch lookups / worktree
+   *  setup, so its one resize lands here first. Without this the PTY spawns at
+   *  the caller's 80x24 placeholder, xterm's size never changes again, and the
+   *  agent draws into a quarter of the pane until the window is resized. */
+  private pendingSizes: Map<string, { cols: number; rows: number }> = new Map();
 
   constructor(getWindow: WindowGetter) {
     this.getWindow = getWindow;
   }
 
   async create(options: TerminalCreateOptions): Promise<TerminalOperationResult> {
-    const { id, cwd, cols = 80, rows = 24, env: customEnv } = options;
+    const { id, cwd, env: customEnv } = options;
 
     if (this.terminals.has(id)) {
       return { success: true };
     }
+
+    const pending = this.pendingSizes.get(id);
+    this.pendingSizes.delete(id);
+    const cols = pending?.cols ?? options.cols ?? 80;
+    const rows = pending?.rows ?? options.rows ?? 24;
 
     try {
       const { pty: ptyProcess, shellType, cwd: spawnedCwd } = PtyManager.spawnPtyProcess(
@@ -158,6 +174,7 @@ export class TerminalManager {
   }
 
   async destroy(id: string): Promise<TerminalOperationResult> {
+    this.pendingSizes.delete(id);
     const terminal = this.terminals.get(id);
     if (!terminal) {
       return { success: false, error: 'Terminal not found' };
@@ -231,7 +248,12 @@ export class TerminalManager {
 
   resize(id: string, cols: number, rows: number): boolean {
     const terminal = this.terminals.get(id);
-    if (!terminal) return false;
+    if (!terminal) {
+      if (cols > 0 && rows > 0 && Number.isFinite(cols) && Number.isFinite(rows)) {
+        this.pendingSizes.set(id, { cols, rows });
+      }
+      return false;
+    }
     return PtyManager.resizePty(terminal, cols, rows);
   }
 

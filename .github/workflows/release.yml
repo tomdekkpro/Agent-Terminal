@@ -47,6 +47,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # macos-latest is arm64, so npm ci only installs the arm64 node-pty
+      # prebuild. Pull in the x64 one too, or the Intel DMG ships without a
+      # working terminal. --force skips npm's cpu check.
+      - name: Add x64 node-pty prebuild (mac)
+        if: matrix.platform == 'mac'
+        run: npm install --no-save --force @lydell/node-pty-darwin-x64@1.1.0
+
       - name: Build & Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

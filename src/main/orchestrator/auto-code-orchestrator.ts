@@ -19,6 +19,7 @@ import {
 } from '../kanban/kanban-task-store';
 import { broadcastKanbanEvent } from '../ipc/kanban-handlers';
 import { mapClickupStatusToKanban, statusMatchesAny, primaryStatus } from '../../shared/kanban-status-mapper';
+import { isTestEvidenceOnlyFailure } from '../../shared/test-evidence';
 import { recordActivity } from '../activity/activity-store';
 import type { ActivityLevel, CodeReviewFinding } from '../../shared/types';
 
@@ -482,14 +483,28 @@ class AutoCodeOrchestrator {
 
   private async refreshSnapshots(tasks: KanbanTask[]): Promise<void> {
     const settings = getSettings();
+
+    // One batched read for the whole cycle — per-task reads overrun ClickUp's
+    // 100 requests/minute token budget once the board holds ~100 tasks.
+    const batch = await clickUpProvider.getTaskSnapshots(
+      settings,
+      tasks
+        .filter((t) => t.provider !== 'local')
+        .map((t) => ({ taskId: t.clickupTaskId, listId: t.clickupListId })),
+    );
+    const snapshots = batch.success ? batch.data : {};
+
     await Promise.all(
       tasks.map(async (task) => {
         // Local tasks aren't backed by ClickUp.
         if (task.provider === 'local') return;
         try {
-          const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
-          if (!result.success) return;
-          const fresh = result.data;
+          let fresh = snapshots[task.clickupTaskId];
+          if (!fresh) {
+            const result = await clickUpProvider.getTask(settings, task.clickupTaskId);
+            if (!result.success) return;
+            fresh = result.data;
+          }
 
           const snapshotPatch: Partial<KanbanTask> = {
             clickupName: fresh.name,
@@ -505,6 +520,8 @@ class AutoCodeOrchestrator {
             clickupTags: fresh.tags,
             clickupReleaseVersion: fresh.releaseVersion,
             clickupUpdatedAt: fresh.updatedAt,
+            // Remember the list so the next cycle can batch this task.
+            ...(fresh.listId ? { clickupListId: fresh.listId } : {}),
           };
 
           // Auto-map the column when ClickUp status actually changed — only on diff,
@@ -516,8 +533,8 @@ class AutoCodeOrchestrator {
             }
           }
 
-          // Code Review re-run passed → it stamps the "reviewpass" tag (the task
-          // stays in the review status, no status change). For a task we handed
+          // Code Review re-run passed → it stamps the "reviewpass" tag and moves
+          // the task to the pass status ("review pass"). For a task we handed
           // back via review-fix, that tag freshly appearing is the terminal
           // "review passed" signal: clear the badge and record the success.
           const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();
@@ -820,6 +837,17 @@ class AutoCodeOrchestrator {
     } else if (mode === 'review-fix') {
       if (!reviewFindings) {
         throw new Error('Task is Review Failed but has no Code Review findings comment to act on');
+      }
+      // Failed only because the developer hasn't tested — no code change
+      // fixes that.
+      if (isTestEvidenceOnlyFailure(reviewFindings.text)) {
+        this.emitLog({
+          taskId: task.id,
+          message: 'Code Review failed only for missing test evidence — waiting for the developer to test',
+          level: 'info',
+        });
+        this.patch(task.id, { autoCodeState: 'awaiting-review', kanbanStatus: 'review' });
+        return;
       }
     }
 
@@ -1741,7 +1769,7 @@ ${contextSection}${priorSection}
       const child = spawn(agent.command, args, {
         env,
         cwd,
-        shell: true,
+        shell: process.platform === 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 

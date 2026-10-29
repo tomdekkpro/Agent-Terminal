@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { AgentProviderId, TerminalTask } from '../../shared/types';
+import { isLocalTaskId } from '../../shared/utils';
 import { useSettingsStore } from './settings-store';
 import { useProjectStore } from './project-store';
 import { resolveSessionCwd, buildSessionCandidates } from '../lib/resolve-session-cwd';
@@ -26,6 +27,8 @@ export interface Terminal {
   id: string;
   groupId: string;
   title: string;
+  /** True once the user renamed the terminal — auto-titles (agent name) no longer overwrite it */
+  customTitle?: boolean;
   status: TerminalStatus;
   cwd: string;
   createdAt: Date;
@@ -70,6 +73,9 @@ export interface Terminal {
   previewUrl?: string;
   /** Whether the preview panel is currently open */
   previewOpen?: boolean;
+  /** Whether the ClickUp comments panel is currently open (splits the terminal
+   *  the same way previewOpen does). */
+  commentsOpen?: boolean;
 }
 
 // Output callback registry
@@ -114,6 +120,7 @@ function buildSaveableState(state: TerminalState) {
       id: t.id,
       groupId: t.groupId,
       title: t.title,
+      customTitle: t.customTitle,
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
@@ -160,6 +167,7 @@ export function flushTerminalStateSync(): void {
       id: t.id,
       groupId: t.groupId,
       title: t.title,
+      customTitle: t.customTitle,
       cwd: t.cwd,
       projectId: t.projectId,
       isClaudeMode: t.isClaudeMode,
@@ -220,6 +228,8 @@ interface TerminalState {
   discardTerminal: (id: string) => void;
   /** Toggle the preview panel open/closed for a terminal */
   togglePreview: (id: string) => void;
+  /** Toggle the ClickUp comments panel open/closed for a terminal */
+  toggleComments: (id: string) => void;
   /** Set the preview URL for a terminal */
   setPreviewUrl: (id: string, url: string) => void;
   /** Mark a terminal so the global exit listener will run cleanupWorktree. */
@@ -609,6 +619,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             id: t.id,
             groupId: t.groupId,
             title: t.title,
+            customTitle: t.customTitle,
             status: 'idle' as TerminalStatus,
             cwd: t.cwd || '',
             createdAt: new Date(),
@@ -649,12 +660,22 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         }
       }
 
-      // Refresh task status colors from API so tabs reflect current status
-      for (const t of restored) {
-        if (!t.task) continue;
-        window.electronAPI.getTaskManagerTask(t.task.id).then((res: any) => {
-          if (!res.success || !res.data) return;
-          const task = res.data;
+      // Refresh task status colors so tabs reflect current status. One bulk
+      // read, not one request per restored terminal — at 110 task-linked
+      // terminals the per-task version spent more than a minute's entire
+      // request budget during startup, before the user had done anything.
+      void (async () => {
+        const linked = restored.filter((t) => t.task && !isLocalTaskId(t.task.id));
+        if (linked.length === 0) return;
+        const res = await window.electronAPI
+          .getTaskManagerTaskSnapshots?.([...new Set(linked.map((t) => t.task!.id))])
+          .catch(() => null);
+        const snapshots = res?.success ? res.data : null;
+        if (!snapshots) return;
+
+        for (const t of linked) {
+          const task = snapshots[t.task!.id];
+          if (!task) continue;
           const newStatus = task.status.name;
           const newColor = task.status.color;
           const current = get().terminals.find((x) => x.id === t.id);
@@ -665,8 +686,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
               ),
             }));
           }
-        }).catch(() => {});
-      }
+        }
+      })();
 
       return restored;
     } catch {
@@ -904,6 +925,14 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, previewOpen: !t.previewOpen } : t
+      ),
+    }));
+  },
+
+  toggleComments: (id: string) => {
+    set((state) => ({
+      terminals: state.terminals.map((t) =>
+        t.id === id ? { ...t, commentsOpen: !t.commentsOpen } : t
       ),
     }));
   },

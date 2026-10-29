@@ -6,9 +6,9 @@ import type { IpcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { ClaudeSessionEntry } from '../../shared/types';
 
-/** Mirror Claude Code's project dir encoding — `:`, `/`, `\`, and `.` all map to `-`. */
+/** Mirror Claude Code's project dir encoding — every non-alphanumeric character maps to `-`. */
 function encodeProjectPath(cwd: string): string {
-  return cwd.replace(/[:/\\.]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 export function registerClaudeSessionsHandlers(ipcMain: IpcMain): void {

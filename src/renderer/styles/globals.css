@@ -167,3 +167,10 @@
 .no-drag {
   -webkit-app-region: no-drag;
 }
+/* Fixed overlays (modals, lightbox, side sheets, portalled menus) can sit on
+   top of the macOS title strip; drag regions win over whatever covers them,
+   so carve overlays out or their top edge swallows clicks. */
+.fixed,
+[style*="position: fixed"] {
+  -webkit-app-region: no-drag;
+}

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Bot, X, ExternalLink, GitBranch, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Bot, X, ExternalLink, GitBranch, GitFork, GitMerge, GitPullRequest, GitCommitVertical, Play, Square, Clock, Smartphone, Copy, Check, Eraser, ChevronDown, ImagePlus, FileImage, File as FileIcon, Link, GripVertical, RotateCcw, Trash2, Terminal as TerminalIcon, FolderOpen, Eye, EyeOff, ArrowRight, Loader2, Zap, MessageSquare, CheckCircle2, ListTodo, Hash, Pencil, Save, Search } from 'lucide-react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -7,10 +8,13 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import QRCode from 'qrcode';
 import { registerOutputCallback, unregisterOutputCallback, getAndClearSavedBuffer, useTerminalStore, type Terminal } from '../../stores/terminal-store';
 import { useSettingsStore } from '../../stores/settings-store';
+import { useKanbanStore } from '../../stores/kanban-store';
 import type { AgentProviderId, AgentProviderMeta } from '../../../shared/types';
-import { cn } from '../../../shared/utils';
+import { cn, isLocalTaskId } from '../../../shared/utils';
 import { SkillsDropdown } from './SkillsDropdown';
 import { postTimeEntriesByDate } from '../../utils/time-tracking';
+import { isMac, isModKey } from '../../lib/platform';
+import { terminalFontFamily, terminalFontSize } from '../../lib/terminal-font';
 
 /** Compact token formatter — 12345 → "12.3K", 1500000 → "1.5M" */
 function formatTokens(n: number): string {
@@ -29,13 +33,19 @@ function formatElapsed(ms: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** ClickUp "Ready for test" / "ready for testing" — the status /dp:qc-demo picks up. */
+function isReadyForTestStatus(status: string | undefined): boolean {
+  return !!status && /ready\s*for\s*test/i.test(status);
+}
+
 interface TerminalPanelProps {
   terminal: Terminal;
   isActive: boolean;
   isSplit?: boolean;
   agentProviders: AgentProviderMeta[];
   skills?: import('../../../shared/types').ProjectSkill[];
-  onInvokeAgent: (skipPermissions?: boolean) => void;
+  /** `initialPrompt` replaces the task-context first prompt (e.g. a skill command). */
+  onInvokeAgent: (opts?: { skipPermissions?: boolean; mode?: 'worktree' | 'current'; initialPrompt?: string }) => void;
   onProviderChange: (provider: AgentProviderId) => void;
   onInvokeSkill?: (skill: import('../../../shared/types').ProjectSkill) => void;
   onMergeComplete?: () => void;
@@ -213,6 +223,137 @@ export function ActionsDropdown({ terminal, isSplit, onMergeComplete, onMobileRe
  *  Mirrors the Kanban SessionIdEditor — same UUID validation, same display
  *  format (first8…last4), so users get a consistent way to inspect and override
  *  the resume target across both surfaces. */
+/** Status chip + dropdown — change the linked task's ClickUp status straight
+ *  from the terminal toolbar. Statuses come from the Kanban store (the board's
+ *  columns). The write goes through moveTask when the task is on the board so
+ *  the Kanban view stays 1-1 (with its revert-on-reject handling); otherwise
+ *  it falls back to a direct ClickUp status update. */
+function TaskStatusChip({ terminal }: { terminal: Terminal }) {
+  const statuses = useKanbanStore((s) => s.statuses);
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Statuses may not be loaded yet if Terminal was opened before Kanban.
+  useEffect(() => {
+    if (statuses.length === 0) void useKanbanStore.getState().loadStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onScroll = () => setMenu(null);
+    document.addEventListener('mousedown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [menu]);
+
+  const task = terminal.task;
+  if (!task) return null;
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setMenu({ top: r.bottom + 4, left: r.left });
+  };
+
+  const pickStatus = async (e: React.MouseEvent, s: { name: string; color: string }) => {
+    e.stopPropagation();
+    setMenu(null);
+    if (s.name.trim().toLowerCase() === (task.status || '').trim().toLowerCase()) return;
+    setSaving(true);
+    try {
+      const kanban = useKanbanStore.getState();
+      const kanbanTask = kanban.tasks.find((t) => t.clickupTaskId === task.id);
+      let ok = false;
+      if (kanbanTask) {
+        await kanban.moveTask(kanbanTask.id, s.name);
+        const after = useKanbanStore.getState().tasks.find((t) => t.id === kanbanTask.id);
+        ok = (after?.clickupStatus || '').trim().toLowerCase() === s.name.trim().toLowerCase();
+      } else {
+        const result = await window.electronAPI.updateTaskStatus(task.id, s.name);
+        ok = !!result?.success;
+      }
+      if (ok) {
+        const current = useTerminalStore.getState().terminals.find((t) => t.id === terminal.id);
+        if (current?.task) {
+          useTerminalStore.getState().updateTerminal(terminal.id, {
+            task: { ...current.task, status: s.name, statusColor: s.color },
+          });
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={openMenu}
+        disabled={saving || statuses.length === 0}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] shrink-0 hover:opacity-80 transition-opacity disabled:opacity-60"
+        style={{
+          backgroundColor: `${task.statusColor}20`,
+          color: task.statusColor,
+        }}
+        title="Change task status"
+      >
+        {saving ? (
+          <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+        ) : (
+          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: task.statusColor }} />
+        )}
+        <span className="truncate max-w-[100px] uppercase tracking-wide font-medium text-[9px]">{task.status}</span>
+        <ChevronDown className="w-2.5 h-2.5 shrink-0 opacity-60" />
+      </button>
+
+      {/* Portal so the toolbar's overflow doesn't clip the menu */}
+      {menu && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[100] min-w-[180px] max-h-72 overflow-y-auto glass-card border border-[var(--border)] rounded-lg shadow-xl py-1"
+          style={{ top: menu.top, left: menu.left }}
+        >
+          <div className="px-3 py-1 text-[9px] font-display uppercase tracking-wider text-[var(--text-muted)]">
+            Set status
+          </div>
+          {statuses.map((s) => {
+            const active = s.name.trim().toLowerCase() === (task.status || '').trim().toLowerCase();
+            return (
+              <button
+                key={s.name}
+                onClick={(e) => void pickStatus(e, s)}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors',
+                  active && 'bg-[var(--accent-soft)]',
+                )}
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color, boxShadow: `0 0 6px 0 ${s.color}` }} />
+                <span className="truncate flex-1 text-left text-[var(--text-primary)]">{s.name}</span>
+                {active && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: boolean }) {
   const updateTerminal = useTerminalStore((s) => s.updateTerminal);
   const [editing, setEditing] = useState(false);
@@ -347,6 +488,13 @@ function SessionIdChip({ terminal, isSplit }: { terminal: Terminal; isSplit?: bo
   );
 }
 
+/** macOS Terminal.app-style line editing: Cmd+key → readline control code */
+const MAC_LINE_EDIT_KEYS = new Map<string, string>([
+  ['Backspace', '\x15'], // Ctrl+U — kill to start of line
+  ['ArrowLeft', '\x01'], // Ctrl+A — start of line
+  ['ArrowRight', '\x05'], // Ctrl+E — end of line
+]);
+
 const TERMINAL_THEME = {
   background: '#0f0f23',
   foreground: '#e2e8f0',
@@ -382,6 +530,26 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   const bufferRef = useRef<string[]>([]);
   const needsResumRef = useRef(terminal.needsResume ?? false);
 
+  // ClickUp comments open beside the terminal, exactly like Changes: the flag
+  // lives on the terminal (so it survives tab switches) and the parent surface
+  // renders CommentsSplitLayout around this panel.
+  const commentsOpen = !!terminal.commentsOpen;
+  const taskCommentsAvailable = !!terminal.task && !isLocalTaskId(terminal.task.id) && !hideToolbar;
+
+  // Suggest /dp:qc-demo for a task sitting in "Ready for test" before the
+  // agent starts — in the Terminal page and the Kanban task modal alike.
+  // Claude-only — dp:qc-demo is a Claude Code plugin skill.
+  const [qcSuggestDismissed, setQcSuggestDismissed] = useState(false);
+  const showQcSuggest =
+    !qcSuggestDismissed &&
+    !!terminal.task &&
+    !isLocalTaskId(terminal.task.id) &&
+    terminal.agentProvider === 'claude' &&
+    !terminal.isClaudeMode &&
+    !terminal.isResuming &&
+    !terminal.needsResume &&
+    isReadyForTestStatus(terminal.task.status);
+
   // Drag and drop state
   const [isDragOver, setIsDragOver] = useState(false);
   interface DroppedFile { name: string; path: string; isImage: boolean; thumbnailUrl?: string; }
@@ -392,6 +560,14 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
   // Provider dropdown
   const [showProviderMenu, setShowProviderMenu] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement>(null);
+
+  // Start / YOLO mode dropdowns (worktree vs current branch, chosen at launch)
+  const [startMenu, setStartMenu] = useState<null | 'start' | 'yolo'>(null);
+  const startMenuRef = useRef<HTMLDivElement>(null);
+  const yoloMenuRef = useRef<HTMLDivElement>(null);
+  // Primary Start/YOLO always runs on the current branch; a worktree is opt-in
+  // per launch via the dropdown.
+  const startDefaultWorktree = false;
 
   const initObserverRef = useRef<ResizeObserver | null>(null);
 
@@ -487,6 +663,85 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
     return () => document.removeEventListener('mousedown', handler);
   }, [showProviderMenu]);
 
+  // Close start / yolo dropdowns on outside click
+  useEffect(() => {
+    if (!startMenu) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (startMenuRef.current?.contains(t) || yoloMenuRef.current?.contains(t)) return;
+      setStartMenu(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [startMenu]);
+
+  // Split "Start" / "YOLO" control: primary click uses the task's default
+  // (current branch unless a worktree was explicitly chosen); the caret picks
+  // worktree vs current branch for this launch. YOLO adds skip-permissions.
+  const renderStartControl = (kind: 'start' | 'yolo') => {
+    const isYolo = kind === 'yolo';
+    const color = isYolo ? '#fbbf24' : (currentProvider?.color || '#6366f1');
+    const bg = isYolo ? '#f59e0b20' : `${currentProvider?.color || '#6366f1'}20`;
+    const label = isYolo ? 'YOLO' : 'Start';
+    const invoke = (mode?: 'worktree' | 'current') => onInvokeAgent({ mode, skipPermissions: isYolo });
+    const open = startMenu === kind;
+    return (
+      <div className="relative flex" ref={isYolo ? yoloMenuRef : startMenuRef}>
+        <button
+          onClick={(e) => { e.stopPropagation(); invoke(); }}
+          className="flex items-center gap-1.5 pl-2.5 pr-2 py-1 rounded-l-md text-xs transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title={`${label} ${startDefaultWorktree ? 'in an isolated worktree' : 'on the current branch'}${isYolo ? ' (skip permissions)' : ''}`}
+        >
+          <Bot className="w-3.5 h-3.5" />
+          {!isSplit && (<>{label}<span className="opacity-70">{startDefaultWorktree ? '· worktree' : '· branch'}</span></>)}
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); setStartMenu(open ? null : kind); }}
+          className="flex items-center px-1 py-1 rounded-r-md text-xs border-l border-black/20 transition-colors"
+          style={{ backgroundColor: bg, color }}
+          title="Choose how to start"
+        >
+          <ChevronDown className="w-3 h-3" />
+        </button>
+        {open && (
+          <div className="absolute right-0 top-full mt-1 z-50 w-60 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl overflow-hidden">
+            <button
+              onClick={(e) => { e.stopPropagation(); setStartMenu(null); invoke('current'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+            >
+              <GitBranch className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} on current branch
+                  {!startDefaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Runs on the project's checked-out branch.
+                </span>
+              </span>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setStartMenu(null); invoke('worktree'); }}
+              className="w-full flex items-start gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors text-left border-t border-[var(--border)]"
+            >
+              <GitFork className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 font-medium">
+                  {label} in worktree
+                  {startDefaultWorktree && <Check className="w-3 h-3 text-[var(--accent)]" />}
+                </span>
+                <span className="block text-[10px] opacity-70 mt-0.5 leading-snug">
+                  Isolated branch, forked from base.
+                </span>
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // Close base branch dropdown on outside click
   useEffect(() => {
     if (!showBaseBranchMenu) return;
@@ -565,11 +820,12 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
         initObserverRef.current = null;
       }
 
+      const fontSettings = useSettingsStore.getState().settings;
       const xterm = new XTerm({
         cursorBlink: true,
         cursorStyle: 'block',
-        fontSize: 14,
-        fontFamily: 'Cascadia Code, Consolas, Courier New, monospace',
+        fontSize: terminalFontSize(fontSettings),
+        fontFamily: terminalFontFamily(fontSettings),
         lineHeight: 1.2,
         theme: TERMINAL_THEME,
         allowProposedApi: true,
@@ -671,6 +927,42 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           return false;
         }
 
+        // macOS: Cmd copies/pastes and Ctrl belongs to the shell — Ctrl+C is
+        // always SIGINT and Ctrl+V reaches the pty, selection or not. Every
+        // other Cmd combo returns true so it bubbles up to the app shortcuts.
+        if (isMac) {
+          if (event.type !== 'keydown' || !isModKey(event) || event.altKey) return true;
+          const key = event.key;
+
+          if (key === 'c' || key === 'C') {
+            if (xterm.hasSelection()) {
+              const selection = xterm.getSelection();
+              if (selection) navigator.clipboard.writeText(selection);
+              event.preventDefault();
+              return false;
+            }
+            return true;
+          }
+
+          if (key === 'v' || key === 'V') {
+            // Let the native paste (the Edit menu's Paste role) through —
+            // xterm takes it from its textarea's paste event. Pasting here too
+            // would race the menu and paste twice.
+            return false;
+          }
+
+          // Terminal.app line editing: Cmd+Backspace kills to line start,
+          // Cmd+Left/Right jump to start/end of line
+          const lineEdit = event.shiftKey ? undefined : MAC_LINE_EDIT_KEYS.get(key);
+          if (lineEdit) {
+            event.preventDefault();
+            xterm.input(lineEdit);
+            return false;
+          }
+
+          return true;
+        }
+
         if (isMod && (event.key === 'c' || event.key === 'C') && event.type === 'keydown') {
           if (xterm.hasSelection()) {
             const selection = xterm.getSelection();
@@ -720,6 +1012,21 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
       if (xtermRef.current) { xtermRef.current.dispose(); xtermRef.current = null; }
     };
   }, [terminal.id, terminal.needsRestore]);
+
+  // Apply font changes from Settings to the live terminal, then re-fit since
+  // the cell size (and so cols/rows) changes with it
+  const fontFamily = useSettingsStore((s) => terminalFontFamily(s.settings));
+  const fontSize = useSettingsStore((s) => terminalFontSize(s.settings));
+  useEffect(() => {
+    const xterm = xtermRef.current;
+    if (!xterm) return;
+    if (xterm.options.fontFamily === fontFamily && xterm.options.fontSize === fontSize) return;
+    xterm.options.fontFamily = fontFamily;
+    xterm.options.fontSize = fontSize;
+    try {
+      if (readyRef.current) fitAddonRef.current?.fit();
+    } catch { /* xterm renderer not ready yet */ }
+  }, [fontFamily, fontSize]);
 
   // Fit on visibility change
   useEffect(() => {
@@ -914,7 +1221,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   const trimmed = editTitle.trim();
-                  if (trimmed) updateTerminal(terminal.id, { title: trimmed });
+                  if (trimmed) updateTerminal(terminal.id, { title: trimmed, customTitle: true });
                   setIsEditingTitle(false);
                 } else if (e.key === 'Escape') {
                   setIsEditingTitle(false);
@@ -922,7 +1229,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               }}
               onBlur={() => {
                 const trimmed = editTitle.trim();
-                if (trimmed) updateTerminal(terminal.id, { title: trimmed });
+                if (trimmed) updateTerminal(terminal.id, { title: trimmed, customTitle: true });
                 setIsEditingTitle(false);
               }}
               autoFocus
@@ -964,6 +1271,7 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-60" />
             </button>
           )}
+          {terminal.task && <TaskStatusChip terminal={terminal} />}
           {terminal.worktreePath && (
             <span
               className={cn(
@@ -1168,29 +1476,39 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
               {skills && skills.length > 0 && onInvokeSkill && (
                 <SkillsDropdown skills={skills} onInvokeSkill={onInvokeSkill} />
               )}
-              {/* Start button */}
-              <button
-                onClick={(e) => { e.stopPropagation(); onInvokeAgent(); }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
-                style={{
-                  backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
-                  color: currentProvider?.color || '#6366f1',
-                }}
-                title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
-              >
-                <Bot className="w-3.5 h-3.5" />
-                {!isSplit && 'Start'}
-              </button>
-              {/* YOLO button — only for agents with yolo capability */}
-              {currentProvider?.capabilities.yolo && (
+              {/* Start button — for Claude task terminals a split button whose
+                  caret picks worktree vs current branch at launch. */}
+              {terminal.agentProvider === 'claude' && terminal.task ? (
+                renderStartControl('start')
+              ) : (
                 <button
-                  onClick={(e) => { e.stopPropagation(); onInvokeAgent(true); }}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
-                  title={`Start ${currentProvider.displayName} (skip permissions)`}
+                  onClick={(e) => { e.stopPropagation(); onInvokeAgent(); }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs transition-colors"
+                  style={{
+                    backgroundColor: `${currentProvider?.color || '#6366f1'}20`,
+                    color: currentProvider?.color || '#6366f1',
+                  }}
+                  title={`Start ${currentProvider?.displayName || terminal.agentProvider}`}
                 >
                   <Bot className="w-3.5 h-3.5" />
-                  {!isSplit && 'YOLO'}
+                  {!isSplit && 'Start'}
                 </button>
+              )}
+              {/* YOLO button — same worktree/current split as Start; only for
+                  agents with yolo capability. */}
+              {currentProvider?.capabilities.yolo && (
+                terminal.agentProvider === 'claude' && terminal.task ? (
+                  renderStartControl('yolo')
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onInvokeAgent({ skipPermissions: true }); }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
+                    title={`Start ${currentProvider.displayName} (skip permissions)`}
+                  >
+                    <Bot className="w-3.5 h-3.5" />
+                    {!isSplit && 'YOLO'}
+                  </button>
+                )
               )}
             </>
           )}
@@ -1232,6 +1550,25 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
                 {!isSplit && 'Clear'}
               </button>
             </>
+          )}
+          {/* ClickUp comments */}
+          {taskCommentsAvailable && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                useTerminalStore.getState().toggleComments(terminal.id);
+              }}
+              className={cn(
+                'flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors',
+                commentsOpen
+                  ? 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
+                  : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/80',
+              )}
+              title={commentsOpen ? 'Close comments' : 'ClickUp comments — read the thread, reply, get AI drafts'}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              {!isSplit && 'Comments'}
+            </button>
           )}
           {/* Changes toggle */}
           <button
@@ -1457,6 +1794,14 @@ export function TerminalPanel({ terminal, isActive, isSplit, agentProviders, ski
           {terminal.needsResume && (
             <ResumeBanner terminal={terminal} />
           )}
+          {showQcSuggest && terminal.task && (
+            <QcDemoSuggestBanner
+              taskLabel={terminal.task.customId || terminal.task.id}
+              status={terminal.task.status}
+              onRun={() => onInvokeAgent({ initialPrompt: `/dp:qc-demo ${terminal.task!.customId || terminal.task!.id}` })}
+              onDismiss={() => setQcSuggestDismissed(true)}
+            />
+          )}
         </div>
       )}
     </div>
@@ -1543,6 +1888,45 @@ function RestoreBanner({ terminal }: { terminal: Terminal }) {
         <p className="text-[10px] text-[var(--text-muted)] opacity-60">
           Previous session from last run
         </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── QC Demo Suggest Banner (overlay on terminal) ─────────────
+
+function QcDemoSuggestBanner({ taskLabel, status, onRun, onDismiss }: {
+  taskLabel: string;
+  status: string;
+  onRun: () => void;
+  onDismiss: () => void;
+}) {
+  const command = `/dp:qc-demo ${taskLabel}`;
+  return (
+    <div className="absolute inset-x-0 bottom-0 z-10 pointer-events-none">
+      <div className="bg-gradient-to-t from-[#0f0f23] via-[#0f0f23]/95 to-transparent pt-8 pb-4 px-4 pointer-events-auto">
+        <div className="flex items-center justify-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+            <CheckCircle2 className="w-4 h-4 text-teal-400" />
+            <span>
+              Task is <span className="text-[var(--text-secondary)]">{status}</span> — QC it on demo with{' '}
+              <code className="font-mono text-teal-300">{command}</code>
+            </span>
+          </div>
+          <button
+            onClick={onDismiss}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:border-[var(--text-muted)] transition-colors"
+          >
+            Dismiss
+          </button>
+          <button
+            onClick={onRun}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-500/20 text-teal-300 text-xs font-medium hover:bg-teal-500/30 transition-colors"
+            title={`Start Claude and run ${command}`}
+          >
+            <Play className="w-3.5 h-3.5" /> Run QC
+          </button>
+        </div>
       </div>
     </div>
   );

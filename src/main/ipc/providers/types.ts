@@ -1,4 +1,12 @@
-import type { AppSettings, TaskManagerTask, TaskManagerList, TaskSearchFilters } from '../../../shared/types';
+import type {
+  AppSettings,
+  TaskManagerTask,
+  TaskManagerList,
+  TaskSearchFilters,
+  TaskComment,
+  TaskCommentCursor,
+  TaskCommentThread,
+} from '../../../shared/types';
 
 export type ProviderResult<T> =
   | { success: true; data: T }
@@ -43,11 +51,40 @@ export interface ITaskManagerProvider {
 
   getComments?(settings: AppSettings, taskId: string): Promise<ProviderResult<any[]>>;
 
+  /** Normalized comment thread (oldest first) for the comments panel, paged
+   *  backwards through `before`. Distinct from getComments, which hands back
+   *  the provider's raw payload for the automation that greps it. */
+  getTaskComments?(
+    settings: AppSettings,
+    taskId: string,
+    opts?: { before?: TaskCommentCursor | null; background?: boolean; maxPages?: number },
+  ): Promise<ProviderResult<TaskCommentThread>>;
+
+  getCommentReplies?(
+    settings: AppSettings,
+    commentId: string,
+    opts?: { background?: boolean },
+  ): Promise<ProviderResult<TaskComment[]>>;
+
+  postCommentReply?(
+    settings: AppSettings,
+    commentId: string,
+    comment: string,
+    taskId?: string,
+  ): Promise<ProviderResult<any>>;
+
   getTaskStatuses?(settings: AppSettings, taskId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
 
   getListStatuses?(settings: AppSettings, listId: string): Promise<ProviderResult<{ name: string; color: string }[]>>;
 
   getWorkspaceMembers?(settings: AppSettings): Promise<ProviderResult<WorkspaceMember[]>>;
+
+  /** Resolve many tasks in as few requests as possible, keyed by task id.
+   *  Tasks the bulk read cannot see are simply absent from the result. */
+  getTaskSnapshots?(
+    settings: AppSettings,
+    refs: Array<{ taskId: string; listId?: string }>,
+  ): Promise<ProviderResult<Record<string, TaskManagerTask>>>;
 }
 
 export interface WorkspaceMember {
@@ -57,4 +94,6 @@ export interface WorkspaceMember {
   initials?: string;
   color?: string;
   profilePicture?: string;
+  /** ms epoch of the member's last activity in ClickUp, when it reports one. */
+  lastActiveMs?: number;
 }

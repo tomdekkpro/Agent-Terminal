@@ -140,7 +140,9 @@ Generate 3-8 test cases covering:
       '--dangerously-skip-permissions',
     ], {
       env,
-      shell: true,
+      // A Finder-launched mac app's cwd is the read-only `/`
+      cwd: app.getPath('userData'),
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -342,7 +344,12 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
       '--dangerously-skip-permissions',
     ], {
       env,
-      shell: true,
+      // Playwright MCP writes screenshots to ./.playwright-mcp — keep that in
+      // the session dir (a Finder-launched mac app's cwd is the read-only `/`)
+      cwd: screenshotDir,
+      shell: process.platform === 'win32',
+      // Own process group on mac/Linux so abort can kill Playwright + Chrome too
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -405,7 +412,8 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
         || content.match(/([A-Za-z]:[\\/][^\s)\]"]+\.(?:png|jpg|jpeg))/i)
         || content.match(/([\\/][^\s)\]"]+\.(?:png|jpg|jpeg))/i)
         || content.match(/(playwright[^\s)\]"]*\.(?:png|jpg|jpeg))/i);
-      return match ? match[0] : undefined;
+      // Relative paths are relative to the claude process's cwd
+      return match ? path.resolve(screenshotDir, match[0]) : undefined;
     };
 
     // Save base64 image data to a file and return the path
@@ -577,6 +585,7 @@ IMPORTANT: Actually use the browser tools to navigate and interact with the page
         const files: string[] = [];
         // Check common Playwright MCP screenshot locations
         const searchDirs = [
+          path.join(screenshotDir, '.playwright-mcp'),
           path.join(process.cwd(), '.playwright-mcp'),
           path.join(process.env.HOME || process.env.USERPROFILE || '', '.playwright-mcp'),
           screenshotDir,
