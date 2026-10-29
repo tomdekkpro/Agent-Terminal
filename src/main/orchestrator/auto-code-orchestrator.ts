@@ -533,8 +533,8 @@ class AutoCodeOrchestrator {
             }
           }
 
-          // Code Review re-run passed → it stamps the "reviewpass" tag (the task
-          // stays in the review status, no status change). For a task we handed
+          // Code Review re-run passed → it stamps the "reviewpass" tag and moves
+          // the task to the pass status ("review pass"). For a task we handed
           // back via review-fix, that tag freshly appearing is the terminal
           // "review passed" signal: clear the badge and record the success.
           const tagName = (settings.codeReviewTagName || 'reviewpass').toLowerCase();

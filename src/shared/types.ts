@@ -502,6 +502,8 @@ export interface AppSettings {
   codeReviewStatuses: string;
   codeReviewProjectPath: string;
   codeReviewTagName: string;
+  /** ClickUp status a task moves to when its review passes. Empty = leave the status alone. */
+  codeReviewPassStatus: string;
   /** Merge a PR as soon as its AI review passes — still subject to the release-branch check. */
   codeReviewAutoMerge: boolean;
   /** A review only passes when the task has test evidence for the PR's head —
@@ -1375,6 +1377,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeReviewStatuses: 'ready for review, in review, review',
   codeReviewProjectPath: '',
   codeReviewTagName: 'reviewpass',
+  codeReviewPassStatus: 'review pass',
   codeReviewAutoMerge: false,
   codeReviewRequireTestEvidence: true,
   codeReviewLinkedRepos: 'Dekkpro/customerweb, Dekkpro/dekkpro-webshop',

@@ -260,6 +260,19 @@ function testedLine(testedBy: string | null | undefined): string {
   return testedBy ? `\nTested: ${testedBy}.` : '';
 }
 
+/** A passed review: the pass tag (what the scheduler skips on) and the pass
+ *  status. Failures are only logged — the review itself already passed. */
+async function markReviewPassed(settings: AppSettings, taskId: string): Promise<void> {
+  const tagName = settings.codeReviewTagName || 'reviewpass';
+  const status = (settings.codeReviewPassStatus ?? 'review pass').trim();
+  const tag = await clickUpProvider.addTag(settings, taskId, tagName);
+  if (!tag.success) debugError(`[CodeReview] Failed to add "${tagName}" tag to ${taskId}:`, tag.error);
+  if (!status) return;
+  const res = await clickUpProvider.updateStatus(settings, taskId, status);
+  if (res.success) debugLog(`[CodeReview] Task ${taskId} status changed to "${status}"`);
+  else debugError(`[CodeReview] Failed to set status "${status}" on ${taskId}:`, res.error);
+}
+
 function sendReviewEvent(getWindow: () => BrowserWindow | null, event: CodeReviewEvent) {
   const win = getWindow();
   if (win && !win.isDestroyed()) {
@@ -1991,7 +2004,7 @@ async function runAutoReviewCycle(getWindow: () => BrowserWindow | null): Promis
 
       // Update task status based on combined results of all PRs
       if (allPassed && prs.length > 0) {
-        await clickUpProvider.addTag(settings, task.id, tagName);
+        await markReviewPassed(settings, task.id);
         clearAllSessionsForTask(task.id);
         // Read live so flipping the toggle mid-cycle takes effect. All the
         // task's PRs go together, so a fix split across repos lands whole.
@@ -2198,9 +2211,8 @@ export function registerCodeReviewHandlers(
           sendReviewEvent(getWindow, { type: 'done', taskId, status: 'passed' });
           // Submit the approval
           const settings = getSettings();
-          const tagName = settings.codeReviewTagName || 'reviewpass';
           const testedBy = tested.evidence ? describeTestEvidence(tested.evidence) : undefined;
-          await clickUpProvider.addTag(settings, taskId, tagName);
+          await markReviewPassed(settings, taskId);
           await clickUpProvider.postComment(
             settings,
             taskId,
@@ -2287,14 +2299,10 @@ export function registerCodeReviewHandlers(
       try {
         const settings = getSettings();
         const target = await resolveTarget(projectPath, prRepo);
-        const tagName = settings.codeReviewTagName || 'reviewpass';
         const comment = formatReviewComment(prTitle, findings, passed);
 
         if (passed) {
-          const tagResult = await clickUpProvider.addTag(settings, taskId, tagName);
-          if (!tagResult.success) {
-            debugError('[CodeReview] Failed to add tag:', tagResult.error);
-          }
+          await markReviewPassed(settings, taskId);
           await clickUpProvider.postComment(settings, taskId, `✅ Code Review Passed — ${prLabel(target, prNumber)} reviewed automatically. No significant issues found.${testedLine(testedBy)}\n\n_Automated by Agent Terminal_`);
           // Clear the review session — no longer needed
           clearReviewSession(taskId, prNumber, target.repo);
@@ -2332,14 +2340,9 @@ export function registerCodeReviewHandlers(
     async (_event, projectPath: string, taskId: string, prNumber: number, prTitle: string, prRepo?: string) => {
       try {
         const settings = getSettings();
-        const tagName = settings.codeReviewTagName || 'reviewpass';
         const target = await resolveTarget(projectPath, prRepo);
 
-        // Add reviewpass tag
-        const tagResult = await clickUpProvider.addTag(settings, taskId, tagName);
-        if (!tagResult.success) {
-          debugError('[CodeReview] Force approve — failed to add tag:', tagResult.error);
-        }
+        await markReviewPassed(settings, taskId);
 
         // Post approval comment on ClickUp
         await clickUpProvider.postComment(

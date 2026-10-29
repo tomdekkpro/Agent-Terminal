@@ -871,6 +871,19 @@ function SchedulerPanel({ projectPath, release }: { projectPath: string; release
             <p className="text-[11px] text-[var(--text-muted)] mt-1">Tag added to tasks that pass review. Must exist in ClickUp space.</p>
           </div>
 
+          {/* Pass status */}
+          <div>
+            <label className="block text-xs text-[var(--text-secondary)] mb-1.5">Pass Status</label>
+            <input
+              type="text"
+              value={settings.codeReviewPassStatus ?? 'review pass'}
+              onChange={(e) => handleSettingChange('codeReviewPassStatus', e.target.value)}
+              placeholder="review pass"
+              className="w-full text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border)] rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] placeholder:text-[var(--text-muted)]"
+            />
+            <p className="text-[11px] text-[var(--text-muted)] mt-1">ClickUp status tasks move to when they pass review. Must exist in the list. Leave empty to keep the status.</p>
+          </div>
+
           {/* Merge — read at merge time, so no scheduler restart needed */}
           <div className="pt-3 border-t border-[var(--border)] space-y-3">
             <div className="flex items-center gap-1.5 text-xs font-medium text-[var(--text-primary)]">
