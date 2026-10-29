@@ -930,7 +930,49 @@ type MergeOutcome = {
   /** The success message when merged, otherwise why not. */
   message: string;
   baseBranch?: string;
+  /** The PR's head branch, when it was deleted after the merge. */
+  deletedBranch?: string;
 };
+
+/** Branches a merge must never delete, whatever the PR's head says. */
+const KEPT_BRANCHES = new Set(['main', 'master', 'develop']);
+
+/**
+ * Delete a merged PR's head branch on GitHub, as the "Delete branch" button
+ * does. Only the remote branch: the local checkout and worktrees are left
+ * alone. Skipped for a fork's branch (not ours to delete), a long-lived
+ * branch, and a branch another open PR still uses as its head.
+ *
+ * Returns the deleted branch name, or null when it was kept. Never throws —
+ * the merge already happened, so a failure here is only logged.
+ */
+async function deleteMergedHeadBranch(target: RepoTarget, pr: any): Promise<string | null> {
+  const head = String(pr.headRefName || '');
+  const releasePrefix = getSettings().codeReviewReleaseBranchPrefix || 'Releases/';
+  if (!head || pr.isCrossRepository || KEPT_BRANCHES.has(head.toLowerCase()) || head.startsWith(releasePrefix)) return null;
+  const label = prLabel(target, pr.number);
+  try {
+    const others = JSON.parse(await ghRun(
+      ['pr', 'list', ...repoArgs(target), '--head', head, '--state', 'open', '--json', 'number'],
+      target.cwd,
+    )) as Array<{ number: number }>;
+    if (others.some((o) => o.number !== pr.number)) {
+      debugLog(`[CodeReview] Kept branch "${head}" of ${label}: another open PR uses it`);
+      return null;
+    }
+    // `{owner}/{repo}` is filled in by gh from cwd when the slug is unknown.
+    const repo = target.repo ?? '{owner}/{repo}';
+    await ghRun(['api', '-X', 'DELETE', `repos/${repo}/git/refs/heads/${head.split('/').map(encodeURIComponent).join('/')}`], target.cwd);
+    debugLog(`[CodeReview] Deleted branch "${head}" of ${label}`);
+    return head;
+  } catch (err) {
+    // 422 "Reference does not exist": GitHub's auto-delete got there first.
+    const message = ghErrorMessage(err);
+    if (/Reference does not exist/i.test(message)) return head;
+    debugLog(`[CodeReview] Couldn't delete branch "${head}" of ${label}: ${message}`);
+    return null;
+  }
+}
 
 /** PRs with a merge in flight, so a double click or a scheduler cycle racing
  *  the button can't merge (or comment) twice. */
@@ -983,7 +1025,7 @@ async function mergeTaskPullRequests(
       sendReviewEvent(getWindow, { type: 'merge', taskId, prNumber: e.req.prNumber, prRepo: e.target.repo ?? undefined, mergeStatus: 'merging' });
       try {
         e.pr = JSON.parse(await ghRun(
-          ['pr', 'view', String(e.req.prNumber), ...repoArgs(e.target), '--json', 'number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,statusCheckRollup'],
+          ['pr', 'view', String(e.req.prNumber), ...repoArgs(e.target), '--json', 'number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,isCrossRepository,mergeable,statusCheckRollup'],
           e.target.cwd,
         ));
         const blocked = await checkMergeReadiness(projectPath, e.target, taskId, e.pr, e.req.reviewedHeadSha);
@@ -1024,6 +1066,11 @@ async function mergeTaskPullRequests(
           }
           break;
         }
+        const deleted = await deleteMergedHeadBranch(e.target, e.pr);
+        if (deleted) {
+          e.outcome.deletedBranch = deleted;
+          e.outcome.message += ` Deleted branch ${deleted}.`;
+        }
       }
     }
   } catch (err) {
@@ -1046,7 +1093,7 @@ async function mergeTaskPullRequests(
       await clickUpProvider.postComment(
         settings,
         taskId,
-        `🔀 ${label(e)} merged into \`${outcome.baseBranch}\` (${method})${options.auto ? ' automatically after the code review passed' : ''}.\n\n_Automated by Agent Terminal_`,
+        `🔀 ${label(e)} merged into \`${outcome.baseBranch}\` (${method})${options.auto ? ' automatically after the code review passed' : ''}.${outcome.deletedBranch ? ` Branch \`${outcome.deletedBranch}\` deleted.` : ''}\n\n_Automated by Agent Terminal_`,
       ).catch(() => {});
       recordActivity({
         source: 'code-review',
